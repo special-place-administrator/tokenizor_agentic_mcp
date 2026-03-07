@@ -1,6 +1,6 @@
 # Story 2.3: Persist File-Level Indexing Outputs and Symbol/File Metadata for the Initial Quality-Focus Language Set
 
-Status: review
+Status: done
 
 ## Story
 
@@ -270,6 +270,7 @@ No debug issues encountered. Clean implementation following build order.
 ### Change Log
 
 - 2026-03-07: Implemented Story 2.3 — file-level indexing output persistence with CAS blob storage, commit-time validation, and registry persistence. Total test count: 180 (baseline was 143).
+- 2026-03-07: Code review found 8 issues (2H, 3M, 3L). Fixed H1 (deleted no-op regression test), H2 (added CAS systemic abort pipeline test), M1 (added Failed outcome integration test), M2 (propagate save_file_records failure into run error_summary), L2 (HashMap→BTreeMap for deterministic JSON). Total test count: 181.
 
 ### File List
 
@@ -283,3 +284,26 @@ No debug issues encountered. Clean implementation following build order.
 - `src/application/run_manager.rs` — Updated `launch_run` to accept `blob_store`, batch-save file records after pipeline
 - `src/application/mod.rs` — Updated `launch_indexing` to pass `blob_store` from `ApplicationContext`
 - `tests/indexing_integration.rs` — Added 7 Story 2.3 integration tests, refactored setup helper
+
+## Senior Developer Review (AI)
+
+**Reviewer:** Claude Opus 4.6 | **Date:** 2026-03-07 | **Outcome:** Approved with fixes applied
+
+### Findings Summary
+
+| ID | Severity | Description | Resolution |
+|----|----------|-------------|------------|
+| H1 | HIGH | `test_total_test_count_does_not_regress` was a no-op (`assert!(true)`) | Deleted — regression verified by CI/humans via cargo test output |
+| H2 | HIGH | CAS systemic error pipeline abort path had no test | Added `test_pipeline_cas_systemic_error_aborts_via_circuit_breaker` |
+| M1 | MEDIUM | No integration test for `PersistedFileOutcome::Failed` with error message (Task 7.3) | Added `test_failed_file_produces_failed_outcome_in_persisted_records` with `FailingBlobStore` |
+| M2 | MEDIUM | `save_file_records` failure silently ignored — run still marked Succeeded | Propagate error into `error_summary` via merged summary in `launch_run` |
+| M3 | MEDIUM | CAS root not probed at pipeline start (dev notes prescribe it) | Accepted — first file catches it, circuit breaker handles immediately |
+| L1 | LOW | `result.clone()` in pipeline — unnecessary `FileProcessingResult` allocation | Noted — `commit_file_result` could take `&FileProcessingResult` |
+| L2 | LOW | `HashMap` vs `BTreeMap` inconsistency in `RegistryData.run_file_records` | Fixed — changed to `BTreeMap` for deterministic JSON output |
+| L3 | LOW | Blocking I/O in async context for CAS writes | Noted — acceptable given bounded concurrency semaphore |
+
+### AC Validation
+
+- **AC1** (durable file records linked to context): IMPLEMENTED — `FileRecord` has `run_id`, `repo_id`, `committed_at_unix_ms`; workspace linkage is implicit through calling code
+- **AC2** (explicit file-level outcomes): IMPLEMENTED — `EmptySymbols`, `Failed`, `Quarantined` all mapped correctly; no silent trust claims
+- **AC3** (only quality-focus languages): IMPLEMENTED — language guard in `commit_file_result` + discovery filter

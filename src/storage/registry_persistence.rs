@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -32,7 +32,7 @@ pub(crate) struct RegistryData {
     #[serde(default)]
     pub idempotency_records: Vec<IdempotencyRecord>,
     #[serde(default)]
-    pub run_file_records: HashMap<String, Vec<FileRecord>>,
+    pub run_file_records: BTreeMap<String, Vec<FileRecord>>,
 }
 
 pub struct RegistryPersistence {

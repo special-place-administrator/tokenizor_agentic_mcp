@@ -462,4 +462,71 @@ mod tests {
         assert_eq!(result.results.len(), 1);
         assert!(result.file_records.is_empty());
     }
+
+    #[tokio::test]
+    async fn test_pipeline_cas_systemic_error_aborts_via_circuit_breaker() {
+        use std::path::Path;
+
+        use crate::domain::ComponentHealth;
+        use crate::error::TokenizorError;
+        use crate::storage::StoredBlob;
+
+        struct SystemicFailCas {
+            root: PathBuf,
+        }
+
+        impl BlobStore for SystemicFailCas {
+            fn backend_name(&self) -> &'static str {
+                "systemic_fail"
+            }
+
+            fn root_dir(&self) -> &Path {
+                &self.root
+            }
+
+            fn initialize(&self) -> crate::error::Result<ComponentHealth> {
+                unreachable!("initialize not needed in systemic fail test")
+            }
+
+            fn health_check(&self) -> crate::error::Result<ComponentHealth> {
+                unreachable!("health_check not needed in systemic fail test")
+            }
+
+            fn store_bytes(&self, _bytes: &[u8]) -> crate::error::Result<StoredBlob> {
+                Err(TokenizorError::Storage("CAS write error".into()))
+            }
+
+            fn read_bytes(&self, _blob_id: &str) -> crate::error::Result<Vec<u8>> {
+                unreachable!("read_bytes not needed in systemic fail test")
+            }
+        }
+
+        let repo_dir = temp_repo_with_files(&[
+            ("main.rs", "fn main() {}"),
+            ("lib.py", "def foo(): pass"),
+            ("app.go", "package main\nfunc main() {}"),
+        ]);
+
+        // CAS root doesn't exist → commit_file_result returns systemic Storage error
+        let cas: Arc<dyn BlobStore> = Arc::new(SystemicFailCas {
+            root: PathBuf::from("/nonexistent/cas/root"),
+        });
+
+        let pipeline = IndexingPipeline::new("test-systemic".into(), repo_dir.path().to_path_buf())
+            .with_cas(cas, "repo-1".to_string())
+            .with_concurrency(1);
+        let result = pipeline.execute().await;
+
+        assert_eq!(result.status, IndexRunStatus::Aborted);
+        assert!(result.error_summary.is_some());
+        assert!(
+            result
+                .error_summary
+                .as_ref()
+                .unwrap()
+                .contains("circuit breaker")
+        );
+        // No file records should exist — systemic CAS error prevents record creation
+        assert!(result.file_records.is_empty());
+    }
 }

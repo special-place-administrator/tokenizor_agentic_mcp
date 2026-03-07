@@ -1,11 +1,47 @@
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokenizor_agentic_mcp::config::BlobStoreConfig;
-use tokenizor_agentic_mcp::domain::{IndexRunMode, IndexRunStatus, PersistedFileOutcome};
+use tokenizor_agentic_mcp::domain::{ComponentHealth, IndexRunMode, IndexRunStatus, PersistedFileOutcome};
+use tokenizor_agentic_mcp::error::TokenizorError;
 use tokenizor_agentic_mcp::storage::registry_persistence::RegistryPersistence;
-use tokenizor_agentic_mcp::storage::{BlobStore, LocalCasBlobStore};
+use tokenizor_agentic_mcp::storage::{BlobStore, LocalCasBlobStore, StoredBlob};
 use tokenizor_agentic_mcp::application::run_manager::RunManager;
+
+/// A BlobStore that always fails on store_bytes but has an existing root_dir.
+/// Used to test that CAS write failures produce PersistedFileOutcome::Failed records.
+struct FailingBlobStore {
+    root: PathBuf,
+}
+
+impl BlobStore for FailingBlobStore {
+    fn backend_name(&self) -> &'static str {
+        "failing"
+    }
+
+    fn root_dir(&self) -> &Path {
+        &self.root
+    }
+
+    fn initialize(&self) -> Result<ComponentHealth, TokenizorError> {
+        unreachable!("initialize not needed in failing CAS tests")
+    }
+
+    fn health_check(&self) -> Result<ComponentHealth, TokenizorError> {
+        unreachable!("health_check not needed in failing CAS tests")
+    }
+
+    fn store_bytes(&self, _bytes: &[u8]) -> Result<StoredBlob, TokenizorError> {
+        Err(TokenizorError::Storage(
+            "simulated CAS write failure".into(),
+        ))
+    }
+
+    fn read_bytes(&self, _blob_id: &str) -> Result<Vec<u8>, TokenizorError> {
+        unreachable!("read_bytes not needed in failing CAS tests")
+    }
+}
 
 fn setup_test_env() -> (
     tempfile::TempDir,
@@ -215,10 +251,44 @@ async fn test_backward_compat_registry_without_run_file_records() {
 }
 
 #[tokio::test]
-async fn test_total_test_count_does_not_regress() {
-    // This test exists to document that the test count must not regress below 143.
-    // The actual count is verified by running `cargo test` and checking output.
-    // The library tests alone should be >= 143.
-    // This is a documentation-only test that always passes.
-    assert!(true, "test count regression check — verify via cargo test output");
+async fn test_failed_file_produces_failed_outcome_in_persisted_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry_path = dir.path().join("registry.json");
+    let persistence = RegistryPersistence::new(registry_path);
+    let manager = Arc::new(RunManager::new(persistence));
+
+    // CAS root exists but store_bytes always fails → file-local CAS failure
+    let cas_root = tempfile::tempdir().unwrap();
+    let cas: Arc<dyn BlobStore> = Arc::new(FailingBlobStore {
+        root: cas_root.path().to_path_buf(),
+    });
+
+    let repo_dir = tempfile::tempdir().unwrap();
+    fs::write(repo_dir.path().join("main.rs"), "fn main() {}").unwrap();
+
+    let (run, _progress) = manager
+        .launch_run(
+            "test-repo",
+            IndexRunMode::Full,
+            repo_dir.path().to_path_buf(),
+            cas,
+        )
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let records = manager
+        .persistence()
+        .get_file_records(&run.run_id)
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    match &records[0].outcome {
+        PersistedFileOutcome::Failed { error } => {
+            assert!(
+                error.contains("CAS write failed"),
+                "expected CAS write error message, got: {error}"
+            );
+        }
+        other => panic!("expected Failed outcome, got: {:?}", other),
+    }
 }

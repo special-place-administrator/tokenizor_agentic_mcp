@@ -189,6 +189,7 @@ impl RunManager {
             let result = pipeline.execute().await;
 
             // Batch-save file records to registry
+            let mut file_record_error: Option<String> = None;
             if !result.file_records.is_empty() {
                 let record_count = result.file_records.len();
                 if let Err(e) = manager
@@ -201,6 +202,9 @@ impl RunManager {
                         error = %e,
                         "failed to save file records to registry"
                     );
+                    file_record_error = Some(format!(
+                        "failed to persist {record_count} file records: {e}"
+                    ));
                 } else {
                     info!(
                         run_id = %run_id,
@@ -210,11 +214,20 @@ impl RunManager {
                 }
             }
 
+            // Merge file record save error into error_summary so it's visible on the run
+            let final_error_summary = match (result.error_summary, file_record_error) {
+                (Some(pipeline_err), Some(record_err)) => {
+                    Some(format!("{pipeline_err}; {record_err}"))
+                }
+                (Some(err), None) | (None, Some(err)) => Some(err),
+                (None, None) => None,
+            };
+
             let finished_at = unix_timestamp_ms();
             if let Err(e) = manager.persistence.update_run_status_with_finish(
                 &run_id,
                 result.status.clone(),
-                result.error_summary,
+                final_error_summary,
                 finished_at,
             ) {
                 error!(run_id = %run_id, error = %e, "failed to update final run status");
