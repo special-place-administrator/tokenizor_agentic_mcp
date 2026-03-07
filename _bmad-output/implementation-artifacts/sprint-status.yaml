@@ -54,7 +54,7 @@ development_status:
   2-1-start-an-indexed-run-with-durable-run-identity: done
   2-2-execute-indexing-for-the-initial-quality-focus-language-set: done
   2-3-persist-file-level-indexing-outputs-and-symbol-file-metadata-for-the-initial-quality-focus-language-set: done
-  2-4-extend-indexing-through-a-repeatable-broader-language-onboarding-pattern: backlog
+  2-4-extend-indexing-through-a-repeatable-broader-language-onboarding-pattern: ready-for-dev
   2-5-inspect-run-status-and-health: backlog
   2-6-observe-live-or-near-live-indexing-progress: backlog
   2-7-cancel-an-active-indexing-run-safely: backlog
