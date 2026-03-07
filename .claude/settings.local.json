@@ -10,7 +10,9 @@
       "mcp__jcodemunch__get_file_outline",
       "mcp__jcodemunch__get_symbol",
       "mcp__jcodemunch__search_symbols",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ]
   }
 }

@@ -395,6 +395,24 @@ This makes runtime bring-up an explicit trust and operability gate rather than a
 
 This makes crash recovery and deployment safety part of normal system behavior rather than exceptional repair work.
 
+**Interim Persistence Decision (ADR — Epic 1 Retrospective, 2026-03-07)**
+
+Decision: Until SpacetimeDB write-path integration is complete, all structured durable state (projects, workspaces, runs, checkpoints, idempotency records) persists via the local bootstrap registry JSON file with atomic writes (write-to-temp-then-rename) and advisory file locking.
+
+Rationale:
+- Proven across Epic 1 (Stories 1.3–1.7) — 5 stories built successfully on this persistence path
+- The `ControlPlane` trait boundary (`Arc<dyn ControlPlane>`) already abstracts the backend — swapping to SpacetimeDB is a backend change, not a rewrite
+- Coupling SpacetimeDB write integration with Epic 2 business logic (indexing, parsing, checkpointing) would mean debugging infrastructure and domain logic simultaneously
+- Epic 1 retrospective data showed this was the team's unanimous recommendation
+
+Constraints:
+- `SpacetimeControlPlane` write methods (`upsert_repository`, `create_index_run`, `write_checkpoint`, `put_idempotency_record`) return `pending_write_error()` — do not wire them
+- `InMemoryControlPlane` is for tests only — it does not survive process exit
+- Epic 2 introduces a dedicated `RegistryPersistence` struct for durable read/write against the registry JSON file — this is interim code that retires when SpacetimeDB writes are wired
+- New fields on persisted types must be backward-compatible (`Option<T>` with `#[serde(default)]`) to avoid breaking existing Epic 1 registry files
+
+Retirement trigger: A future epic (Epic 3+) wires SpacetimeDB write methods on `SpacetimeControlPlane`, at which point the `RegistryPersistence` struct is retired and durable state flows through the `ControlPlane` trait.
+
 **Runtime Boundary Model**
 - baseline implementation may remain process-local
 - architecture should isolate application/runtime services so later daemonization does not require domain-layer redesign
