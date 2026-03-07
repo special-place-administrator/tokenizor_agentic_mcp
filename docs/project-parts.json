@@ -1,0 +1,28 @@
+{
+  "repository_type": "monolith",
+  "project_name": "tokenizor_agentic_mcp",
+  "classification_note": "The current Rust code is scaffolding. Product intent is defined primarily by docs/ and represents the target system rather than the current implementation alone.",
+  "parts": [
+    {
+      "part_id": "core",
+      "part_name": "Tokenizor Core Foundation",
+      "project_type_id": "backend",
+      "root_path": "C:\\AI_STUFF\\PROGRAMMING\\tokenizor_agentic_mcp",
+      "primary_language": "Rust",
+      "entry_points": [
+        "src/main.rs",
+        "src/lib.rs"
+      ],
+      "current_role": "Bootstrap MCP server and platform foundation",
+      "target_role": "Durable code indexing, retrieval, orchestration, and recovery runtime"
+    }
+  ],
+  "integration_points": [],
+  "source_of_truth": [
+    "docs/architecture.md",
+    "docs/tokenizor_project_direction.md",
+    "docs/provider_cli_runtime_architecture.md",
+    "docs/provider_cli_integration_research.md",
+    "docs/README.md"
+  ]
+}

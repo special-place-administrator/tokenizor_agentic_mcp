@@ -1,0 +1,95 @@
+# generated: 2026-03-07
+# project: tokenizor_agentic_mcp
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: C:\AI_STUFF\PROGRAMMING\tokenizor_agentic_mcp\_bmad-output\implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog → in-progress: Automatically when first story is created (via create-story)
+#   - in-progress → done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - SM typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+
+generated: 2026-03-07
+project: tokenizor_agentic_mcp
+project_key: NOKEY
+tracking_system: file-system
+story_location: "C:\\AI_STUFF\\PROGRAMMING\\tokenizor_agentic_mcp\\_bmad-output\\implementation-artifacts"
+
+development_status:
+  epic-1: done
+  1-1-validate-local-runtime-readiness: done
+  1-2-start-tokenizor-through-a-guarded-run-entrypoint: done
+  1-3-initialize-a-repository-as-a-durable-project-workspace: done
+  1-4-inspect-known-projects-and-workspaces: done
+  1-5-resolve-the-active-workspace-from-context-or-override: done
+  1-6-add-additional-workspaces-or-worktrees-to-an-existing-project: done
+  1-7-migrate-or-update-workspace-state-safely: done
+  epic-1-retrospective: done
+
+  epic-2: backlog
+  2-1-start-an-indexed-run-with-durable-run-identity: backlog
+  2-2-execute-indexing-for-the-initial-quality-focus-language-set: backlog
+  2-3-persist-file-level-indexing-outputs-and-symbol-file-metadata-for-the-initial-quality-focus-language-set: backlog
+  2-4-extend-indexing-through-a-repeatable-broader-language-onboarding-pattern: backlog
+  2-5-inspect-run-status-and-health: backlog
+  2-6-observe-live-or-near-live-indexing-progress: backlog
+  2-7-cancel-an-active-indexing-run-safely: backlog
+  2-8-checkpoint-long-running-indexing-work: backlog
+  2-9-re-index-managed-repository-or-workspace-state-deterministically: backlog
+  2-10-invalidate-indexed-state-so-it-is-no-longer-trusted: backlog
+  2-11-reject-conflicting-idempotent-replays: backlog
+  epic-2-retrospective: optional
+
+  epic-3: backlog
+  3-1-search-indexed-repositories-by-text: backlog
+  3-2-search-indexed-repositories-by-symbol: backlog
+  3-3-retrieve-file-and-repository-outlines: backlog
+  3-4-expose-the-full-baseline-retrieval-slice-through-mcp: backlog
+  3-5-retrieve-verified-source-for-a-symbol-or-code-slice: backlog
+  3-6-block-or-quarantine-suspect-retrieval: backlog
+  3-7-retrieve-multiple-symbols-or-code-slices-in-one-workflow: backlog
+  epic-3-retrospective: optional
+
+  epic-4: backlog
+  4-1-sweep-stale-leases-and-interrupted-state-on-startup: backlog
+  4-2-resume-interrupted-indexing-from-durable-checkpoints: backlog
+  4-3-trigger-deterministic-repair-for-suspect-or-incomplete-state: backlog
+  4-4-inspect-repository-health-and-repair-required-conditions: backlog
+  4-5-preserve-operational-history-for-runs-repairs-and-integrity-events: backlog
+  4-6-classify-action-required-states-and-signal-the-next-safe-action: backlog
+  epic-4-retrospective: optional
+
+  epic-5: backlog
+  5-1-implement-a-codex-agents-md-retrieval-first-bootstrap: backlog
+  5-2-make-tokenizor-reachable-at-session-start-or-first-repository-prompt: backlog
+  5-3-observe-retrieval-usage-behavior-locally-in-active-workflows: backlog
+  5-4-preserve-authority-safe-integration-boundaries: backlog
+  5-5-expose-baseline-mcp-resources-for-workflow-context: backlog
+  5-6-provide-workflow-and-operational-guidance: backlog
+  5-7-provide-migration-guidance-from-jcodemunch-mcp: backlog
+  5-8-offer-a-curated-prompt-surface-where-it-improves-adoption: backlog
+  epic-5-retrospective: optional
