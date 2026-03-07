@@ -373,4 +373,44 @@ mod tests {
                 .contains("writable by the current user")
         );
     }
+
+    #[test]
+    fn store_bytes_returns_correct_sha256_blob_id() {
+        let test_dir = TestDir::new("local-cas-sha256-verify");
+        let store = LocalCasBlobStore::new(BlobStoreConfig {
+            root_dir: test_dir.path.clone(),
+        });
+        let content = b"hello world";
+        let expected_hash = crate::storage::sha256::digest_hex(content);
+
+        let stored = store
+            .store_bytes(content)
+            .expect("blob storage should succeed");
+
+        assert_eq!(stored.blob_id, expected_hash);
+        assert_eq!(stored.byte_len, content.len() as u64);
+        assert!(stored.was_created);
+    }
+
+    #[test]
+    fn store_bytes_handles_empty_content() {
+        let test_dir = TestDir::new("local-cas-empty-content");
+        let store = LocalCasBlobStore::new(BlobStoreConfig {
+            root_dir: test_dir.path.clone(),
+        });
+        let content = b"";
+        let expected_hash = crate::storage::sha256::digest_hex(content);
+
+        let stored = store
+            .store_bytes(content)
+            .expect("empty blob storage should succeed");
+
+        assert_eq!(stored.blob_id, expected_hash);
+        assert_eq!(stored.byte_len, 0);
+
+        let round_trip = store
+            .read_bytes(&stored.blob_id)
+            .expect("empty blob read should succeed");
+        assert!(round_trip.is_empty());
+    }
 }

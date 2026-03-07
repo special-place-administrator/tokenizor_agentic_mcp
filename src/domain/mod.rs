@@ -15,8 +15,8 @@ pub use health::{
 };
 pub use idempotency::{IdempotencyRecord, IdempotencyStatus};
 pub use index::{
-    Checkpoint, FileOutcome, FileProcessingResult, IndexRun, IndexRunMode, IndexRunStatus,
-    LanguageId, SupportTier, SymbolKind, SymbolRecord,
+    Checkpoint, FileOutcome, FileProcessingResult, FileRecord, IndexRun, IndexRunMode,
+    IndexRunStatus, LanguageId, PersistedFileOutcome, SupportTier, SymbolKind, SymbolRecord,
 };
 pub use init::{InitializationReport, RegistrationAction, RegistrationResult};
 pub use migration::{

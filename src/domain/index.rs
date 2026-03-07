@@ -140,6 +140,29 @@ pub struct Checkpoint {
     pub created_at_unix_ms: u64,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PersistedFileOutcome {
+    Committed,
+    EmptySymbols,
+    Failed { error: String },
+    Quarantined { reason: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileRecord {
+    pub relative_path: String,
+    pub language: LanguageId,
+    pub blob_id: String,
+    pub byte_len: u64,
+    pub content_hash: String,
+    pub outcome: PersistedFileOutcome,
+    pub symbols: Vec<SymbolRecord>,
+    pub run_id: String,
+    pub repo_id: String,
+    pub committed_at_unix_ms: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,6 +372,163 @@ mod tests {
             let status: IndexRunStatus = serde_json::from_str(json).unwrap();
             assert_eq!(status, expected, "failed for {json}");
         }
+    }
+
+    #[test]
+    fn test_persisted_file_outcome_committed_serde_roundtrip() {
+        let outcome = PersistedFileOutcome::Committed;
+        let json = serde_json::to_string(&outcome).unwrap();
+        let deserialized: PersistedFileOutcome = serde_json::from_str(&json).unwrap();
+        assert_eq!(outcome, deserialized);
+    }
+
+    #[test]
+    fn test_persisted_file_outcome_empty_symbols_serde_roundtrip() {
+        let outcome = PersistedFileOutcome::EmptySymbols;
+        let json = serde_json::to_string(&outcome).unwrap();
+        let deserialized: PersistedFileOutcome = serde_json::from_str(&json).unwrap();
+        assert_eq!(outcome, deserialized);
+    }
+
+    #[test]
+    fn test_persisted_file_outcome_failed_serde_roundtrip() {
+        let outcome = PersistedFileOutcome::Failed {
+            error: "disk full".to_string(),
+        };
+        let json = serde_json::to_string(&outcome).unwrap();
+        let deserialized: PersistedFileOutcome = serde_json::from_str(&json).unwrap();
+        assert_eq!(outcome, deserialized);
+    }
+
+    #[test]
+    fn test_persisted_file_outcome_quarantined_serde_roundtrip() {
+        let outcome = PersistedFileOutcome::Quarantined {
+            reason: "blob_id/content_hash mismatch".to_string(),
+        };
+        let json = serde_json::to_string(&outcome).unwrap();
+        let deserialized: PersistedFileOutcome = serde_json::from_str(&json).unwrap();
+        assert_eq!(outcome, deserialized);
+    }
+
+    #[test]
+    fn test_file_record_construction_committed() {
+        let record = FileRecord {
+            relative_path: "src/main.rs".to_string(),
+            language: LanguageId::Rust,
+            blob_id: "abcdef1234567890".to_string(),
+            byte_len: 256,
+            content_hash: "abcdef1234567890".to_string(),
+            outcome: PersistedFileOutcome::Committed,
+            symbols: vec![SymbolRecord {
+                name: "main".to_string(),
+                kind: SymbolKind::Function,
+                depth: 0,
+                sort_order: 0,
+                byte_range: (0, 50),
+                line_range: (1, 3),
+            }],
+            run_id: "run-001".to_string(),
+            repo_id: "repo-001".to_string(),
+            committed_at_unix_ms: 1700000000000,
+        };
+        assert_eq!(record.outcome, PersistedFileOutcome::Committed);
+        assert_eq!(record.symbols.len(), 1);
+    }
+
+    #[test]
+    fn test_file_record_construction_empty_symbols() {
+        let record = FileRecord {
+            relative_path: "src/empty.py".to_string(),
+            language: LanguageId::Python,
+            blob_id: "hash123".to_string(),
+            byte_len: 10,
+            content_hash: "hash123".to_string(),
+            outcome: PersistedFileOutcome::EmptySymbols,
+            symbols: vec![],
+            run_id: "run-001".to_string(),
+            repo_id: "repo-001".to_string(),
+            committed_at_unix_ms: 1700000000000,
+        };
+        assert_eq!(record.outcome, PersistedFileOutcome::EmptySymbols);
+        assert!(record.symbols.is_empty());
+    }
+
+    #[test]
+    fn test_file_record_serde_roundtrip() {
+        let record = FileRecord {
+            relative_path: "src/lib.rs".to_string(),
+            language: LanguageId::Rust,
+            blob_id: "deadbeef".to_string(),
+            byte_len: 1024,
+            content_hash: "deadbeef".to_string(),
+            outcome: PersistedFileOutcome::Committed,
+            symbols: vec![
+                SymbolRecord {
+                    name: "MyStruct".to_string(),
+                    kind: SymbolKind::Struct,
+                    depth: 0,
+                    sort_order: 0,
+                    byte_range: (0, 200),
+                    line_range: (1, 10),
+                },
+                SymbolRecord {
+                    name: "new".to_string(),
+                    kind: SymbolKind::Method,
+                    depth: 1,
+                    sort_order: 1,
+                    byte_range: (50, 150),
+                    line_range: (3, 8),
+                },
+            ],
+            run_id: "run-002".to_string(),
+            repo_id: "repo-002".to_string(),
+            committed_at_unix_ms: 1700000000000,
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        let deserialized: FileRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(record, deserialized);
+    }
+
+    #[test]
+    fn test_file_record_failed_serde_roundtrip() {
+        let record = FileRecord {
+            relative_path: "bad.go".to_string(),
+            language: LanguageId::Go,
+            blob_id: "abc".to_string(),
+            byte_len: 50,
+            content_hash: "abc".to_string(),
+            outcome: PersistedFileOutcome::Failed {
+                error: "CAS write failed".to_string(),
+            },
+            symbols: vec![],
+            run_id: "run-003".to_string(),
+            repo_id: "repo-003".to_string(),
+            committed_at_unix_ms: 1700000000000,
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        let deserialized: FileRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(record, deserialized);
+    }
+
+    #[test]
+    fn test_file_record_quarantined_serde_roundtrip() {
+        let record = FileRecord {
+            relative_path: "suspect.ts".to_string(),
+            language: LanguageId::TypeScript,
+            blob_id: "xyz".to_string(),
+            byte_len: 100,
+            content_hash: "different_hash".to_string(),
+            outcome: PersistedFileOutcome::Quarantined {
+                reason: "blob_id/content_hash mismatch".to_string(),
+            },
+            symbols: vec![],
+            run_id: "run-004".to_string(),
+            repo_id: "repo-004".to_string(),
+            committed_at_unix_ms: 1700000000000,
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        let deserialized: FileRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(record, deserialized);
     }
 
     #[test]

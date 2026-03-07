@@ -154,7 +154,8 @@ impl ApplicationContext {
         mode: IndexRunMode,
         repo_root: PathBuf,
     ) -> Result<(IndexRun, Arc<PipelineProgress>)> {
-        self.run_manager.launch_run(repo_id, mode, repo_root)
+        self.run_manager
+            .launch_run(repo_id, mode, repo_root, self.blob_store.clone())
     }
 
     pub fn run_manager(&self) -> &Arc<RunManager> {

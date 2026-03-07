@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -7,7 +7,8 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    AuthorityMode, IdempotencyRecord, IndexRun, IndexRunStatus, RegistryKind, Repository, Workspace,
+    AuthorityMode, FileRecord, IdempotencyRecord, IndexRun, IndexRunStatus, RegistryKind,
+    Repository, Workspace,
 };
 use crate::error::{Result, TokenizorError};
 
@@ -30,6 +31,8 @@ pub(crate) struct RegistryData {
     pub runs: Vec<IndexRun>,
     #[serde(default)]
     pub idempotency_records: Vec<IdempotencyRecord>,
+    #[serde(default)]
+    pub run_file_records: HashMap<String, Vec<FileRecord>>,
 }
 
 pub struct RegistryPersistence {
@@ -170,6 +173,23 @@ impl RegistryPersistence {
             .idempotency_records
             .into_iter()
             .find(|r| r.idempotency_key == key))
+    }
+
+    pub fn save_file_records(&self, run_id: &str, records: &[FileRecord]) -> Result<()> {
+        self.read_modify_write(|data| {
+            data.run_file_records
+                .insert(run_id.to_string(), records.to_vec());
+            Ok(())
+        })
+    }
+
+    pub fn get_file_records(&self, run_id: &str) -> Result<Vec<FileRecord>> {
+        let data = self.load()?;
+        Ok(data
+            .run_file_records
+            .get(run_id)
+            .cloned()
+            .unwrap_or_default())
     }
 
     fn read_modify_write(&self, modify: impl FnOnce(&mut RegistryData) -> Result<()>) -> Result<()> {
@@ -708,5 +728,82 @@ mod tests {
         let persistence = RegistryPersistence::new(path);
         let runs = persistence.list_runs().unwrap();
         assert_eq!(runs.len(), 4);
+    }
+
+    fn sample_file_record(path: &str, run_id: &str) -> FileRecord {
+        use crate::domain::{LanguageId, PersistedFileOutcome, SymbolKind, SymbolRecord};
+        FileRecord {
+            relative_path: path.to_string(),
+            language: LanguageId::Rust,
+            blob_id: "deadbeef".to_string(),
+            byte_len: 100,
+            content_hash: "deadbeef".to_string(),
+            outcome: PersistedFileOutcome::Committed,
+            symbols: vec![SymbolRecord {
+                name: "main".to_string(),
+                kind: SymbolKind::Function,
+                depth: 0,
+                sort_order: 0,
+                byte_range: (0, 50),
+                line_range: (1, 3),
+            }],
+            run_id: run_id.to_string(),
+            repo_id: "repo-1".to_string(),
+            committed_at_unix_ms: 1700000000000,
+        }
+    }
+
+    #[test]
+    fn test_save_file_records_roundtrip() {
+        let (_dir, persistence) = temp_registry();
+        let records = vec![
+            sample_file_record("src/main.rs", "run-1"),
+            sample_file_record("src/lib.rs", "run-1"),
+        ];
+
+        persistence.save_file_records("run-1", &records).unwrap();
+        let loaded = persistence.get_file_records("run-1").unwrap();
+
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded, records);
+    }
+
+    #[test]
+    fn test_get_file_records_returns_empty_for_missing_run() {
+        let (_dir, persistence) = temp_registry();
+        let loaded = persistence.get_file_records("nonexistent-run").unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn test_backward_compat_deserialization_missing_run_file_records() {
+        let (_dir, persistence) = temp_registry();
+        let run = sample_run("run-1", "repo-1", IndexRunStatus::Queued);
+        persistence.save_run(&run).unwrap();
+
+        let data = persistence.load().unwrap();
+        assert!(data.run_file_records.is_empty());
+    }
+
+    #[test]
+    fn test_save_file_records_does_not_clobber_existing_runs() {
+        let (_dir, persistence) = temp_registry();
+        let run = sample_run("run-1", "repo-1", IndexRunStatus::Running);
+        persistence.save_run(&run).unwrap();
+
+        let records = vec![sample_file_record("src/main.rs", "run-1")];
+        persistence.save_file_records("run-1", &records).unwrap();
+
+        let loaded_run = persistence.find_run("run-1").unwrap();
+        assert!(loaded_run.is_some());
+        let loaded_records = persistence.get_file_records("run-1").unwrap();
+        assert_eq!(loaded_records.len(), 1);
+    }
+
+    #[test]
+    fn test_epic1_fixture_backward_compat_with_run_file_records() {
+        let fixture = include_str!("../../tests/fixtures/epic1-registry.json");
+        let data: RegistryData = serde_json::from_str(fixture).unwrap();
+        assert!(data.run_file_records.is_empty());
     }
 }

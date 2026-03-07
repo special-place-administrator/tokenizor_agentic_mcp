@@ -10,6 +10,7 @@ use crate::domain::{
     IdempotencyRecord, IdempotencyStatus, IndexRun, IndexRunMode, IndexRunStatus,
     unix_timestamp_ms,
 };
+use crate::storage::BlobStore;
 use crate::error::{Result, TokenizorError};
 use crate::indexing::pipeline::{IndexingPipeline, PipelineProgress};
 use crate::storage::RegistryPersistence;
@@ -162,12 +163,14 @@ impl RunManager {
         repo_id: &str,
         mode: IndexRunMode,
         repo_root: PathBuf,
+        blob_store: Arc<dyn BlobStore>,
     ) -> Result<(IndexRun, Arc<PipelineProgress>)> {
         let run = self.start_run(repo_id, mode)?;
         let run_id = run.run_id.clone();
         let repo_id_owned = repo_id.to_string();
 
-        let pipeline = IndexingPipeline::new(run_id.clone(), repo_root);
+        let pipeline = IndexingPipeline::new(run_id.clone(), repo_root)
+            .with_cas(blob_store, repo_id_owned.clone());
         let progress = pipeline.progress();
 
         let manager = Arc::clone(self);
@@ -184,6 +187,28 @@ impl RunManager {
             }
 
             let result = pipeline.execute().await;
+
+            // Batch-save file records to registry
+            if !result.file_records.is_empty() {
+                let record_count = result.file_records.len();
+                if let Err(e) = manager
+                    .persistence
+                    .save_file_records(&run_id, &result.file_records)
+                {
+                    error!(
+                        run_id = %run_id,
+                        records = record_count,
+                        error = %e,
+                        "failed to save file records to registry"
+                    );
+                } else {
+                    info!(
+                        run_id = %run_id,
+                        records = record_count,
+                        "file records saved to registry"
+                    );
+                }
+            }
 
             let finished_at = unix_timestamp_ms();
             if let Err(e) = manager.persistence.update_run_status_with_finish(
