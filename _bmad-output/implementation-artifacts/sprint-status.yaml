@@ -57,8 +57,8 @@ development_status:
   2-4-extend-indexing-through-a-repeatable-broader-language-onboarding-pattern: done
   2-5-inspect-run-status-and-health: done
   2-6-observe-live-or-near-live-indexing-progress: done
-  2-7-cancel-an-active-indexing-run-safely: backlog
-  2-8-checkpoint-long-running-indexing-work: backlog
+  2-7-cancel-an-active-indexing-run-safely: done
+  2-8-checkpoint-long-running-indexing-work: review
   2-9-re-index-managed-repository-or-workspace-state-deterministically: backlog
   2-10-invalidate-indexed-state-so-it-is-no-longer-trusted: backlog
   2-11-reject-conflicting-idempotent-replays: backlog

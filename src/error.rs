@@ -12,6 +12,8 @@ pub enum TokenizorError {
     InvalidArgument(String),
     #[error("entity not found: {0}")]
     NotFound(String),
+    #[error("invalid operation: {0}")]
+    InvalidOperation(String),
     #[error("storage error: {0}")]
     Storage(String),
     #[error("integrity check failed: {0}")]
@@ -45,6 +47,7 @@ impl TokenizorError {
             Self::Serialization(_) => true,
             Self::Config(_) => false,
             Self::InvalidArgument(_) => false,
+            Self::InvalidOperation(_) => false,
             Self::NotFound(_) => false,
         }
     }

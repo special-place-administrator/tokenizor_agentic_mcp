@@ -861,6 +861,8 @@ async fn test_cancel_active_run_transitions_to_cancelled() {
     assert!(!final_report.is_active);
     assert!(final_report.run.finished_at_unix_ms.is_some());
 
+    // Progress phase should be Complete if files were processed; None if cancelled
+    // before any processing. Either is acceptable — the key invariant is Cancelled status.
     if let Some(progress) = final_report.progress {
         assert_eq!(progress.phase, RunPhase::Complete);
     }
@@ -985,4 +987,240 @@ async fn test_double_cancel_same_run_returns_same_cancelled_report() {
     // Second cancel — AC #2: already terminal, returns same status
     let report2 = manager.cancel_run(&run.run_id).unwrap();
     assert_eq!(report2.run.status, IndexRunStatus::Cancelled);
+}
+
+// ============================================================
+// Story 2.8 — Checkpoint Long-Running Indexing Work
+// ============================================================
+
+#[tokio::test]
+async fn test_checkpoint_active_run_persists_with_correct_identity() {
+    let (_dir, manager, _cas_dir, cas) = setup_test_env();
+
+    // Create a repo with many files to ensure processing takes enough time
+    let repo_dir = tempfile::tempdir().unwrap();
+    for i in 0..500 {
+        fs::write(
+            repo_dir.path().join(format!("file_{i:04}.rs")),
+            format!("pub fn f{i}() {{ let x = {i}; }}\npub fn g{i}() {{ let y = {i}; }}"),
+        )
+        .unwrap();
+    }
+
+    let (run, progress) = manager
+        .launch_run(
+            "repo-checkpoint",
+            IndexRunMode::Full,
+            repo_dir.path().to_path_buf(),
+            cas,
+        )
+        .unwrap();
+
+    // Wait for pipeline to start and process some files
+    for _ in 0..100 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let processed = progress.files_processed.load(std::sync::atomic::Ordering::Relaxed);
+        if processed >= 10 {
+            break;
+        }
+    }
+
+    // Attempt manual checkpoint
+    let result = manager.checkpoint_run(&run.run_id);
+    // If pipeline hasn't committed enough contiguous files, cursor may be None.
+    // Retry once after a brief wait.
+    let checkpoint = match result {
+        Ok(cp) => cp,
+        Err(_) => {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            manager.checkpoint_run(&run.run_id).unwrap()
+        }
+    };
+
+    assert_eq!(checkpoint.run_id, run.run_id);
+    assert!(!checkpoint.cursor.is_empty());
+    assert!(checkpoint.files_processed > 0);
+    assert!(checkpoint.created_at_unix_ms > 0);
+
+    // Verify persisted
+    let latest = manager
+        .persistence()
+        .get_latest_checkpoint(&run.run_id)
+        .unwrap();
+    assert!(latest.is_some());
+    let latest = latest.unwrap();
+    assert_eq!(latest.run_id, run.run_id);
+    assert_eq!(latest.cursor, checkpoint.cursor);
+
+    // Wait for completion
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn test_checkpoint_terminal_succeeded_run_returns_error() {
+    let (_dir, manager, _cas_dir, cas) = setup_test_env();
+    let repo_dir = tempfile::tempdir().unwrap();
+    fs::write(repo_dir.path().join("main.rs"), "fn main() {}").unwrap();
+
+    let (run, _progress) = manager
+        .launch_run(
+            "repo-cp-term",
+            IndexRunMode::Full,
+            repo_dir.path().to_path_buf(),
+            cas,
+        )
+        .unwrap();
+
+    // Wait for pipeline to complete
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let finished = manager.persistence().find_run(&run.run_id).unwrap().unwrap();
+    assert_eq!(finished.status, IndexRunStatus::Succeeded);
+
+    // Checkpoint after success — AC #2: explicit failure
+    let result = manager.checkpoint_run(&run.run_id);
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        TokenizorError::InvalidOperation(_)
+    ));
+}
+
+#[tokio::test]
+async fn test_checkpoint_nonexistent_run_returns_not_found() {
+    let (_dir, manager, _cas_dir, _cas) = setup_test_env();
+
+    let result = manager.checkpoint_run("does-not-exist-cp");
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        TokenizorError::NotFound(_)
+    ));
+}
+
+#[tokio::test]
+async fn test_checkpoint_cancelled_run_returns_error() {
+    let (_dir, manager, _cas_dir, cas) = setup_test_env();
+    let repo_dir = tempfile::tempdir().unwrap();
+    fs::write(repo_dir.path().join("main.rs"), "fn main() {}").unwrap();
+
+    let (run, _progress) = manager
+        .launch_run(
+            "repo-cp-cancel",
+            IndexRunMode::Full,
+            repo_dir.path().to_path_buf(),
+            cas,
+        )
+        .unwrap();
+
+    // Cancel immediately
+    manager.cancel_run(&run.run_id).unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let finished = manager.persistence().find_run(&run.run_id).unwrap().unwrap();
+    assert_eq!(finished.status, IndexRunStatus::Cancelled);
+
+    // Checkpoint after cancel — AC #2: explicit failure
+    let result = manager.checkpoint_run(&run.run_id);
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        TokenizorError::InvalidOperation(_)
+    ));
+}
+
+#[tokio::test]
+async fn test_automatic_checkpoint_fires_during_processing() {
+    let (_dir, manager, _cas_dir, cas) = setup_test_env();
+
+    // Create 200+ files to trigger automatic checkpoint at interval=100
+    let repo_dir = tempfile::tempdir().unwrap();
+    for i in 0..250 {
+        fs::write(
+            repo_dir.path().join(format!("mod_{i:04}.rs")),
+            format!("pub fn f{i}() {{ let x = {i}; }}"),
+        )
+        .unwrap();
+    }
+
+    let (run, _progress) = manager
+        .launch_run(
+            "repo-auto-cp",
+            IndexRunMode::Full,
+            repo_dir.path().to_path_buf(),
+            cas,
+        )
+        .unwrap();
+
+    // Wait for pipeline to complete
+    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+
+    let finished = manager.persistence().find_run(&run.run_id).unwrap().unwrap();
+    assert_eq!(finished.status, IndexRunStatus::Succeeded);
+
+    // Automatic checkpoints should have been created at files_processed=100, 200
+    let latest = manager
+        .persistence()
+        .get_latest_checkpoint(&run.run_id)
+        .unwrap();
+    assert!(
+        latest.is_some(),
+        "expected at least one automatic checkpoint for 250 files with interval=100"
+    );
+    let latest = latest.unwrap();
+    assert_eq!(latest.run_id, run.run_id);
+    assert!(latest.files_processed > 0);
+}
+
+#[tokio::test]
+async fn test_checkpoint_cursor_on_index_run_updated_after_checkpoint() {
+    let (_dir, manager, _cas_dir, cas) = setup_test_env();
+
+    let repo_dir = tempfile::tempdir().unwrap();
+    for i in 0..500 {
+        fs::write(
+            repo_dir.path().join(format!("src_{i:04}.rs")),
+            format!("pub fn f{i}() {{ let x = {i}; }}"),
+        )
+        .unwrap();
+    }
+
+    let (run, progress) = manager
+        .launch_run(
+            "repo-cursor-check",
+            IndexRunMode::Full,
+            repo_dir.path().to_path_buf(),
+            cas,
+        )
+        .unwrap();
+
+    // Wait for some files to process
+    for _ in 0..100 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let processed = progress.files_processed.load(std::sync::atomic::Ordering::Relaxed);
+        if processed >= 10 {
+            break;
+        }
+    }
+
+    // Create checkpoint
+    let result = manager.checkpoint_run(&run.run_id);
+    let checkpoint = match result {
+        Ok(cp) => cp,
+        Err(_) => {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            manager.checkpoint_run(&run.run_id).unwrap()
+        }
+    };
+
+    // Verify IndexRun.checkpoint_cursor matches
+    let updated_run = manager.persistence().find_run(&run.run_id).unwrap().unwrap();
+    assert_eq!(
+        updated_run.checkpoint_cursor,
+        Some(checkpoint.cursor.clone()),
+        "IndexRun.checkpoint_cursor should match the checkpoint's cursor"
+    );
+
+    // Wait for completion
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 }

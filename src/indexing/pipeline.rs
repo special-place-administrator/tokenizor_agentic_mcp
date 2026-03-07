@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -16,6 +16,7 @@ pub struct PipelineProgress {
     pub total_files: AtomicU64,
     pub files_processed: AtomicU64,
     pub files_failed: AtomicU64,
+    pub symbols_extracted: AtomicU64,
     phase: AtomicU8,
 }
 
@@ -25,6 +26,7 @@ impl PipelineProgress {
             total_files: AtomicU64::new(0),
             files_processed: AtomicU64::new(0),
             files_failed: AtomicU64::new(0),
+            symbols_extracted: AtomicU64::new(0),
             phase: AtomicU8::new(RunPhase::Discovering.to_u8()),
         }
     }
@@ -46,6 +48,56 @@ pub struct PipelineResult {
     pub error_summary: Option<String>,
 }
 
+struct CheckpointState {
+    completed_indices: Vec<bool>,
+    sorted_paths: Vec<String>,
+}
+
+pub struct CheckpointTracker {
+    state: Mutex<CheckpointState>,
+}
+
+impl CheckpointTracker {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(CheckpointState {
+                completed_indices: Vec::new(),
+                sorted_paths: Vec::new(),
+            }),
+        }
+    }
+
+    fn initialize(&self, paths: Vec<String>) {
+        let mut state = self.state.lock().unwrap();
+        let len = paths.len();
+        state.sorted_paths = paths;
+        state.completed_indices = vec![false; len];
+    }
+
+    fn mark_complete(&self, index: usize) {
+        let mut state = self.state.lock().unwrap();
+        if index < state.completed_indices.len() {
+            state.completed_indices[index] = true;
+        }
+    }
+
+    pub fn checkpoint_cursor(&self) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        if state.completed_indices.is_empty() {
+            return None;
+        }
+        let mut high_water: Option<usize> = None;
+        for (i, &done) in state.completed_indices.iter().enumerate() {
+            if done {
+                high_water = Some(i);
+            } else {
+                break;
+            }
+        }
+        high_water.map(|i| state.sorted_paths[i].clone())
+    }
+}
+
 pub struct IndexingPipeline {
     run_id: String,
     repo_id: String,
@@ -55,6 +107,9 @@ pub struct IndexingPipeline {
     progress: Arc<PipelineProgress>,
     cas: Option<Arc<dyn BlobStore>>,
     cancellation_token: CancellationToken,
+    checkpoint_tracker: Arc<CheckpointTracker>,
+    checkpoint_callback: Option<Box<dyn Fn() + Send + Sync>>,
+    checkpoint_interval: u64,
 }
 
 impl IndexingPipeline {
@@ -69,6 +124,9 @@ impl IndexingPipeline {
             progress: Arc::new(PipelineProgress::new()),
             cas: None,
             cancellation_token,
+            checkpoint_tracker: Arc::new(CheckpointTracker::new()),
+            checkpoint_callback: None,
+            checkpoint_interval: 100,
         }
     }
 
@@ -88,8 +146,18 @@ impl IndexingPipeline {
         self
     }
 
+    pub fn with_checkpoint_callback(mut self, callback: Box<dyn Fn() + Send + Sync>, interval: u64) -> Self {
+        self.checkpoint_callback = Some(callback);
+        self.checkpoint_interval = interval.max(1);
+        self
+    }
+
     pub fn progress(&self) -> Arc<PipelineProgress> {
         self.progress.clone()
+    }
+
+    pub fn checkpoint_tracker(&self) -> Arc<CheckpointTracker> {
+        self.checkpoint_tracker.clone()
     }
 
     pub async fn execute(self) -> PipelineResult {
@@ -125,7 +193,7 @@ impl IndexingPipeline {
     }
 
     async fn process_discovered(
-        self,
+        mut self,
         files: Vec<discovery::DiscoveredFile>,
     ) -> PipelineResult {
         let (indexable, not_yet_supported_files): (Vec<_>, Vec<_>) = files
@@ -162,7 +230,12 @@ impl IndexingPipeline {
             };
         }
 
-        let files = indexable;
+        let mut files = indexable;
+        files.sort_by(|a, b| a.relative_path.to_lowercase().cmp(&b.relative_path.to_lowercase()));
+
+        // Initialize checkpoint tracker with sorted file paths
+        let sorted_paths: Vec<String> = files.iter().map(|f| f.relative_path.clone()).collect();
+        self.checkpoint_tracker.initialize(sorted_paths);
 
         let semaphore = Arc::new(Semaphore::new(self.concurrency_cap));
         let progress = self.progress.clone();
@@ -170,10 +243,14 @@ impl IndexingPipeline {
         let circuit_broken = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let threshold = self.circuit_breaker_threshold as u64;
         let cas = self.cas.clone();
+        let checkpoint_tracker = self.checkpoint_tracker.clone();
+        let checkpoint_callback: Option<Arc<dyn Fn() + Send + Sync>> =
+            self.checkpoint_callback.take().map(|cb| Arc::from(cb));
+        let checkpoint_interval = self.checkpoint_interval;
 
         let mut handles = Vec::with_capacity(files.len());
 
-        for file in files {
+        for (sorted_index, file) in files.into_iter().enumerate() {
             // M3: Stop spawning tasks once the circuit breaker has tripped
             if circuit_broken.load(Ordering::Relaxed) {
                 break;
@@ -192,6 +269,9 @@ impl IndexingPipeline {
             let run_id = self.run_id.clone();
             let repo_id = self.repo_id.clone();
             let cas = cas.clone();
+            let tracker = checkpoint_tracker.clone();
+            let cb = checkpoint_callback.clone();
+            let cb_interval = checkpoint_interval;
 
             let handle = tokio::spawn(async move {
                 if circuit_broken.load(Ordering::Relaxed) {
@@ -268,15 +348,35 @@ impl IndexingPipeline {
                     None
                 };
 
+                // Helper: record successful processing, track checkpoint, invoke callback
+                let record_success = |result: &FileProcessingResult, file_record: &Option<FileRecord>| {
+                    let symbol_count = result.symbols.len() as u64;
+                    progress.symbols_extracted.fetch_add(symbol_count, Ordering::Relaxed);
+                    let processed = progress.files_processed.fetch_add(1, Ordering::Relaxed) + 1;
+                    // Mark complete in tracker only after durable CAS commit
+                    if file_record.is_some() {
+                        tracker.mark_complete(sorted_index);
+                    }
+                    // Periodic checkpoint callback
+                    if cb_interval > 0 && processed % cb_interval == 0 {
+                        if let Some(ref callback) = cb {
+                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback())) {
+                                Ok(()) => {}
+                                Err(_) => warn!(run_id = %run_id, "checkpoint callback panicked"),
+                            }
+                        }
+                    }
+                };
+
                 match &result.outcome {
                     FileOutcome::Processed => {
                         consecutive_failures.store(0, Ordering::Relaxed);
-                        progress.files_processed.fetch_add(1, Ordering::Relaxed);
+                        record_success(&result, &file_record);
                         debug!(run_id = %run_id, path = %result.relative_path, "processed");
                     }
                     FileOutcome::PartialParse { warning } => {
                         consecutive_failures.store(0, Ordering::Relaxed);
-                        progress.files_processed.fetch_add(1, Ordering::Relaxed);
+                        record_success(&result, &file_record);
                         warn!(run_id = %run_id, path = %result.relative_path, warning = %warning, "partial parse");
                     }
                     FileOutcome::Failed { error } => {
@@ -689,11 +789,12 @@ mod tests {
         let token = CancellationToken::new();
         let token_clone = token.clone();
 
+        // Cancel after a short delay so discovery completes but not all files process
         let pipeline = IndexingPipeline::new("test-midcancel".into(), dir.path().to_path_buf(), token)
             .with_concurrency(1);
         let progress = pipeline.progress();
 
-        // Cancel immediately — with concurrency 1, the loop checks
+        // Cancel immediately after spawning — with concurrency 1, the loop checks
         // cancellation before each spawn, so at most 1 file may already be in-flight
         token_clone.cancel();
 
@@ -701,11 +802,122 @@ mod tests {
 
         assert_eq!(result.status, IndexRunStatus::Cancelled);
         assert!(result.error_summary.is_none());
+        // With concurrency 1 and immediate cancellation, files_processed should be
+        // less than total discovered (3 files for Rust, Python, Go)
         let processed = progress.files_processed.load(Ordering::Relaxed);
         let total = progress.total_files.load(Ordering::Relaxed);
         assert!(
             processed <= total,
             "expected processed ({processed}) <= total ({total})"
         );
+    }
+
+    #[test]
+    fn test_checkpoint_cursor_returns_none_when_no_files_complete() {
+        let tracker = CheckpointTracker::new();
+        tracker.initialize(vec!["a.rs".into(), "b.rs".into(), "c.rs".into()]);
+        assert!(tracker.checkpoint_cursor().is_none());
+    }
+
+    #[test]
+    fn test_checkpoint_cursor_tracks_contiguous_completion() {
+        let tracker = CheckpointTracker::new();
+        tracker.initialize(vec![
+            "a.rs".into(),
+            "b.rs".into(),
+            "c.rs".into(),
+            "d.rs".into(),
+            "e.rs".into(),
+        ]);
+
+        // Complete files 0, 1, 2 contiguously
+        tracker.mark_complete(0);
+        tracker.mark_complete(1);
+        tracker.mark_complete(2);
+        assert_eq!(tracker.checkpoint_cursor(), Some("c.rs".to_string()));
+
+        // Complete file 4 (gap at 3) — cursor should NOT advance
+        tracker.mark_complete(4);
+        assert_eq!(tracker.checkpoint_cursor(), Some("c.rs".to_string()));
+    }
+
+    #[test]
+    fn test_checkpoint_cursor_advances_when_gap_fills() {
+        let tracker = CheckpointTracker::new();
+        tracker.initialize(vec![
+            "a.rs".into(),
+            "b.rs".into(),
+            "c.rs".into(),
+            "d.rs".into(),
+            "e.rs".into(),
+        ]);
+
+        tracker.mark_complete(0);
+        tracker.mark_complete(1);
+        tracker.mark_complete(2);
+        tracker.mark_complete(4);
+        assert_eq!(tracker.checkpoint_cursor(), Some("c.rs".to_string()));
+
+        // Fill the gap at 3
+        tracker.mark_complete(3);
+        assert_eq!(tracker.checkpoint_cursor(), Some("e.rs".to_string()));
+    }
+
+    #[test]
+    fn test_checkpoint_cursor_returns_none_with_empty_tracker() {
+        let tracker = CheckpointTracker::new();
+        assert!(tracker.checkpoint_cursor().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_invokes_checkpoint_callback_at_interval() {
+        use std::sync::atomic::AtomicUsize;
+        use crate::config::BlobStoreConfig;
+        use crate::storage::LocalCasBlobStore;
+
+        let repo_dir = temp_repo_with_files(&[
+            ("a.go", "package main\nfunc a() {}"),
+            ("b.py", "def b(): pass"),
+            ("c.rs", "fn c() {}"),
+            ("d.go", "package main\nfunc d() {}"),
+            ("e.py", "def e(): pass"),
+        ]);
+        let cas_dir = tempfile::tempdir().unwrap();
+        let cas = Arc::new(LocalCasBlobStore::new(BlobStoreConfig {
+            root_dir: cas_dir.path().to_path_buf(),
+        }));
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let counter = call_count.clone();
+        let callback = Box::new(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
+
+        let pipeline = IndexingPipeline::new("test-cb-interval".into(), repo_dir.path().to_path_buf(), CancellationToken::new())
+            .with_cas(cas, "repo-1".to_string())
+            .with_concurrency(1)
+            .with_checkpoint_callback(callback, 2);
+        let result = pipeline.execute().await;
+
+        assert_eq!(result.status, IndexRunStatus::Succeeded);
+        // With 5 files and interval 2, callback fires at files_processed=2 and 4
+        let count = call_count.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(count, 2, "expected callback at processed=2 and processed=4, got {count} calls");
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_skips_checkpoint_when_no_callback() {
+        let dir = temp_repo_with_files(&[
+            ("a.rs", "fn a() {}"),
+            ("b.py", "def b(): pass"),
+        ]);
+
+        // No callback set — should not panic
+        let pipeline = IndexingPipeline::new("test-no-cb".into(), dir.path().to_path_buf(), CancellationToken::new())
+            .with_concurrency(1);
+        let result = pipeline.execute().await;
+
+        assert_eq!(result.status, IndexRunStatus::Succeeded);
+        assert_eq!(result.results.len(), 2);
     }
 }

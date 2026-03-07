@@ -7,8 +7,8 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    AuthorityMode, FileRecord, IdempotencyRecord, IndexRun, IndexRunStatus, RegistryKind,
-    Repository, Workspace,
+    AuthorityMode, Checkpoint, FileRecord, IdempotencyRecord, IndexRun, IndexRunStatus,
+    RegistryKind, Repository, Workspace,
 };
 use crate::error::{Result, TokenizorError};
 
@@ -33,6 +33,8 @@ pub(crate) struct RegistryData {
     pub idempotency_records: Vec<IdempotencyRecord>,
     #[serde(default)]
     pub run_file_records: BTreeMap<String, Vec<FileRecord>>,
+    #[serde(default)]
+    pub checkpoints: Vec<Checkpoint>,
 }
 
 pub struct RegistryPersistence {
@@ -108,29 +110,6 @@ impl RegistryPersistence {
         })
     }
 
-    pub fn cancel_run_if_active(&self, run_id: &str, finished_at_unix_ms: u64) -> Result<bool> {
-        let mut changed = false;
-        self.read_modify_write(|data| {
-            let run = data
-                .runs
-                .iter_mut()
-                .find(|r| r.run_id == run_id)
-                .ok_or_else(|| {
-                    TokenizorError::NotFound(format!(
-                        "run `{run_id}` not found in registry"
-                    ))
-                })?;
-            if run.status.is_terminal() {
-                return Ok(());
-            }
-            run.status = IndexRunStatus::Cancelled;
-            run.finished_at_unix_ms = Some(finished_at_unix_ms);
-            changed = true;
-            Ok(())
-        })?;
-        Ok(changed)
-    }
-
     pub fn update_run_status_with_finish(
         &self,
         run_id: &str,
@@ -157,6 +136,29 @@ impl RegistryPersistence {
             run.not_yet_supported = not_yet_supported.clone();
             Ok(())
         })
+    }
+
+    pub fn cancel_run_if_active(&self, run_id: &str, finished_at_unix_ms: u64) -> Result<bool> {
+        let mut changed = false;
+        self.read_modify_write(|data| {
+            let run = data
+                .runs
+                .iter_mut()
+                .find(|r| r.run_id == run_id)
+                .ok_or_else(|| {
+                    TokenizorError::NotFound(format!(
+                        "run `{run_id}` not found in registry"
+                    ))
+                })?;
+            if run.status.is_terminal() {
+                return Ok(());
+            }
+            run.status = IndexRunStatus::Cancelled;
+            run.finished_at_unix_ms = Some(finished_at_unix_ms);
+            changed = true;
+            Ok(())
+        })?;
+        Ok(changed)
     }
 
     /// List all persisted runs. Reads without acquiring the advisory lock.
@@ -219,6 +221,39 @@ impl RegistryPersistence {
             .get(run_id)
             .cloned()
             .unwrap_or_default())
+    }
+
+    pub fn save_checkpoint(&self, checkpoint: &Checkpoint) -> Result<()> {
+        self.read_modify_write(|data| {
+            let run = data
+                .runs
+                .iter_mut()
+                .find(|r| r.run_id == checkpoint.run_id)
+                .ok_or_else(|| {
+                    TokenizorError::NotFound(format!(
+                        "run `{}` not found in registry",
+                        checkpoint.run_id
+                    ))
+                })?;
+            if run.status.is_terminal() {
+                return Err(TokenizorError::InvalidOperation(format!(
+                    "cannot checkpoint run `{}` with terminal status `{:?}`",
+                    checkpoint.run_id, run.status
+                )));
+            }
+            run.checkpoint_cursor = Some(checkpoint.cursor.clone());
+            data.checkpoints.push(checkpoint.clone());
+            Ok(())
+        })
+    }
+
+    pub fn get_latest_checkpoint(&self, run_id: &str) -> Result<Option<Checkpoint>> {
+        let data = self.load()?;
+        Ok(data
+            .checkpoints
+            .into_iter()
+            .filter(|c| c.run_id == run_id)
+            .max_by_key(|c| c.created_at_unix_ms))
     }
 
     fn read_modify_write(&self, modify: impl FnOnce(&mut RegistryData) -> Result<()>) -> Result<()> {
@@ -873,5 +908,133 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, crate::error::TokenizorError::NotFound(_)));
+    }
+
+    #[test]
+    fn test_backward_compat_deserialization_missing_checkpoints() {
+        let (_dir, persistence) = temp_registry();
+        let run = sample_run("run-1", "repo-1", IndexRunStatus::Queued);
+        persistence.save_run(&run).unwrap();
+
+        // Reload — registry was saved with checkpoints field (as empty vec via Default)
+        // but let's also test raw JSON without the field
+        let json_without_checkpoints = serde_json::json!({
+            "schema_version": 2,
+            "registry_kind": "local_bootstrap_project_workspace",
+            "authority_mode": "local_bootstrap_only",
+            "control_plane_backend": "in_memory",
+            "repositories": {},
+            "workspaces": {},
+            "runs": [],
+            "idempotency_records": [],
+            "run_file_records": {}
+        });
+        fs::write(
+            &persistence.path,
+            serde_json::to_vec_pretty(&json_without_checkpoints).unwrap(),
+        )
+        .unwrap();
+
+        let data = persistence.load().unwrap();
+        assert!(data.checkpoints.is_empty());
+    }
+
+    #[test]
+    fn test_epic1_fixture_backward_compat_with_checkpoints() {
+        let fixture = include_str!("../../tests/fixtures/epic1-registry.json");
+        let data: RegistryData = serde_json::from_str(fixture).unwrap();
+        assert!(data.checkpoints.is_empty());
+    }
+
+    fn sample_checkpoint(run_id: &str, cursor: &str, created_at: u64) -> Checkpoint {
+        Checkpoint {
+            run_id: run_id.to_string(),
+            cursor: cursor.to_string(),
+            files_processed: 10,
+            symbols_written: 50,
+            created_at_unix_ms: created_at,
+        }
+    }
+
+    #[test]
+    fn test_save_checkpoint_persists_and_updates_run_cursor() {
+        let (_dir, persistence) = temp_registry();
+        let run = sample_run("run-1", "repo-1", IndexRunStatus::Running);
+        persistence.save_run(&run).unwrap();
+
+        let checkpoint = sample_checkpoint("run-1", "src/main.rs", 2000);
+        persistence.save_checkpoint(&checkpoint).unwrap();
+
+        // Verify checkpoint persisted
+        let data = persistence.load().unwrap();
+        assert_eq!(data.checkpoints.len(), 1);
+        assert_eq!(data.checkpoints[0].cursor, "src/main.rs");
+        assert_eq!(data.checkpoints[0].run_id, "run-1");
+
+        // Verify run's checkpoint_cursor was updated
+        let loaded_run = persistence.find_run("run-1").unwrap().unwrap();
+        assert_eq!(loaded_run.checkpoint_cursor, Some("src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn test_save_checkpoint_rejects_terminal_run() {
+        let (_dir, persistence) = temp_registry();
+        let run = sample_run("run-1", "repo-1", IndexRunStatus::Succeeded);
+        persistence.save_run(&run).unwrap();
+
+        let checkpoint = sample_checkpoint("run-1", "src/main.rs", 2000);
+        let result = persistence.save_checkpoint(&checkpoint);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, TokenizorError::InvalidOperation(_)));
+
+        // Verify no orphan checkpoint was created
+        let data = persistence.load().unwrap();
+        assert!(data.checkpoints.is_empty());
+    }
+
+    #[test]
+    fn test_save_checkpoint_rejects_missing_run() {
+        let (_dir, persistence) = temp_registry();
+
+        let checkpoint = sample_checkpoint("nonexistent", "src/main.rs", 2000);
+        let result = persistence.save_checkpoint(&checkpoint);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, TokenizorError::NotFound(_)));
+    }
+
+    #[test]
+    fn test_get_latest_checkpoint_returns_most_recent() {
+        let (_dir, persistence) = temp_registry();
+        let run = sample_run("run-1", "repo-1", IndexRunStatus::Running);
+        persistence.save_run(&run).unwrap();
+
+        persistence
+            .save_checkpoint(&sample_checkpoint("run-1", "src/a.rs", 1000))
+            .unwrap();
+        persistence
+            .save_checkpoint(&sample_checkpoint("run-1", "src/b.rs", 2000))
+            .unwrap();
+        persistence
+            .save_checkpoint(&sample_checkpoint("run-1", "src/c.rs", 3000))
+            .unwrap();
+
+        let latest = persistence
+            .get_latest_checkpoint("run-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.cursor, "src/c.rs");
+        assert_eq!(latest.created_at_unix_ms, 3000);
+    }
+
+    #[test]
+    fn test_get_latest_checkpoint_returns_none_for_no_checkpoints() {
+        let (_dir, persistence) = temp_registry();
+        let run = sample_run("run-1", "repo-1", IndexRunStatus::Running);
+        persistence.save_run(&run).unwrap();
+
+        let latest = persistence.get_latest_checkpoint("run-1").unwrap();
+        assert!(latest.is_none());
     }
 }

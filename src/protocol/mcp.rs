@@ -176,6 +176,28 @@ impl TokenizorServer {
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+
+    #[tool(
+        description = "Create a checkpoint for an active indexing run. Persists current progress so interrupted work can later resume. Returns the checkpoint details. Fails if the run is not active or has no committed work yet. Parameters: run_id (string, required)."
+    )]
+    fn checkpoint_now(&self, params: rmcp::model::JsonObject) -> Result<CallToolResult, McpError> {
+        let run_id = params
+            .get("run_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_params("missing required parameter: run_id", None))?;
+
+        let checkpoint = self
+            .application
+            .run_manager()
+            .checkpoint_run(run_id)
+            .map_err(to_mcp_error)?;
+
+        let json = serde_json::to_string(&checkpoint).map_err(|e| {
+            McpError::internal_error(format!("failed to serialize checkpoint: {e}"), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
 }
 
 #[tool_handler]
@@ -248,6 +270,9 @@ fn to_mcp_error(error: TokenizorError) -> McpError {
     match error {
         TokenizorError::Config(message) | TokenizorError::InvalidArgument(message) => {
             McpError::invalid_params(message, None)
+        }
+        TokenizorError::InvalidOperation(message) => {
+            McpError::invalid_params(format!("invalid operation: {message}"), None)
         }
         TokenizorError::NotFound(message) => McpError::invalid_params(message, None),
         TokenizorError::Integrity(message) => {

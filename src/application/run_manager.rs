@@ -7,10 +7,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::domain::{
-    FileOutcomeSummary, FileRecord, IdempotencyRecord, IdempotencyStatus, IndexRun, IndexRunMode,
-    IndexRunStatus, PersistedFileOutcome, RunHealth, RunPhase, RunProgressSnapshot,
-    RunStatusReport,
-    unix_timestamp_ms,
+    Checkpoint, FileOutcomeSummary, FileRecord, IdempotencyRecord, IdempotencyStatus, IndexRun,
+    IndexRunMode, IndexRunStatus, PersistedFileOutcome, RunHealth, RunPhase, RunProgressSnapshot,
+    RunStatusReport, unix_timestamp_ms,
 };
 use crate::storage::BlobStore;
 use crate::error::{Result, TokenizorError};
@@ -22,6 +21,7 @@ pub struct ActiveRun {
     pub handle: JoinHandle<()>,
     pub cancellation_token: CancellationToken,
     pub progress: Option<Arc<PipelineProgress>>,
+    pub checkpoint_cursor_fn: Option<Arc<dyn Fn() -> Option<String> + Send + Sync>>,
 }
 
 pub struct RunManager {
@@ -187,9 +187,20 @@ impl RunManager {
 
         let token = CancellationToken::new();
 
+        // Set up checkpoint callback: calls RunManager::checkpoint_run() periodically
+        let manager_for_cb = Arc::clone(self);
+        let run_id_for_cb = run_id.clone();
+        let checkpoint_callback = Box::new(move || {
+            if let Err(e) = manager_for_cb.checkpoint_run(&run_id_for_cb) {
+                warn!(run_id = %run_id_for_cb, error = %e, "periodic checkpoint failed");
+            }
+        });
+
         let pipeline = IndexingPipeline::new(run_id.clone(), repo_root, token.clone())
-            .with_cas(blob_store, repo_id_owned.clone());
+            .with_cas(blob_store, repo_id_owned.clone())
+            .with_checkpoint_callback(checkpoint_callback, 100);
         let progress = pipeline.progress();
+        let tracker = pipeline.checkpoint_tracker();
 
         let manager = Arc::clone(self);
 
@@ -291,12 +302,16 @@ impl RunManager {
             manager.deregister_active_run(&repo_id_owned);
         });
 
+        let cursor_fn: Arc<dyn Fn() -> Option<String> + Send + Sync> =
+            Arc::new(move || tracker.checkpoint_cursor());
+
         self.register_active_run(
             repo_id,
             ActiveRun {
                 handle,
                 cancellation_token: token,
                 progress: Some(Arc::clone(&progress)),
+                checkpoint_cursor_fn: Some(cursor_fn),
             },
         );
 
@@ -353,6 +368,75 @@ impl RunManager {
             debug!(run_id = %run_id, "cancel_run: run became terminal before persistence update");
         }
         self.inspect_run(run_id)
+    }
+
+    pub fn checkpoint_run(&self, run_id: &str) -> Result<Checkpoint> {
+        let run = self
+            .persistence
+            .find_run(run_id)?
+            .ok_or_else(|| TokenizorError::NotFound(format!("run '{run_id}' not found")))?;
+
+        if run.status.is_terminal() {
+            return Err(TokenizorError::InvalidOperation(format!(
+                "cannot checkpoint run '{run_id}' with terminal status '{:?}'",
+                run.status
+            )));
+        }
+
+        // Extract needed data from active_runs, then drop the Mutex guard
+        let (progress, cursor) = {
+            let active_runs = self.active_runs.lock().unwrap_or_else(|e| e.into_inner());
+            let active = active_runs.get(&run.repo_id).ok_or_else(|| {
+                TokenizorError::InvalidOperation(format!(
+                    "run '{run_id}' has no active pipeline (may be Queued or race condition)"
+                ))
+            })?;
+
+            let progress = active.progress.as_ref().ok_or_else(|| {
+                TokenizorError::InvalidOperation(format!(
+                    "run '{run_id}' pipeline not yet initialized (no progress available)"
+                ))
+            })?;
+
+            let files_processed = progress.files_processed.load(std::sync::atomic::Ordering::Relaxed);
+            let symbols_extracted = progress.symbols_extracted.load(std::sync::atomic::Ordering::Relaxed);
+
+            let cursor = active
+                .checkpoint_cursor_fn
+                .as_ref()
+                .and_then(|f| f());
+
+            (
+                (files_processed, symbols_extracted),
+                cursor,
+            )
+        };
+        // Mutex guard dropped here
+
+        let cursor = cursor.ok_or_else(|| {
+            TokenizorError::InvalidOperation(format!(
+                "run '{run_id}' has no committed work yet (cursor is empty)"
+            ))
+        })?;
+
+        let checkpoint = Checkpoint {
+            run_id: run_id.to_string(),
+            cursor,
+            files_processed: progress.0,
+            symbols_written: progress.1,
+            created_at_unix_ms: unix_timestamp_ms(),
+        };
+
+        self.persistence.save_checkpoint(&checkpoint)?;
+
+        info!(
+            run_id = %run_id,
+            cursor = %checkpoint.cursor,
+            files_processed = checkpoint.files_processed,
+            "checkpoint created for run"
+        );
+
+        Ok(checkpoint)
     }
 
     pub fn list_runs_with_health(
@@ -694,6 +778,7 @@ mod tests {
                 handle,
                 cancellation_token: token,
                 progress: None,
+                checkpoint_cursor_fn: None,
             },
         );
 
@@ -788,6 +873,7 @@ mod tests {
                 handle,
                 cancellation_token: token,
                 progress: Some(Arc::clone(&progress)),
+                checkpoint_cursor_fn: None,
             },
         );
 
@@ -915,6 +1001,7 @@ mod tests {
                 handle,
                 cancellation_token: token,
                 progress: Some(Arc::clone(&progress)),
+                checkpoint_cursor_fn: None,
             },
         );
 
@@ -976,6 +1063,7 @@ mod tests {
                 handle: tokio::spawn(async {}),
                 cancellation_token: token,
                 progress: None,
+                checkpoint_cursor_fn: None,
             },
         );
 
@@ -1041,11 +1129,125 @@ mod tests {
                 handle: tokio::spawn(async {}),
                 cancellation_token: token,
                 progress: None,
+                checkpoint_cursor_fn: None,
             },
         );
 
         assert!(manager.has_active_run("repo-remove"));
         manager.cancel_run(&run_id).unwrap();
         assert!(!manager.has_active_run("repo-remove"));
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_active_run_creates_and_persists() {
+        let (_dir, manager) = temp_run_manager();
+        let run = manager.start_run("repo-cp", IndexRunMode::Full).unwrap();
+        let run_id = run.run_id.clone();
+        manager.persistence.transition_to_running(&run_id, 1001).unwrap();
+
+        let progress = Arc::new(PipelineProgress::new());
+        progress.files_processed.store(42, std::sync::atomic::Ordering::Relaxed);
+        progress.symbols_extracted.store(150, std::sync::atomic::Ordering::Relaxed);
+
+        let cursor_fn: Arc<dyn Fn() -> Option<String> + Send + Sync> =
+            Arc::new(|| Some("src/main.rs".to_string()));
+
+        manager.register_active_run(
+            "repo-cp",
+            ActiveRun {
+                handle: tokio::spawn(async {}),
+                cancellation_token: CancellationToken::new(),
+                progress: Some(progress),
+                checkpoint_cursor_fn: Some(cursor_fn),
+            },
+        );
+
+        let checkpoint = manager.checkpoint_run(&run_id).unwrap();
+        assert_eq!(checkpoint.run_id, run_id);
+        assert_eq!(checkpoint.cursor, "src/main.rs");
+        assert_eq!(checkpoint.files_processed, 42);
+        assert_eq!(checkpoint.symbols_written, 150);
+        assert!(checkpoint.created_at_unix_ms > 0);
+
+        // Verify persisted
+        let latest = manager.persistence().get_latest_checkpoint(&run_id).unwrap();
+        assert!(latest.is_some());
+        assert_eq!(latest.unwrap().cursor, "src/main.rs");
+
+        // Verify run's checkpoint_cursor updated
+        let updated_run = manager.persistence().find_run(&run_id).unwrap().unwrap();
+        assert_eq!(updated_run.checkpoint_cursor, Some("src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn test_checkpoint_terminal_run_returns_error() {
+        let (_dir, manager) = temp_run_manager();
+        let run = manager.start_run("repo-term-cp", IndexRunMode::Full).unwrap();
+        let run_id = run.run_id.clone();
+        manager.persistence.update_run_status(&run_id, IndexRunStatus::Succeeded, None).unwrap();
+
+        let result = manager.checkpoint_run(&run_id);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), TokenizorError::InvalidOperation(_)));
+    }
+
+    #[test]
+    fn test_checkpoint_nonexistent_run_returns_not_found() {
+        let (_dir, manager) = temp_run_manager();
+
+        let result = manager.checkpoint_run("nonexistent-run");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), TokenizorError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_run_without_progress_returns_error() {
+        let (_dir, manager) = temp_run_manager();
+        let run = manager.start_run("repo-noprog", IndexRunMode::Full).unwrap();
+        let run_id = run.run_id.clone();
+        manager.persistence.transition_to_running(&run_id, 1001).unwrap();
+
+        manager.register_active_run(
+            "repo-noprog",
+            ActiveRun {
+                handle: tokio::spawn(async {}),
+                cancellation_token: CancellationToken::new(),
+                progress: None,
+                checkpoint_cursor_fn: None,
+            },
+        );
+
+        let result = manager.checkpoint_run(&run_id);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), TokenizorError::InvalidOperation(_)));
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_run_without_cursor_returns_error() {
+        let (_dir, manager) = temp_run_manager();
+        let run = manager.start_run("repo-nocursor", IndexRunMode::Full).unwrap();
+        let run_id = run.run_id.clone();
+        manager.persistence.transition_to_running(&run_id, 1001).unwrap();
+
+        let progress = Arc::new(PipelineProgress::new());
+        progress.files_processed.store(10, std::sync::atomic::Ordering::Relaxed);
+
+        // cursor_fn returns None (no committed work yet)
+        let cursor_fn: Arc<dyn Fn() -> Option<String> + Send + Sync> =
+            Arc::new(|| None);
+
+        manager.register_active_run(
+            "repo-nocursor",
+            ActiveRun {
+                handle: tokio::spawn(async {}),
+                cancellation_token: CancellationToken::new(),
+                progress: Some(progress),
+                checkpoint_cursor_fn: Some(cursor_fn),
+            },
+        );
+
+        let result = manager.checkpoint_run(&run_id);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), TokenizorError::InvalidOperation(_)));
     }
 }
