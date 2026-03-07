@@ -50,8 +50,8 @@ development_status:
   1-7-migrate-or-update-workspace-state-safely: done
   epic-1-retrospective: done
 
-  epic-2: backlog
-  2-1-start-an-indexed-run-with-durable-run-identity: backlog
+  epic-2: in-progress
+  2-1-start-an-indexed-run-with-durable-run-identity: ready-for-dev
   2-2-execute-indexing-for-the-initial-quality-focus-language-set: backlog
   2-3-persist-file-level-indexing-outputs-and-symbol-file-metadata-for-the-initial-quality-focus-language-set: backlog
   2-4-extend-indexing-through-a-repeatable-broader-language-onboarding-pattern: backlog
