@@ -5,7 +5,7 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 
-use crate::domain::IndexRunMode;
+use crate::domain::{IndexRunMode, IndexRunStatus};
 use crate::{ApplicationContext, TokenizorError};
 
 #[derive(Clone)]
@@ -80,6 +80,71 @@ impl TokenizorServer {
         })?;
 
         Ok(CallToolResult::success(vec![Content::text(payload)]))
+    }
+
+    #[tool(
+        description = "Inspect the status and health of an indexing run. Returns lifecycle state, health classification, progress (if active), file outcome summary, and action required (if intervention is needed). Parameters: run_id (string, required)."
+    )]
+    fn get_index_run(&self, params: rmcp::model::JsonObject) -> Result<CallToolResult, McpError> {
+        let run_id = params
+            .get("run_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_params("missing required parameter: run_id", None))?;
+
+        let report = self
+            .application
+            .run_manager()
+            .inspect_run(run_id)
+            .map_err(to_mcp_error)?;
+
+        let json = serde_json::to_string_pretty(&report).map_err(|e| {
+            McpError::internal_error(format!("failed to serialize run status report: {e}"), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "List indexing runs, optionally filtered by repository or status. Returns status and health for each run. Parameters: repo_id (string, optional), status (string, optional: queued|running|succeeded|failed|cancelled|interrupted|aborted)."
+    )]
+    fn list_index_runs(&self, params: rmcp::model::JsonObject) -> Result<CallToolResult, McpError> {
+        let repo_id = params.get("repo_id").and_then(|v| v.as_str());
+
+        let status_filter = if let Some(status_str) = params.get("status").and_then(|v| v.as_str())
+        {
+            let parsed = match status_str {
+                "queued" => IndexRunStatus::Queued,
+                "running" => IndexRunStatus::Running,
+                "succeeded" => IndexRunStatus::Succeeded,
+                "failed" => IndexRunStatus::Failed,
+                "cancelled" => IndexRunStatus::Cancelled,
+                "interrupted" => IndexRunStatus::Interrupted,
+                "aborted" => IndexRunStatus::Aborted,
+                other => {
+                    return Err(McpError::invalid_params(
+                        format!(
+                            "unknown status: `{other}`. Valid statuses: queued, running, succeeded, failed, cancelled, interrupted, aborted"
+                        ),
+                        None,
+                    ));
+                }
+            };
+            Some(parsed)
+        } else {
+            None
+        };
+
+        let reports = self
+            .application
+            .run_manager()
+            .list_runs_with_health(repo_id, status_filter.as_ref())
+            .map_err(to_mcp_error)?;
+
+        let json = serde_json::to_string_pretty(&reports).map_err(|e| {
+            McpError::internal_error(format!("failed to serialize run status reports: {e}"), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 }
 

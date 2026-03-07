@@ -175,6 +175,19 @@ pub enum IndexRunStatus {
     Aborted,
 }
 
+impl IndexRunStatus {
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            IndexRunStatus::Succeeded
+                | IndexRunStatus::Failed
+                | IndexRunStatus::Cancelled
+                | IndexRunStatus::Interrupted
+                | IndexRunStatus::Aborted
+        )
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Checkpoint {
     pub run_id: String,
@@ -205,6 +218,39 @@ pub struct FileRecord {
     pub run_id: String,
     pub repo_id: String,
     pub committed_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunHealth {
+    Healthy,
+    Degraded,
+    Unhealthy,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunProgressSnapshot {
+    pub total_files: u64,
+    pub files_processed: u64,
+    pub files_failed: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileOutcomeSummary {
+    pub total_committed: u64,
+    pub processed_ok: u64,
+    pub partial_parse: u64,
+    pub failed: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunStatusReport {
+    pub run: IndexRun,
+    pub health: RunHealth,
+    pub is_active: bool,
+    pub progress: Option<RunProgressSnapshot>,
+    pub file_outcome_summary: Option<FileOutcomeSummary>,
+    pub action_required: Option<String>,
 }
 
 #[cfg(test)]
@@ -713,5 +759,76 @@ mod tests {
         let json = serde_json::to_string(&run).unwrap();
         let deserialized: IndexRun = serde_json::from_str(&json).unwrap();
         assert_eq!(run, deserialized);
+    }
+
+    #[test]
+    fn test_run_health_serde_roundtrip() {
+        for variant in [RunHealth::Healthy, RunHealth::Degraded, RunHealth::Unhealthy] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let deserialized: RunHealth = serde_json::from_str(&json).unwrap();
+            assert_eq!(variant, deserialized);
+        }
+    }
+
+    #[test]
+    fn test_run_progress_snapshot_serde_roundtrip() {
+        let snapshot = RunProgressSnapshot {
+            total_files: 100,
+            files_processed: 80,
+            files_failed: 5,
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let deserialized: RunProgressSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snapshot, deserialized);
+    }
+
+    #[test]
+    fn test_file_outcome_summary_serde_roundtrip() {
+        let summary = FileOutcomeSummary {
+            total_committed: 50,
+            processed_ok: 40,
+            partial_parse: 7,
+            failed: 3,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: FileOutcomeSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(summary, deserialized);
+    }
+
+    #[test]
+    fn test_run_status_report_serde_roundtrip() {
+        let report = RunStatusReport {
+            run: IndexRun {
+                run_id: "run-1".into(),
+                repo_id: "repo-1".into(),
+                mode: IndexRunMode::Full,
+                status: IndexRunStatus::Succeeded,
+                requested_at_unix_ms: 1000,
+                started_at_unix_ms: Some(1001),
+                finished_at_unix_ms: Some(2000),
+                idempotency_key: None,
+                request_hash: None,
+                checkpoint_cursor: None,
+                error_summary: None,
+                not_yet_supported: None,
+            },
+            health: RunHealth::Healthy,
+            is_active: false,
+            progress: Some(RunProgressSnapshot {
+                total_files: 10,
+                files_processed: 10,
+                files_failed: 0,
+            }),
+            file_outcome_summary: Some(FileOutcomeSummary {
+                total_committed: 10,
+                processed_ok: 10,
+                partial_parse: 0,
+                failed: 0,
+            }),
+            action_required: None,
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let deserialized: RunStatusReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(report, deserialized);
     }
 }

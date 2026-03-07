@@ -4,10 +4,11 @@ use std::sync::{Arc, Mutex};
 
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::domain::{
-    IdempotencyRecord, IdempotencyStatus, IndexRun, IndexRunMode, IndexRunStatus,
+    FileOutcomeSummary, FileRecord, IdempotencyRecord, IdempotencyStatus, IndexRun, IndexRunMode,
+    IndexRunStatus, PersistedFileOutcome, RunHealth, RunProgressSnapshot, RunStatusReport,
     unix_timestamp_ms,
 };
 use crate::storage::BlobStore;
@@ -19,6 +20,7 @@ use crate::storage::digest_hex;
 pub struct ActiveRun {
     pub handle: JoinHandle<()>,
     pub cancellation_token: CancellationToken,
+    pub progress: Option<Arc<PipelineProgress>>,
 }
 
 pub struct RunManager {
@@ -115,6 +117,17 @@ impl RunManager {
     pub fn has_active_run(&self, repo_id: &str) -> bool {
         let active_runs = self.active_runs.lock().unwrap_or_else(|e| e.into_inner());
         active_runs.contains_key(repo_id)
+    }
+
+    pub fn get_active_progress(&self, repo_id: &str) -> Option<RunProgressSnapshot> {
+        let active_runs = self.active_runs.lock().unwrap_or_else(|e| e.into_inner());
+        active_runs.get(repo_id).and_then(|active| {
+            active.progress.as_ref().map(|p| RunProgressSnapshot {
+                total_files: p.total_files.load(std::sync::atomic::Ordering::Relaxed),
+                files_processed: p.files_processed.load(std::sync::atomic::Ordering::Relaxed),
+                files_failed: p.files_failed.load(std::sync::atomic::Ordering::Relaxed),
+            })
+        })
     }
 
     pub fn start_run_idempotent(
@@ -249,6 +262,7 @@ impl RunManager {
             ActiveRun {
                 handle,
                 cancellation_token: token,
+                progress: Some(Arc::clone(&progress)),
             },
         );
 
@@ -262,6 +276,73 @@ impl RunManager {
 
     pub fn persistence(&self) -> &RegistryPersistence {
         &self.persistence
+    }
+
+    pub fn inspect_run(&self, run_id: &str) -> Result<RunStatusReport> {
+        let run = self
+            .persistence
+            .find_run(run_id)?
+            .ok_or_else(|| TokenizorError::NotFound(format!("run '{run_id}' not found")))?;
+
+        self.build_run_report(run)
+    }
+
+    pub fn list_runs_with_health(
+        &self,
+        repo_id: Option<&str>,
+        status: Option<&IndexRunStatus>,
+    ) -> Result<Vec<RunStatusReport>> {
+        let runs = match status {
+            Some(s) => self.persistence.find_runs_by_status(s)?,
+            None => self.persistence.list_runs()?,
+        };
+
+        let filtered = match repo_id {
+            Some(rid) => runs.into_iter().filter(|r| r.repo_id == rid).collect::<Vec<_>>(),
+            None => runs,
+        };
+
+        let mut reports = Vec::with_capacity(filtered.len());
+        for run in filtered {
+            reports.push(self.build_run_report(run)?);
+        }
+
+        debug!(count = reports.len(), "listed runs with health");
+        Ok(reports)
+    }
+
+    fn build_run_report(&self, run: IndexRun) -> Result<RunStatusReport> {
+        let is_active =
+            run.status == IndexRunStatus::Running && self.has_active_run(&run.repo_id);
+
+        let progress = if is_active {
+            self.get_active_progress(&run.repo_id)
+        } else {
+            None
+        };
+
+        let file_outcome_summary = if run.status.is_terminal() {
+            let records = self.persistence.get_file_records(&run.run_id)?;
+            if records.is_empty() {
+                None
+            } else {
+                Some(build_file_outcome_summary(&records))
+            }
+        } else {
+            None
+        };
+
+        let health = classify_run_health(&run, file_outcome_summary.as_ref());
+        let action_required = action_required_message(&run, &health);
+
+        Ok(RunStatusReport {
+            run,
+            health,
+            is_active,
+            progress,
+            file_outcome_summary,
+            action_required,
+        })
     }
 }
 
@@ -291,6 +372,64 @@ fn generate_run_id(repo_id: &str, mode: &IndexRunMode, requested_at_unix_ms: u64
     };
     let input = format!("{repo_id}:{mode_str}:{requested_at_unix_ms}");
     digest_hex(input.as_bytes())
+}
+
+fn classify_run_health(run: &IndexRun, file_summary: Option<&FileOutcomeSummary>) -> RunHealth {
+    match &run.status {
+        IndexRunStatus::Queued | IndexRunStatus::Running | IndexRunStatus::Cancelled => {
+            RunHealth::Healthy
+        }
+        IndexRunStatus::Failed | IndexRunStatus::Interrupted | IndexRunStatus::Aborted => {
+            RunHealth::Unhealthy
+        }
+        IndexRunStatus::Succeeded => match file_summary {
+            Some(summary) if summary.failed > 0 || summary.partial_parse > 0 => {
+                RunHealth::Degraded
+            }
+            _ => RunHealth::Healthy,
+        },
+    }
+}
+
+fn action_required_message(run: &IndexRun, health: &RunHealth) -> Option<String> {
+    match &run.status {
+        IndexRunStatus::Interrupted => {
+            Some("Run was interrupted. Resume with re-index or repair.".into())
+        }
+        IndexRunStatus::Failed => {
+            let detail = run
+                .error_summary
+                .as_deref()
+                .unwrap_or("unknown error");
+            Some(format!("Run failed: {detail}. Investigate and re-run."))
+        }
+        IndexRunStatus::Aborted => {
+            Some("Run aborted (circuit breaker). Check file-level errors, consider repair mode.".into())
+        }
+        IndexRunStatus::Succeeded if *health == RunHealth::Degraded => {
+            Some("Run completed with degraded files. Review partial/failed outcomes.".into())
+        }
+        _ => None,
+    }
+}
+
+fn build_file_outcome_summary(records: &[FileRecord]) -> FileOutcomeSummary {
+    let mut summary = FileOutcomeSummary {
+        total_committed: 0,
+        processed_ok: 0,
+        partial_parse: 0,
+        failed: 0,
+    };
+    for record in records {
+        summary.total_committed += 1;
+        match &record.outcome {
+            PersistedFileOutcome::Committed => summary.processed_ok += 1,
+            PersistedFileOutcome::EmptySymbols => summary.processed_ok += 1,
+            PersistedFileOutcome::Failed { .. } => summary.failed += 1,
+            PersistedFileOutcome::Quarantined { .. } => summary.partial_parse += 1,
+        }
+    }
+    summary
 }
 
 #[cfg(test)]
@@ -458,6 +597,7 @@ mod tests {
             ActiveRun {
                 handle,
                 cancellation_token: token,
+                progress: None,
             },
         );
 
@@ -530,5 +670,133 @@ mod tests {
         let second_run = manager.start_run("repo-1", IndexRunMode::Full).unwrap();
         assert_ne!(first_run.run_id, second_run.run_id);
         assert_eq!(second_run.status, IndexRunStatus::Queued);
+    }
+
+    #[test]
+    fn test_active_run_progress_snapshot_reflects_atomic_counters() {
+        let (_dir, manager) = temp_run_manager();
+        let token = CancellationToken::new();
+        let handle = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .spawn(async {});
+
+        let progress = Arc::new(PipelineProgress {
+            total_files: std::sync::atomic::AtomicU64::new(100),
+            files_processed: std::sync::atomic::AtomicU64::new(75),
+            files_failed: std::sync::atomic::AtomicU64::new(3),
+        });
+
+        manager.register_active_run(
+            "repo-progress",
+            ActiveRun {
+                handle,
+                cancellation_token: token,
+                progress: Some(Arc::clone(&progress)),
+            },
+        );
+
+        let snapshot = manager.get_active_progress("repo-progress");
+        assert!(snapshot.is_some());
+        let snapshot = snapshot.unwrap();
+        assert_eq!(snapshot.total_files, 100);
+        assert_eq!(snapshot.files_processed, 75);
+        assert_eq!(snapshot.files_failed, 3);
+
+        // Verify no progress for unknown repo
+        assert!(manager.get_active_progress("unknown-repo").is_none());
+    }
+
+    fn sample_run_with_status(status: IndexRunStatus) -> IndexRun {
+        IndexRun {
+            run_id: "run-health-test".into(),
+            repo_id: "repo-1".into(),
+            mode: IndexRunMode::Full,
+            status,
+            requested_at_unix_ms: 1000,
+            started_at_unix_ms: Some(1001),
+            finished_at_unix_ms: Some(2000),
+            idempotency_key: None,
+            request_hash: None,
+            checkpoint_cursor: None,
+            error_summary: None,
+            not_yet_supported: None,
+        }
+    }
+
+    #[test]
+    fn test_classify_health_succeeded_all_ok_returns_healthy() {
+        let run = sample_run_with_status(IndexRunStatus::Succeeded);
+        let summary = FileOutcomeSummary {
+            total_committed: 10,
+            processed_ok: 10,
+            partial_parse: 0,
+            failed: 0,
+        };
+        assert_eq!(classify_run_health(&run, Some(&summary)), RunHealth::Healthy);
+    }
+
+    #[test]
+    fn test_classify_health_succeeded_with_partial_returns_degraded() {
+        let run = sample_run_with_status(IndexRunStatus::Succeeded);
+        let summary = FileOutcomeSummary {
+            total_committed: 10,
+            processed_ok: 8,
+            partial_parse: 2,
+            failed: 0,
+        };
+        assert_eq!(classify_run_health(&run, Some(&summary)), RunHealth::Degraded);
+    }
+
+    #[test]
+    fn test_classify_health_failed_returns_unhealthy() {
+        let run = sample_run_with_status(IndexRunStatus::Failed);
+        assert_eq!(classify_run_health(&run, None), RunHealth::Unhealthy);
+    }
+
+    #[test]
+    fn test_classify_health_interrupted_returns_unhealthy() {
+        let run = sample_run_with_status(IndexRunStatus::Interrupted);
+        assert_eq!(classify_run_health(&run, None), RunHealth::Unhealthy);
+    }
+
+    #[test]
+    fn test_classify_health_cancelled_returns_healthy() {
+        let run = sample_run_with_status(IndexRunStatus::Cancelled);
+        assert_eq!(classify_run_health(&run, None), RunHealth::Healthy);
+    }
+
+    #[test]
+    fn test_classify_health_running_returns_healthy() {
+        let run = sample_run_with_status(IndexRunStatus::Running);
+        assert_eq!(classify_run_health(&run, None), RunHealth::Healthy);
+    }
+
+    #[test]
+    fn test_classify_health_aborted_returns_unhealthy() {
+        let run = sample_run_with_status(IndexRunStatus::Aborted);
+        assert_eq!(classify_run_health(&run, None), RunHealth::Unhealthy);
+    }
+
+    #[test]
+    fn test_action_required_for_interrupted_run() {
+        let run = sample_run_with_status(IndexRunStatus::Interrupted);
+        let health = classify_run_health(&run, None);
+        let msg = action_required_message(&run, &health);
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("interrupted"));
+    }
+
+    #[test]
+    fn test_action_required_for_healthy_run_is_none() {
+        let run = sample_run_with_status(IndexRunStatus::Succeeded);
+        let summary = FileOutcomeSummary {
+            total_committed: 5,
+            processed_ok: 5,
+            partial_parse: 0,
+            failed: 0,
+        };
+        let health = classify_run_health(&run, Some(&summary));
+        assert!(action_required_message(&run, &health).is_none());
     }
 }

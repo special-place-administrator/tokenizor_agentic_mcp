@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokenizor_agentic_mcp::config::BlobStoreConfig;
-use tokenizor_agentic_mcp::domain::{ComponentHealth, IndexRunMode, IndexRunStatus, PersistedFileOutcome};
+use tokenizor_agentic_mcp::domain::{ComponentHealth, FileRecord, IndexRunMode, IndexRunStatus, LanguageId, PersistedFileOutcome, RunHealth};
 use tokenizor_agentic_mcp::error::TokenizorError;
 use tokenizor_agentic_mcp::storage::registry_persistence::RegistryPersistence;
 use tokenizor_agentic_mcp::storage::{BlobStore, LocalCasBlobStore, StoredBlob};
@@ -430,4 +430,209 @@ async fn test_quality_focus_languages_still_process_correctly() {
         assert_eq!(record.outcome, PersistedFileOutcome::Committed);
         assert!(!record.symbols.is_empty());
     }
+}
+
+// --- Story 2.5: Run inspection integration tests ---
+
+#[tokio::test]
+async fn test_inspect_succeeded_all_ok_returns_healthy() {
+    let (_dir, manager, _cas_dir, cas) = setup_test_env();
+    let repo_dir = tempfile::tempdir().unwrap();
+    fs::write(repo_dir.path().join("main.rs"), "fn main() {}").unwrap();
+
+    let (run, _progress) = manager
+        .launch_run("repo-healthy", IndexRunMode::Full, repo_dir.path().to_path_buf(), cas)
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let report = manager.inspect_run(&run.run_id).unwrap();
+    assert_eq!(report.health, RunHealth::Healthy);
+    assert_eq!(report.run.status, IndexRunStatus::Succeeded);
+    assert!(!report.is_active);
+    assert!(report.action_required.is_none());
+    assert!(report.file_outcome_summary.is_some());
+    let summary = report.file_outcome_summary.unwrap();
+    assert!(summary.processed_ok > 0);
+    assert_eq!(summary.failed, 0);
+}
+
+#[tokio::test]
+async fn test_inspect_succeeded_with_partial_returns_degraded() {
+    let (_dir, manager, _cas_dir, _cas) = setup_test_env();
+
+    // Create a run and manually set it to Succeeded with quarantined file records
+    // to deterministically test the degraded path (no pipeline dependency).
+    let run = manager.start_run("repo-degraded", IndexRunMode::Full).unwrap();
+    manager
+        .persistence()
+        .update_run_status(&run.run_id, IndexRunStatus::Succeeded, None)
+        .unwrap();
+
+    let records = vec![
+        FileRecord {
+            relative_path: "good.rs".into(),
+            language: LanguageId::Rust,
+            blob_id: "blob-1".into(),
+            byte_len: 100,
+            content_hash: "hash-1".into(),
+            outcome: PersistedFileOutcome::Committed,
+            symbols: vec![],
+            run_id: run.run_id.clone(),
+            repo_id: "repo-degraded".into(),
+            committed_at_unix_ms: 1000,
+        },
+        FileRecord {
+            relative_path: "suspect.rs".into(),
+            language: LanguageId::Rust,
+            blob_id: "blob-2".into(),
+            byte_len: 200,
+            content_hash: "hash-2".into(),
+            outcome: PersistedFileOutcome::Quarantined {
+                reason: "suspect parse spans".into(),
+            },
+            symbols: vec![],
+            run_id: run.run_id.clone(),
+            repo_id: "repo-degraded".into(),
+            committed_at_unix_ms: 1001,
+        },
+    ];
+    manager
+        .persistence()
+        .save_file_records(&run.run_id, &records)
+        .unwrap();
+
+    let report = manager.inspect_run(&run.run_id).unwrap();
+    assert_eq!(report.health, RunHealth::Degraded);
+    assert!(report.action_required.is_some());
+    let summary = report.file_outcome_summary.unwrap();
+    assert_eq!(summary.total_committed, 2);
+    assert_eq!(summary.processed_ok, 1);
+    assert_eq!(summary.partial_parse, 1);
+}
+
+#[tokio::test]
+async fn test_inspect_failed_run_returns_unhealthy() {
+    let (_dir, manager, _cas_dir, _cas) = setup_test_env();
+
+    let run = manager.start_run("repo-fail", IndexRunMode::Full).unwrap();
+    manager
+        .persistence()
+        .update_run_status(
+            &run.run_id,
+            IndexRunStatus::Failed,
+            Some("simulated pipeline failure".into()),
+        )
+        .unwrap();
+
+    let report = manager.inspect_run(&run.run_id).unwrap();
+    assert_eq!(report.run.status, IndexRunStatus::Failed);
+    assert_eq!(report.health, RunHealth::Unhealthy);
+    assert!(report.action_required.is_some());
+    let msg = report.action_required.unwrap();
+    assert!(msg.contains("failed") || msg.contains("Failed"));
+}
+
+#[tokio::test]
+async fn test_inspect_interrupted_run_returns_unhealthy() {
+    let (_dir, manager, _cas_dir, _cas) = setup_test_env();
+
+    // Create a run and manually set it to Interrupted via persistence
+    let run = manager.start_run("repo-interrupt", IndexRunMode::Full).unwrap();
+    manager
+        .persistence()
+        .update_run_status(&run.run_id, IndexRunStatus::Running, None)
+        .unwrap();
+    // Simulate startup sweep marking it interrupted
+    manager.startup_sweep().unwrap();
+
+    let report = manager.inspect_run(&run.run_id).unwrap();
+    assert_eq!(report.run.status, IndexRunStatus::Interrupted);
+    assert_eq!(report.health, RunHealth::Unhealthy);
+    assert!(report.action_required.is_some());
+    assert!(report.action_required.unwrap().contains("interrupted"));
+}
+
+#[tokio::test]
+async fn test_inspect_cancelled_run_returns_healthy() {
+    let (_dir, manager, _cas_dir, _cas) = setup_test_env();
+
+    let run = manager.start_run("repo-cancel", IndexRunMode::Full).unwrap();
+    manager
+        .persistence()
+        .update_run_status(&run.run_id, IndexRunStatus::Cancelled, None)
+        .unwrap();
+
+    let report = manager.inspect_run(&run.run_id).unwrap();
+    assert_eq!(report.health, RunHealth::Healthy);
+    assert!(report.action_required.is_none());
+}
+
+#[tokio::test]
+async fn test_inspect_nonexistent_run_returns_error() {
+    let (_dir, manager, _cas_dir, _cas) = setup_test_env();
+
+    let result = manager.inspect_run("nonexistent-run-id");
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        TokenizorError::NotFound(msg) => assert!(msg.contains("nonexistent-run-id")),
+        other => panic!("expected NotFound, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_list_runs_no_filter_returns_all() {
+    let (_dir, manager, _cas_dir, _cas) = setup_test_env();
+
+    manager.start_run("repo-a", IndexRunMode::Full).unwrap();
+    manager
+        .persistence()
+        .update_run_status(
+            &manager.persistence().list_runs().unwrap()[0].run_id,
+            IndexRunStatus::Succeeded,
+            None,
+        )
+        .unwrap();
+    manager.start_run("repo-b", IndexRunMode::Full).unwrap();
+
+    let reports = manager.list_runs_with_health(None, None).unwrap();
+    assert_eq!(reports.len(), 2);
+}
+
+#[tokio::test]
+async fn test_list_runs_filtered_by_repo() {
+    let (_dir, manager, _cas_dir, _cas) = setup_test_env();
+
+    manager.start_run("repo-x", IndexRunMode::Full).unwrap();
+    manager
+        .persistence()
+        .update_run_status(
+            &manager.persistence().list_runs().unwrap()[0].run_id,
+            IndexRunStatus::Succeeded,
+            None,
+        )
+        .unwrap();
+    manager.start_run("repo-y", IndexRunMode::Full).unwrap();
+
+    let reports = manager.list_runs_with_health(Some("repo-x"), None).unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].run.repo_id, "repo-x");
+}
+
+#[tokio::test]
+async fn test_list_runs_filtered_by_status() {
+    let (_dir, manager, _cas_dir, _cas) = setup_test_env();
+
+    let run1 = manager.start_run("repo-s1", IndexRunMode::Full).unwrap();
+    manager
+        .persistence()
+        .update_run_status(&run1.run_id, IndexRunStatus::Succeeded, None)
+        .unwrap();
+    let _run2 = manager.start_run("repo-s2", IndexRunMode::Full).unwrap();
+
+    let reports = manager
+        .list_runs_with_health(None, Some(&IndexRunStatus::Queued))
+        .unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].run.status, IndexRunStatus::Queued);
 }

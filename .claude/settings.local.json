@@ -21,7 +21,11 @@
       "mcp__serena__get_symbols_overview",
       "mcp__serena__activate_project",
       "mcp__serena__find_symbol",
-      "Bash(cargo clippy:*)"
+      "Bash(cargo clippy:*)",
+      "mcp__serena__insert_after_symbol",
+      "mcp__serena__search_for_pattern",
+      "mcp__serena__replace_symbol_body",
+      "mcp__plugin_serena_serena__replace_content"
     ]
   }
 }
