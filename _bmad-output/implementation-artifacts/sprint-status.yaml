@@ -2,7 +2,7 @@
 # project: tokenizor_agentic_mcp
 # project_key: NOKEY
 # tracking_system: file-system
-# story_location: C:\AI_STUFF\PROGRAMMING\tokenizor_agentic_mcp\_bmad-output\implementation-artifacts
+# story_location: _bmad-output/implementation-artifacts
 
 # STATUS DEFINITIONS:
 # ==================
@@ -37,7 +37,7 @@ generated: 2026-03-07
 project: tokenizor_agentic_mcp
 project_key: NOKEY
 tracking_system: file-system
-story_location: "C:\\AI_STUFF\\PROGRAMMING\\tokenizor_agentic_mcp\\_bmad-output\\implementation-artifacts"
+story_location: "_bmad-output/implementation-artifacts"
 
 development_status:
   epic-1: done
