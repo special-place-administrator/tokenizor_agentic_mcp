@@ -45,6 +45,19 @@ fn test_typescript_grammar_loads_and_parses() {
 }
 
 #[test]
+fn test_java_grammar_loads_and_parses() {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_java::LANGUAGE.into())
+        .expect("failed to load Java grammar");
+    let tree = parser
+        .parse("public class App { public void run() {} }", None)
+        .expect("parse returned None");
+    assert!(!tree.root_node().kind().is_empty());
+    assert!(!tree.root_node().has_error());
+}
+
+#[test]
 fn test_go_grammar_loads_and_parses() {
     let mut parser = Parser::new();
     parser

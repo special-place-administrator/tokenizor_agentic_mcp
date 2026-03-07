@@ -71,6 +71,8 @@ fn parse_source(
         LanguageId::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
         LanguageId::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         LanguageId::Go => tree_sitter_go::LANGUAGE.into(),
+        LanguageId::Java => tree_sitter_java::LANGUAGE.into(),
+        _ => return Err(format!("language not yet onboarded for parsing: {language:?}")),
     };
 
     parser

@@ -1,4 +1,5 @@
 mod go;
+pub mod java;
 mod javascript;
 mod python;
 mod rust;
@@ -15,5 +16,7 @@ pub fn extract_symbols(node: &Node, source: &str, language: &LanguageId) -> Vec<
         LanguageId::JavaScript => javascript::extract_symbols(node, source),
         LanguageId::TypeScript => typescript::extract_symbols(node, source),
         LanguageId::Go => go::extract_symbols(node, source),
+        LanguageId::Java => java::extract_symbols(node, source),
+        _ => vec![],
     }
 }

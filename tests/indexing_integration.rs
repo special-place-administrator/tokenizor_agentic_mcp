@@ -170,7 +170,7 @@ async fn test_out_of_scope_files_not_persisted_as_file_records() {
 
     let repo_dir = tempfile::tempdir().unwrap();
     fs::write(repo_dir.path().join("main.rs"), "fn main() {}").unwrap();
-    // Out-of-scope languages: Java, Ruby — these should not be discovered
+    // Java is Broader tier — should be processed. Ruby is Unsupported — should be skipped.
     fs::write(repo_dir.path().join("App.java"), "class App {}").unwrap();
     fs::write(repo_dir.path().join("app.rb"), "def hello; end").unwrap();
 
@@ -181,9 +181,11 @@ async fn test_out_of_scope_files_not_persisted_as_file_records() {
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
     let records = manager.persistence().get_file_records(&run.run_id).unwrap();
-    // Only the Rust file should be persisted, not Java or Ruby
-    assert_eq!(records.len(), 1);
-    assert!(records[0].relative_path.ends_with("main.rs"));
+    // Rust (QualityFocus) and Java (Broader) should be persisted, not Ruby (Unsupported)
+    assert_eq!(records.len(), 2);
+    assert!(records.iter().any(|r| r.relative_path.ends_with("main.rs")));
+    assert!(records.iter().any(|r| r.relative_path.ends_with("App.java")));
+    assert!(!records.iter().any(|r| r.relative_path.ends_with("app.rb")));
 }
 
 #[tokio::test]
@@ -290,5 +292,142 @@ async fn test_failed_file_produces_failed_outcome_in_persisted_records() {
             );
         }
         other => panic!("expected Failed outcome, got: {:?}", other),
+    }
+}
+
+// === Story 2.4 Integration Tests ===
+
+#[tokio::test]
+async fn test_java_file_produces_committed_outcome_with_symbols() {
+    let (_dir, manager, _cas_dir, cas) = setup_test_env();
+
+    let repo_dir = tempfile::tempdir().unwrap();
+    fs::write(
+        repo_dir.path().join("App.java"),
+        "public class App {\n    public void run() {}\n}\n",
+    )
+    .unwrap();
+
+    let (run, _progress) = manager
+        .launch_run("test-repo", IndexRunMode::Full, repo_dir.path().to_path_buf(), cas.clone())
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let records = manager.persistence().get_file_records(&run.run_id).unwrap();
+    assert_eq!(records.len(), 1);
+    assert!(records[0].relative_path.ends_with("App.java"));
+    assert_eq!(records[0].outcome, PersistedFileOutcome::Committed);
+    assert!(!records[0].symbols.is_empty());
+    // CAS blob should exist
+    let blob = cas.read_bytes(&records[0].blob_id).unwrap();
+    assert!(!blob.is_empty());
+}
+
+#[tokio::test]
+async fn test_java_syntax_error_produces_partial_parse() {
+    let (_dir, manager, _cas_dir, cas) = setup_test_env();
+
+    let repo_dir = tempfile::tempdir().unwrap();
+    // Missing closing brace — valid enough to parse but tree-sitter reports error
+    fs::write(
+        repo_dir.path().join("Bad.java"),
+        "public class Bad { public void foo() {",
+    )
+    .unwrap();
+
+    let (run, _progress) = manager
+        .launch_run("test-repo", IndexRunMode::Full, repo_dir.path().to_path_buf(), cas)
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let records = manager.persistence().get_file_records(&run.run_id).unwrap();
+    assert_eq!(records.len(), 1);
+    // Should be Committed (partial parse with symbols) or Quarantined (partial parse, no symbols)
+    // Either way, not Failed — tree-sitter handles syntax errors gracefully
+    assert!(
+        matches!(records[0].outcome, PersistedFileOutcome::Committed | PersistedFileOutcome::Quarantined { .. }),
+        "expected Committed or Quarantined for partial parse, got: {:?}",
+        records[0].outcome
+    );
+}
+
+#[tokio::test]
+async fn test_mixed_repo_java_processed_unsupported_reported() {
+    let (_dir, manager, _cas_dir, cas) = setup_test_env();
+
+    let repo_dir = tempfile::tempdir().unwrap();
+    fs::write(repo_dir.path().join("main.rs"), "fn main() {}").unwrap();
+    fs::write(
+        repo_dir.path().join("Service.java"),
+        "public class Service { public void serve() {} }",
+    )
+    .unwrap();
+    // Not-yet-supported files
+    fs::write(repo_dir.path().join("app.rb"), "def hello; end").unwrap();
+    fs::write(repo_dir.path().join("main.cs"), "class Main {}").unwrap();
+
+    let (run, _progress) = manager
+        .launch_run("test-repo", IndexRunMode::Full, repo_dir.path().to_path_buf(), cas)
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let records = manager.persistence().get_file_records(&run.run_id).unwrap();
+    // Only Rust and Java should produce file records
+    assert_eq!(records.len(), 2);
+    assert!(records.iter().any(|r| r.relative_path.ends_with("main.rs")));
+    assert!(records.iter().any(|r| r.relative_path.ends_with("Service.java")));
+    // Ruby and C# files should NOT produce records or CAS blobs
+    assert!(!records.iter().any(|r| r.relative_path.ends_with("app.rb")));
+    assert!(!records.iter().any(|r| r.relative_path.ends_with("main.cs")));
+}
+
+#[tokio::test]
+async fn test_not_yet_supported_files_produce_no_file_records_or_cas_blobs() {
+    let (_dir, manager, _cas_dir, cas) = setup_test_env();
+
+    let repo_dir = tempfile::tempdir().unwrap();
+    // Only unsupported files
+    fs::write(repo_dir.path().join("app.rb"), "def hello; end").unwrap();
+    fs::write(repo_dir.path().join("main.cs"), "class Main {}").unwrap();
+    fs::write(repo_dir.path().join("script.php"), "<?php echo 'hi';").unwrap();
+
+    let (run, _progress) = manager
+        .launch_run("test-repo", IndexRunMode::Full, repo_dir.path().to_path_buf(), cas)
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let records = manager.persistence().get_file_records(&run.run_id).unwrap();
+    assert!(records.is_empty(), "unsupported files should produce no file records");
+}
+
+#[tokio::test]
+async fn test_quality_focus_languages_still_process_correctly() {
+    let (_dir, manager, _cas_dir, cas) = setup_test_env();
+
+    let repo_dir = tempfile::tempdir().unwrap();
+    fs::write(repo_dir.path().join("main.rs"), "fn main() {}").unwrap();
+    fs::write(repo_dir.path().join("lib.py"), "def foo(): pass").unwrap();
+    fs::write(repo_dir.path().join("app.js"), "function app() {}").unwrap();
+    fs::write(repo_dir.path().join("mod.ts"), "function hello(): void {}").unwrap();
+    fs::write(repo_dir.path().join("main.go"), "package main\nfunc main() {}").unwrap();
+
+    let (run, _progress) = manager
+        .launch_run("test-repo", IndexRunMode::Full, repo_dir.path().to_path_buf(), cas)
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let finished = manager.persistence().find_run(&run.run_id).unwrap().unwrap();
+    assert_eq!(finished.status, IndexRunStatus::Succeeded);
+
+    let records = manager.persistence().get_file_records(&run.run_id).unwrap();
+    assert_eq!(records.len(), 5);
+    for record in &records {
+        assert_eq!(record.outcome, PersistedFileOutcome::Committed);
+        assert!(!record.symbols.is_empty());
     }
 }

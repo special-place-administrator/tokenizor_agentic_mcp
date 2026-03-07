@@ -42,9 +42,9 @@ pub fn commit_file_result(
     run_id: &str,
     repo_id: &str,
 ) -> Result<FileRecord> {
-    if result.language.support_tier() != SupportTier::QualityFocus {
+    if result.language.support_tier() == SupportTier::Unsupported {
         return Err(TokenizorError::InvalidArgument(format!(
-            "language {:?} is not in the quality-focus set",
+            "language {:?} is not onboarded for indexing",
             result.language
         )));
     }
@@ -343,5 +343,48 @@ mod tests {
         assert_eq!(record.relative_path, "src/main.rs");
         assert_eq!(record.language, LanguageId::Rust);
         assert_eq!(record.content_hash, record.blob_id);
+    }
+
+    #[test]
+    fn test_commit_broader_tier_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = FakeCas::new(dir.path().to_path_buf());
+        let content_hash = crate::storage::digest_hex(b"class App {}");
+        let result = FileProcessingResult {
+            relative_path: "App.java".to_string(),
+            language: LanguageId::Java,
+            outcome: FileOutcome::Processed,
+            symbols: vec![sample_symbol()],
+            byte_len: 12,
+            content_hash,
+        };
+        let bytes = b"class App {}";
+
+        let record = commit_file_result(result, bytes, &cas, "run-1", "repo-1").unwrap();
+        assert_eq!(record.outcome, PersistedFileOutcome::Committed);
+        assert_eq!(record.language, LanguageId::Java);
+    }
+
+    #[test]
+    fn test_commit_unsupported_tier_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = FakeCas::new(dir.path().to_path_buf());
+        let result = FileProcessingResult {
+            relative_path: "app.rb".to_string(),
+            language: LanguageId::Ruby,
+            outcome: FileOutcome::Processed,
+            symbols: vec![],
+            byte_len: 10,
+            content_hash: "abc".to_string(),
+        };
+        let bytes = b"def hello; end";
+
+        let err = commit_file_result(result, bytes, &cas, "run-1", "repo-1").unwrap_err();
+        match err {
+            TokenizorError::InvalidArgument(msg) => {
+                assert!(msg.contains("not onboarded for indexing"));
+            }
+            other => panic!("expected InvalidArgument, got {:?}", other),
+        }
     }
 }

@@ -1,6 +1,6 @@
 # Story 2.4: Extend Indexing Through a Repeatable Broader-Language Onboarding Pattern
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -27,24 +27,24 @@ so that additional languages can be added as implementation-sized follow-on slic
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Extend `LanguageId` enum with all broader baseline language variants (AC: #1, #3)
-  - [ ] 1.1: Add variants to `LanguageId`: `Java`, `C`, `Cpp`, `CSharp`, `Ruby`, `Php`, `Swift`, `Dart`, `Perl`, `Elixir`
-  - [ ] 1.2: Update `from_extension` — Java: `"java"`, C: `"c"`, `"h"`, Cpp: `"cpp"`, `"cxx"`, `"cc"`, `"hpp"`, `"hxx"`, `"hh"`, CSharp: `"cs"`, Ruby: `"rb"`, Php: `"php"`, Swift: `"swift"`, Dart: `"dart"`, Perl: `"pl"`, `"pm"`, Elixir: `"ex"`, `"exs"`
-  - [ ] 1.3: Update `extensions` — return correct extension slices for each new variant
-  - [ ] 1.4: Update `support_tier` — Java returns `SupportTier::Broader`, all others return `SupportTier::Unsupported`
-  - [ ] 1.5: Unit tests — `from_extension` for all new extensions, `support_tier` mapping correctness, serde round-trip for new variants
+- [x] Task 1: Extend `LanguageId` enum with all broader baseline language variants (AC: #1, #3)
+  - [x] 1.1: Add variants to `LanguageId`: `Java`, `C`, `Cpp`, `CSharp`, `Ruby`, `Php`, `Swift`, `Dart`, `Perl`, `Elixir`
+  - [x] 1.2: Update `from_extension` — Java: `"java"`, C: `"c"`, `"h"`, Cpp: `"cpp"`, `"cxx"`, `"cc"`, `"hpp"`, `"hxx"`, `"hh"`, CSharp: `"cs"`, Ruby: `"rb"`, Php: `"php"`, Swift: `"swift"`, Dart: `"dart"`, Perl: `"pl"`, `"pm"`, Elixir: `"ex"`, `"exs"`
+  - [x] 1.3: Update `extensions` — return correct extension slices for each new variant
+  - [x] 1.4: Update `support_tier` — Java returns `SupportTier::Broader`, all others return `SupportTier::Unsupported`
+  - [x] 1.5: Unit tests — `from_extension` for all new extensions, `support_tier` mapping correctness, serde round-trip for new variants
 
-- [ ] Task 2: Handle broader languages in parser (`src/parsing/mod.rs`) (AC: #1, #3)
-  - [ ] 2.1: Update `parse_source` match on `LanguageId` — add `Java => tree_sitter_java::LANGUAGE.into()`
-  - [ ] 2.2: Add catch-all arm for unsupported languages — return `Err("language not yet onboarded for parsing: {language:?}")`
-  - [ ] 2.3: Add `tree-sitter-java` dependency to `Cargo.toml` (use version `0.23` to match existing grammar crate versions)
-  - [ ] 2.4: Update `extract_symbols` dispatcher in `src/parsing/languages/mod.rs` — add `Java => java::extract_symbols(node, source)`, catch-all for unsupported returns empty `Vec`
-  - [ ] 2.5: Create `src/parsing/languages/java.rs` — Java symbol extraction following established Go/Rust extractor pattern
-  - [ ] 2.6: Register `mod java;` in `src/parsing/languages/mod.rs`
+- [x] Task 2: Handle broader languages in parser (`src/parsing/mod.rs`) (AC: #1, #3)
+  - [x] 2.1: Update `parse_source` match on `LanguageId` — add `Java => tree_sitter_java::LANGUAGE.into()`
+  - [x] 2.2: Add catch-all arm for unsupported languages — return `Err("language not yet onboarded for parsing: {language:?}")`
+  - [x] 2.3: Add `tree-sitter-java` dependency to `Cargo.toml` (use version `0.23` to match existing grammar crate versions)
+  - [x] 2.4: Update `extract_symbols` dispatcher in `src/parsing/languages/mod.rs` — add `Java => java::extract_symbols(node, source)`, catch-all for unsupported returns empty `Vec`
+  - [x] 2.5: Create `src/parsing/languages/java.rs` — Java symbol extraction following established Go/Rust extractor pattern
+  - [x] 2.6: Register `mod java;` in `src/parsing/languages/mod.rs`
 
-- [ ] Task 3: Implement Java symbol extractor (`src/parsing/languages/java.rs`) (AC: #1)
-  - [ ] 3.1: Implement `extract_symbols(node: &Node, source: &str) -> Vec<SymbolRecord>` with `walk_node` recursive pattern
-  - [ ] 3.2: Map tree-sitter-java node kinds to `SymbolKind`:
+- [x] Task 3: Implement Java symbol extractor (`src/parsing/languages/java.rs`) (AC: #1)
+  - [x] 3.1: Implement `extract_symbols(node: &Node, source: &str) -> Vec<SymbolRecord>` with `walk_node` recursive pattern
+  - [x] 3.2: Map tree-sitter-java node kinds to `SymbolKind`:
     - `class_declaration` -> `SymbolKind::Class`
     - `interface_declaration` -> `SymbolKind::Interface`
     - `enum_declaration` -> `SymbolKind::Enum`
@@ -54,34 +54,34 @@ so that additional languages can be added as implementation-sized follow-on slic
     - `constant_declaration` -> `SymbolKind::Constant`
     - `record_declaration` -> `SymbolKind::Class` (Java 16+ records)
     - `annotation_type_declaration` -> `SymbolKind::Interface`
-  - [ ] 3.3: Extract symbol names from `name` child node (identifier) — same pattern as other extractors
-  - [ ] 3.4: Handle depth tracking for nested classes, inner methods, etc.
-  - [ ] 3.5: Unit tests — parse sample Java class with methods, interface, enum, constructor, verify SymbolRecord output
+  - [x] 3.3: Extract symbol names from `name` child node (identifier) — same pattern as other extractors
+  - [x] 3.4: Handle depth tracking for nested classes, inner methods, etc.
+  - [x] 3.5: Unit tests — parse sample Java class with methods, interface, enum, constructor, verify SymbolRecord output
 
-- [ ] Task 4: Update pipeline for multi-tier language handling (AC: #3)
-  - [ ] 4.1: In `process_discovered`, partition `files` into `indexable` (tier is `QualityFocus` or `Broader`) and `not_yet_supported` (tier is `Unsupported`)
-  - [ ] 4.2: Add `not_yet_supported: std::collections::BTreeMap<LanguageId, u64>` field to `PipelineResult` — counts per language
-  - [ ] 4.3: Count not-yet-supported files by language before processing indexable files
-  - [ ] 4.4: Log at `info!` level: `"discovered {count} not-yet-supported files across {n} languages"` (one line total, NOT per-file)
-  - [ ] 4.5: Process only `indexable` files through the existing pipeline loop (bounded concurrency, circuit breaker, CAS commit)
-  - [ ] 4.6: Update `total_files` progress counter to reflect only indexable files
-  - [ ] 4.7: Update pipeline finish summary to include not-yet-supported breakdown
-  - [ ] 4.8: Unit tests — pipeline with mixed supported/unsupported files, verify unsupported are counted but not processed
+- [x] Task 4: Update pipeline for multi-tier language handling (AC: #3)
+  - [x] 4.1: In `process_discovered`, partition `files` into `indexable` (tier is `QualityFocus` or `Broader`) and `not_yet_supported` (tier is `Unsupported`)
+  - [x] 4.2: Add `not_yet_supported: std::collections::BTreeMap<LanguageId, u64>` field to `PipelineResult` — counts per language
+  - [x] 4.3: Count not-yet-supported files by language before processing indexable files
+  - [x] 4.4: Log at `info!` level: `"discovered {count} not-yet-supported files across {n} languages"` (one line total, NOT per-file)
+  - [x] 4.5: Process only `indexable` files through the existing pipeline loop (bounded concurrency, circuit breaker, CAS commit)
+  - [x] 4.6: Update `total_files` progress counter to reflect only indexable files
+  - [x] 4.7: Update pipeline finish summary to include not-yet-supported breakdown
+  - [x] 4.8: Unit tests — pipeline with mixed supported/unsupported files, verify unsupported are counted but not processed
 
-- [ ] Task 5: Update commit guard for broader tier (AC: #1, #2)
-  - [ ] 5.1: In `commit_file_result`, change guard from `!= SupportTier::QualityFocus` to `== SupportTier::Unsupported` — allow both `QualityFocus` and `Broader`
-  - [ ] 5.2: Update error message to `"language {:?} is not onboarded for indexing"`
-  - [ ] 5.3: Unit test — commit with `Broader` tier succeeds, commit with `Unsupported` tier returns error
+- [x] Task 5: Update commit guard for broader tier (AC: #1, #2)
+  - [x] 5.1: In `commit_file_result`, change guard from `!= SupportTier::QualityFocus` to `== SupportTier::Unsupported` — allow both `QualityFocus` and `Broader`
+  - [x] 5.2: Update error message to `"language {:?} is not onboarded for indexing"`
+  - [x] 5.3: Unit test — commit with `Broader` tier succeeds, commit with `Unsupported` tier returns error
 
-- [ ] Task 6: Integration testing (AC: #1, #2, #3)
-  - [ ] 6.1: End-to-end test: create temp repo with `.java` files -> run pipeline -> verify FileRecords persisted in registry -> verify CAS blobs exist on disk
-  - [ ] 6.2: Test: Java file with valid class/method -> `Committed` outcome with correct symbols
-  - [ ] 6.3: Test: Java file with syntax errors -> `PartialParse` outcome, reuses shared failure-isolation
-  - [ ] 6.4: Test: mixed repo with Java + not-yet-supported files (e.g., `.rb`, `.cs`) -> Java processed, others reported as not-yet-supported with correct counts
-  - [ ] 6.5: Test: not-yet-supported files do NOT produce FileRecords or CAS blobs
-  - [ ] 6.6: Test: existing quality-focus languages still process correctly (regression)
-  - [ ] 6.7: Add Java grammar load + parse test in `tests/tree_sitter_grammars.rs`
-  - [ ] 6.8: Verify test count does not regress below 181 (Story 2.3 baseline)
+- [x] Task 6: Integration testing (AC: #1, #2, #3)
+  - [x] 6.1: End-to-end test: create temp repo with `.java` files -> run pipeline -> verify FileRecords persisted in registry -> verify CAS blobs exist on disk
+  - [x] 6.2: Test: Java file with valid class/method -> `Committed` outcome with correct symbols
+  - [x] 6.3: Test: Java file with syntax errors -> `PartialParse` outcome, reuses shared failure-isolation
+  - [x] 6.4: Test: mixed repo with Java + not-yet-supported files (e.g., `.rb`, `.cs`) -> Java processed, others reported as not-yet-supported with correct counts
+  - [x] 6.5: Test: not-yet-supported files do NOT produce FileRecords or CAS blobs
+  - [x] 6.6: Test: existing quality-focus languages still process correctly (regression)
+  - [x] 6.7: Add Java grammar load + parse test in `tests/tree_sitter_grammars.rs`
+  - [x] 6.8: Verify test count does not regress below 181 (Story 2.3 baseline)
 
 ## Dev Notes
 
@@ -244,14 +244,46 @@ No conflicts with unified project structure detected. All new code follows estab
 - [Source: _bmad-output/implementation-artifacts/2-3-persist-file-level-indexing-outputs-and-symbol-file-metadata-for-the-initial-quality-focus-language-set.md]
 - [Source: _bmad-output/implementation-artifacts/2-2-execute-indexing-for-the-initial-quality-focus-language-set.md]
 
+## Change Log
+
+- 2026-03-07: Implemented Story 2.4 — broader language onboarding pattern with Java as first onboarded slice, 10 new LanguageId variants, pipeline partition for multi-tier support, 30 new tests (211 total, up from 181)
+
 ## Dev Agent Record
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6
 
 ### Debug Log References
 
+- tree-sitter-java v0.23.5 resolved and compiled successfully, exposes `LANGUAGE` as expected
+- `LanguageId` required `PartialOrd + Ord` derives for `BTreeMap` usage in `not_yet_supported`
+- Integration test `test_out_of_scope_files_not_persisted_as_file_records` updated — Java files now expected to produce FileRecords (Broader tier)
+
 ### Completion Notes List
 
+- Task 1: Added 10 LanguageId variants (Java, C, Cpp, CSharp, Ruby, Php, Swift, Dart, Perl, Elixir) with all extension mappings, tier assignments, and 16 new unit tests
+- Task 2: Wired Java into parse_source (tree-sitter-java) and extract_symbols dispatcher; catch-all arms for unsupported languages
+- Task 3: Created Java symbol extractor (src/parsing/languages/java.rs) following Go extractor pattern — handles classes, interfaces, enums, methods, constructors, fields, nested classes, with 7 unit tests
+- Task 4: Pipeline now partitions discovered files into indexable (QualityFocus/Broader) and not-yet-supported (Unsupported), counts by language, logs one summary line, processes only indexable files
+- Task 5: Commit guard changed from `!= QualityFocus` to `== Unsupported` — Broader tier files now commit successfully
+- Task 6: 5 new integration tests + 1 grammar test verifying Java end-to-end, syntax error handling, mixed-tier repos, unsupported file exclusion, and QualityFocus regression
+
+### Implementation Plan
+
+Build order followed (per Dev Notes): Domain types (T1) -> Java extractor (T3) -> Parser wiring (T2) -> Commit guard (T5) -> Pipeline partition (T4) -> Integration tests (T6). Compiler-driven exhaustive match ensured all sites updated before tests ran.
+
 ### File List
+
+**New files:**
+- `src/parsing/languages/java.rs` — Java symbol extractor module
+
+**Modified files:**
+- `Cargo.toml` — added `tree-sitter-java = "0.23"` dependency
+- `src/domain/index.rs` — 10 new LanguageId variants, updated from_extension/extensions/support_tier, added PartialOrd+Ord derives, 16 new unit tests
+- `src/parsing/mod.rs` — added Java arm and unsupported catch-all in parse_source
+- `src/parsing/languages/mod.rs` — registered java module, added Java arm and unsupported catch-all in extract_symbols
+- `src/indexing/commit.rs` — changed tier guard from != QualityFocus to == Unsupported, updated error message, 2 new tests
+- `src/indexing/pipeline.rs` — added BTreeMap/LanguageId/SupportTier imports, added not_yet_supported field to PipelineResult, partition logic in process_discovered, updated finish summary, 1 new test
+- `tests/tree_sitter_grammars.rs` — added Java grammar load+parse test
+- `tests/indexing_integration.rs` — updated existing out-of-scope test, added 5 new Story 2.4 integration tests

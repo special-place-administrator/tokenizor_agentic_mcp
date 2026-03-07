@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum LanguageId {
     Rust,
@@ -8,6 +8,16 @@ pub enum LanguageId {
     JavaScript,
     TypeScript,
     Go,
+    Java,
+    C,
+    Cpp,
+    CSharp,
+    Ruby,
+    Php,
+    Swift,
+    Dart,
+    Perl,
+    Elixir,
 }
 
 impl LanguageId {
@@ -18,6 +28,16 @@ impl LanguageId {
             "js" | "jsx" => Some(Self::JavaScript),
             "ts" | "tsx" => Some(Self::TypeScript),
             "go" => Some(Self::Go),
+            "java" => Some(Self::Java),
+            "c" | "h" => Some(Self::C),
+            "cpp" | "cxx" | "cc" | "hpp" | "hxx" | "hh" => Some(Self::Cpp),
+            "cs" => Some(Self::CSharp),
+            "rb" => Some(Self::Ruby),
+            "php" => Some(Self::Php),
+            "swift" => Some(Self::Swift),
+            "dart" => Some(Self::Dart),
+            "pl" | "pm" => Some(Self::Perl),
+            "ex" | "exs" => Some(Self::Elixir),
             _ => None,
         }
     }
@@ -29,6 +49,16 @@ impl LanguageId {
             Self::JavaScript => &["js", "jsx"],
             Self::TypeScript => &["ts", "tsx"],
             Self::Go => &["go"],
+            Self::Java => &["java"],
+            Self::C => &["c", "h"],
+            Self::Cpp => &["cpp", "cxx", "cc", "hpp", "hxx", "hh"],
+            Self::CSharp => &["cs"],
+            Self::Ruby => &["rb"],
+            Self::Php => &["php"],
+            Self::Swift => &["swift"],
+            Self::Dart => &["dart"],
+            Self::Perl => &["pl", "pm"],
+            Self::Elixir => &["ex", "exs"],
         }
     }
 
@@ -37,6 +67,16 @@ impl LanguageId {
             Self::Rust | Self::Python | Self::JavaScript | Self::TypeScript | Self::Go => {
                 SupportTier::QualityFocus
             }
+            Self::Java => SupportTier::Broader,
+            Self::C
+            | Self::Cpp
+            | Self::CSharp
+            | Self::Ruby
+            | Self::Php
+            | Self::Swift
+            | Self::Dart
+            | Self::Perl
+            | Self::Elixir => SupportTier::Unsupported,
         }
     }
 }
@@ -196,9 +236,8 @@ mod tests {
 
     #[test]
     fn test_from_extension_returns_none_for_unknown() {
-        assert_eq!(LanguageId::from_extension("cpp"), None);
-        assert_eq!(LanguageId::from_extension("java"), None);
-        assert_eq!(LanguageId::from_extension("rb"), None);
+        assert_eq!(LanguageId::from_extension("zig"), None);
+        assert_eq!(LanguageId::from_extension("lua"), None);
         assert_eq!(LanguageId::from_extension(""), None);
     }
 
@@ -218,6 +257,126 @@ mod tests {
         assert_eq!(LanguageId::JavaScript.support_tier(), SupportTier::QualityFocus);
         assert_eq!(LanguageId::TypeScript.support_tier(), SupportTier::QualityFocus);
         assert_eq!(LanguageId::Go.support_tier(), SupportTier::QualityFocus);
+    }
+
+    #[test]
+    fn test_from_extension_maps_java() {
+        assert_eq!(LanguageId::from_extension("java"), Some(LanguageId::Java));
+    }
+
+    #[test]
+    fn test_from_extension_maps_c() {
+        assert_eq!(LanguageId::from_extension("c"), Some(LanguageId::C));
+        assert_eq!(LanguageId::from_extension("h"), Some(LanguageId::C));
+    }
+
+    #[test]
+    fn test_from_extension_maps_cpp() {
+        assert_eq!(LanguageId::from_extension("cpp"), Some(LanguageId::Cpp));
+        assert_eq!(LanguageId::from_extension("cxx"), Some(LanguageId::Cpp));
+        assert_eq!(LanguageId::from_extension("cc"), Some(LanguageId::Cpp));
+        assert_eq!(LanguageId::from_extension("hpp"), Some(LanguageId::Cpp));
+        assert_eq!(LanguageId::from_extension("hxx"), Some(LanguageId::Cpp));
+        assert_eq!(LanguageId::from_extension("hh"), Some(LanguageId::Cpp));
+    }
+
+    #[test]
+    fn test_from_extension_maps_csharp() {
+        assert_eq!(LanguageId::from_extension("cs"), Some(LanguageId::CSharp));
+    }
+
+    #[test]
+    fn test_from_extension_maps_ruby() {
+        assert_eq!(LanguageId::from_extension("rb"), Some(LanguageId::Ruby));
+    }
+
+    #[test]
+    fn test_from_extension_maps_php() {
+        assert_eq!(LanguageId::from_extension("php"), Some(LanguageId::Php));
+    }
+
+    #[test]
+    fn test_from_extension_maps_swift() {
+        assert_eq!(LanguageId::from_extension("swift"), Some(LanguageId::Swift));
+    }
+
+    #[test]
+    fn test_from_extension_maps_dart() {
+        assert_eq!(LanguageId::from_extension("dart"), Some(LanguageId::Dart));
+    }
+
+    #[test]
+    fn test_from_extension_maps_perl() {
+        assert_eq!(LanguageId::from_extension("pl"), Some(LanguageId::Perl));
+        assert_eq!(LanguageId::from_extension("pm"), Some(LanguageId::Perl));
+    }
+
+    #[test]
+    fn test_from_extension_maps_elixir() {
+        assert_eq!(LanguageId::from_extension("ex"), Some(LanguageId::Elixir));
+        assert_eq!(LanguageId::from_extension("exs"), Some(LanguageId::Elixir));
+    }
+
+    #[test]
+    fn test_support_tier_java_is_broader() {
+        assert_eq!(LanguageId::Java.support_tier(), SupportTier::Broader);
+    }
+
+    #[test]
+    fn test_support_tier_unsupported_languages() {
+        let unsupported = vec![
+            LanguageId::C,
+            LanguageId::Cpp,
+            LanguageId::CSharp,
+            LanguageId::Ruby,
+            LanguageId::Php,
+            LanguageId::Swift,
+            LanguageId::Dart,
+            LanguageId::Perl,
+            LanguageId::Elixir,
+        ];
+        for lang in unsupported {
+            assert_eq!(
+                lang.support_tier(),
+                SupportTier::Unsupported,
+                "{lang:?} should be Unsupported"
+            );
+        }
+    }
+
+    #[test]
+    fn test_extensions_broader_languages() {
+        assert_eq!(LanguageId::Java.extensions(), &["java"]);
+        assert_eq!(LanguageId::C.extensions(), &["c", "h"]);
+        assert_eq!(LanguageId::Cpp.extensions(), &["cpp", "cxx", "cc", "hpp", "hxx", "hh"]);
+        assert_eq!(LanguageId::CSharp.extensions(), &["cs"]);
+        assert_eq!(LanguageId::Ruby.extensions(), &["rb"]);
+        assert_eq!(LanguageId::Php.extensions(), &["php"]);
+        assert_eq!(LanguageId::Swift.extensions(), &["swift"]);
+        assert_eq!(LanguageId::Dart.extensions(), &["dart"]);
+        assert_eq!(LanguageId::Perl.extensions(), &["pl", "pm"]);
+        assert_eq!(LanguageId::Elixir.extensions(), &["ex", "exs"]);
+    }
+
+    #[test]
+    fn test_broader_language_serde_roundtrip() {
+        let languages = vec![
+            LanguageId::Java,
+            LanguageId::C,
+            LanguageId::Cpp,
+            LanguageId::CSharp,
+            LanguageId::Ruby,
+            LanguageId::Php,
+            LanguageId::Swift,
+            LanguageId::Dart,
+            LanguageId::Perl,
+            LanguageId::Elixir,
+        ];
+        for lang in languages {
+            let json = serde_json::to_string(&lang).unwrap();
+            let deserialized: LanguageId = serde_json::from_str(&json).unwrap();
+            assert_eq!(lang, deserialized, "serde roundtrip failed for {lang:?}");
+        }
     }
 
     #[test]

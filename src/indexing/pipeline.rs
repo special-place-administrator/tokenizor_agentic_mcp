@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -5,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
-use crate::domain::{FileOutcome, FileProcessingResult, FileRecord, IndexRunStatus, PersistedFileOutcome};
+use crate::domain::{FileOutcome, FileProcessingResult, FileRecord, IndexRunStatus, LanguageId, PersistedFileOutcome, SupportTier};
 use crate::indexing::{commit, discovery};
 use crate::parsing;
 use crate::storage::BlobStore;
@@ -30,6 +31,7 @@ pub struct PipelineResult {
     pub status: IndexRunStatus,
     pub results: Vec<FileProcessingResult>,
     pub file_records: Vec<FileRecord>,
+    pub not_yet_supported: BTreeMap<LanguageId, u64>,
     pub error_summary: Option<String>,
 }
 
@@ -88,6 +90,7 @@ impl IndexingPipeline {
                     status: IndexRunStatus::Failed,
                     results: vec![],
                     file_records: vec![],
+                    not_yet_supported: BTreeMap::new(),
                     error_summary: Some(format!("discovery failed: {e}")),
                 };
             }
@@ -100,18 +103,40 @@ impl IndexingPipeline {
         self,
         files: Vec<discovery::DiscoveredFile>,
     ) -> PipelineResult {
-        let total = files.len() as u64;
+        let (indexable, not_yet_supported_files): (Vec<_>, Vec<_>) = files
+            .into_iter()
+            .partition(|f| f.language.support_tier() != SupportTier::Unsupported);
+
+        let mut not_yet_supported = BTreeMap::new();
+        for f in &not_yet_supported_files {
+            *not_yet_supported.entry(f.language.clone()).or_insert(0u64) += 1;
+        }
+        if !not_yet_supported.is_empty() {
+            let total_unsupported: u64 = not_yet_supported.values().sum();
+            info!(
+                run_id = %self.run_id,
+                count = total_unsupported,
+                languages = not_yet_supported.len(),
+                "discovered {total_unsupported} not-yet-supported files across {} languages",
+                not_yet_supported.len()
+            );
+        }
+
+        let total = indexable.len() as u64;
         self.progress.total_files.store(total, Ordering::Relaxed);
         info!(run_id = %self.run_id, total_files = total, "discovery complete");
 
-        if files.is_empty() {
+        if indexable.is_empty() {
             return PipelineResult {
                 status: IndexRunStatus::Succeeded,
                 results: vec![],
                 file_records: vec![],
+                not_yet_supported,
                 error_summary: None,
             };
         }
+
+        let files = indexable;
 
         let semaphore = Arc::new(Semaphore::new(self.concurrency_cap));
         let progress = self.progress.clone();
@@ -272,12 +297,19 @@ impl IndexingPipeline {
             .filter(|r| matches!(r.outcome, PersistedFileOutcome::Quarantined { .. }))
             .count();
 
+        let not_yet_supported_summary = if !not_yet_supported.is_empty() {
+            let total_unsupported: u64 = not_yet_supported.values().sum();
+            format!("; not-yet-supported: {total_unsupported} files across {} languages", not_yet_supported.len())
+        } else {
+            String::new()
+        };
+
         let (status, error_summary) = if was_broken {
             info!(run_id = %self.run_id, "pipeline aborted by circuit breaker");
             (
                 IndexRunStatus::Aborted,
                 Some(format!(
-                    "circuit breaker triggered after {failed_count} failures"
+                    "circuit breaker triggered after {failed_count} failures{not_yet_supported_summary}"
                 )),
             )
         } else if failed_count > 0 {
@@ -293,7 +325,7 @@ impl IndexingPipeline {
                 Some(format!(
                     "{failed_count} files failed processing; persisted: {committed_count} committed, \
                      {empty_symbol_count} empty-symbols, {persist_failed_count} failed, \
-                     {quarantined_count} quarantined"
+                     {quarantined_count} quarantined{not_yet_supported_summary}"
                 )),
             )
         } else {
@@ -310,6 +342,7 @@ impl IndexingPipeline {
             status,
             results,
             file_records,
+            not_yet_supported,
             error_summary,
         }
     }
@@ -528,5 +561,29 @@ mod tests {
         );
         // No file records should exist — systemic CAS error prevents record creation
         assert!(result.file_records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_partitions_unsupported_files() {
+        let dir = temp_repo_with_files(&[
+            ("main.rs", "fn main() {}"),
+            ("App.java", "class App {}"),
+            ("app.rb", "def hello; end"),
+            ("main.cs", "class Main {}"),
+        ]);
+
+        let pipeline = IndexingPipeline::new("test-partition".into(), dir.path().to_path_buf())
+            .with_concurrency(1);
+        let result = pipeline.execute().await;
+
+        assert_eq!(result.status, IndexRunStatus::Succeeded);
+        // Only Rust (QualityFocus) and Java (Broader) should be processed
+        assert_eq!(result.results.len(), 2);
+        assert!(result.results.iter().any(|r| r.language == LanguageId::Rust));
+        assert!(result.results.iter().any(|r| r.language == LanguageId::Java));
+        // Ruby and C# are Unsupported — counted but not processed
+        assert_eq!(result.not_yet_supported.len(), 2);
+        assert_eq!(result.not_yet_supported[&LanguageId::Ruby], 1);
+        assert_eq!(result.not_yet_supported[&LanguageId::CSharp], 1);
     }
 }
