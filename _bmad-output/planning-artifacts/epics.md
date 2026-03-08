@@ -898,6 +898,29 @@ If these interfaces evolve or an abstraction layer is introduced, Epic 3's read 
 
 Users can recover interrupted work, diagnose unhealthy or suspect state, and repair the system without losing trust in the indexed repository.
 
+### Epic 4.0 Hardening Checkpoint
+
+This checkpoint formalizes the Epic 3 retrospective hardening work that must be finished before normal Epic 4 story execution begins. These items are delivery-hardening tasks, not new product-scope FR stories. They exist to close the process, protocol, performance, and supervision gaps discovered at the end of Epic 3.
+
+**Gate rule:** Story 4.1 must not be created or moved to `ready-for-dev` until `4.0.1`, `4.0.2`, `4.0.4`, and `4.0.5` are complete and written down. `4.0.3` must be complete before the first Epic 4 implementation begins. `4.0.6` may proceed in parallel, but any unfinished work must be called out explicitly as debt in the relevant story record.
+
+| Task | Required Before | Purpose |
+|---|---|---|
+| 4.0.1 | Story 4.1 creation | Add the Epic 4 five-gate Definition of Done to the story template so "done" means code exists, contract matches, and trust is proven. |
+| 4.0.2 | Story 4.1 creation | Update `project-context.md` with Epic 4 Recovery Architecture rules covering state mutation, observable retrieval changes, durability, and blind spots. |
+| 4.0.3 | First Epic 4 implementation | Document the Epic 4 agent selection policy so trust-critical recovery work stays under the approved supervision model. |
+| 4.0.4 | Story 4.1 creation | Add full-chain MCP `call_tool` integration coverage for one success and one failure-shaping path. |
+| 4.0.5 | Story 4.1 creation | Record registry-read benchmark evidence against the Epic 3 retrieval NFRs using the approved mixed-query fixture. |
+| 4.0.6 | Parallel with Epic 4 start | Extract a read-only query interface from `RegistryPersistence`, or keep the debt explicit in the story record if unfinished. |
+
+**Checkpoint deliverables**
+
+- story template updated with the Epic 4 five-gate Definition of Done
+- `project-context.md` updated with an `Epic 4 Recovery Architecture` section and `Agent Selection` section
+- protocol-level MCP integration evidence recorded in `tests/`
+- benchmark evidence recorded in `_bmad-output/implementation-artifacts/epic3-registry-benchmark.md`
+- read-side `RegistryPersistence` boundary either extracted or explicitly carried as debt
+
 ### Story 4.1: Sweep Stale Leases and Interrupted State on Startup
 
 As an operator,

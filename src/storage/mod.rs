@@ -9,5 +9,5 @@ pub use control_plane::{
     ControlPlane, InMemoryControlPlane, SpacetimeControlPlane, build_control_plane,
 };
 pub use local_cas::LocalCasBlobStore;
-pub(crate) use registry_persistence::RegistryPersistence;
+pub(crate) use registry_persistence::{RegistryPersistence, RegistryQuery};
 pub(crate) use sha256::digest_hex;

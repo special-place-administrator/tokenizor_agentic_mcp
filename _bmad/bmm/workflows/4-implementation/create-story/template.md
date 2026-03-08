@@ -27,6 +27,14 @@ so that {{benefit}}.
 - Source tree components to touch
 - Testing standards summary
 
+### Epic 4 Definition of Done (mandatory)
+
+- Expected test delta: [Declare the minimum new or updated tests before implementation starts]
+- Build/test evidence: [Record the exact `cargo test` command(s) and pass/fail summary]
+- Acceptance-criteria traceability: [Map each AC to the implementing function(s) and verifying test(s)]
+- Trust-boundary traceability: [Map each trust or recovery decision to the exact architecture or project-context source]
+- State-transition evidence: [List both mutation-side and retrieval/inspection-side proof for every state change]
+
 ### Self-Audit Checklist (mandatory before requesting review)
 
 _Run this checklist after all tasks are complete. This is a blocking step — do not request review until every item is verified._
@@ -37,11 +45,12 @@ _Run this checklist after all tasks are complete. This is a blocking step — do
 - [ ] For every computed value, trace it to where it surfaces (log, return value, persistence)
 - [ ] For every test, verify the assertion can actually fail (no `assert!(true)`, no conditionals that always pass)
 
-#### Epic-Specific Trust Verification
-<!-- Update these items per-epic. Below are Epic 3 defaults. -->
-- [ ] For every retrieval path, confirm a test exercises blob_id trust verification
-- [ ] For every query, confirm a test exercises the invalidated/unhealthy rejection path
-- [ ] For every "no results" path, confirm the response distinguishes empty vs missing vs stale
+#### Epic 4 Recovery Verification
+- [ ] The declared expected test delta was met or exceeded by the actual implementation
+- [ ] Build/test evidence is recorded with the exact command and outcome summary
+- [ ] Every acceptance criterion is traced to concrete implementation code and at least one concrete test
+- [ ] Every trust-boundary or recovery-policy decision cites the exact architecture or `project-context.md` source
+- [ ] Every state transition is tested from both sides: the mutation itself and the resulting retrieval/inspection behavior
 
 ### Project Structure Notes
 

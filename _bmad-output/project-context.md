@@ -10,14 +10,16 @@ sections_completed:
   - code_quality
   - workflow_rules
   - critical_rules
+  - epic_4_recovery_architecture
+  - agent_selection
 status: 'complete'
-rule_count: 93
+rule_count: 99
 optimized_for_llm: true
 ---
 
 # Project Context for AI Agents
 
-_This file contains critical rules and patterns that AI agents must follow when implementing code in this project. Focus on unobvious details that agents might otherwise miss. Scoped to Epic 2: Durable Indexing and Run Control + Epic 3: Trusted Code Discovery and Verified Retrieval._
+_This file contains critical rules and patterns that AI agents must follow when implementing code in this project. Focus on unobvious details that agents might otherwise miss. Scoped to Epic 2: Durable Indexing and Run Control + Epic 3: Trusted Code Discovery and Verified Retrieval + Epic 4: Recovery, Repair, and Operational Confidence._
 
 ---
 
@@ -167,6 +169,25 @@ _Epic 3 is read-heavy. The blind spot profile shifts from write-correctness (Epi
 
 ---
 
+## Epic 4 Recovery Architecture
+
+_Epic 4 is stateful and recovery-heavy. The main failure modes shift from read-side trust enforcement to durable state mutation, observable repair effects, and action-required classification._
+
+1. **Every repair path must be tested from both sides: the state mutation AND the retrieval behavior change.** A recovery test that only checks the write-side transition is incomplete.
+2. **Repairs that report success must provably change the repository/run state observable by the next health check or retrieval request.** "Success" without a follow-on observable state change is a bug.
+3. **Operational history writes must be durable before reporting the action as completed.** Do not acknowledge recovery, repair, checkpoint, or health transitions before the audit trail is safely written.
+4. **Recovery paths must classify stale, interrupted, suspect, quarantined, degraded, and invalid states explicitly.** Do not collapse action-required states into generic failures or generic unhealthy status.
+5. **Next-action guidance must stay consistent across recovery and retrieval surfaces.** Reuse the shared action vocabulary (`resume`, `repair`, `reindex`, `migrate`, `wait`, `resolve_context`) instead of inventing one-off strings.
+
+**Recovery-specific blind spot analysis**
+
+- **Agent integrity:** a recovery story is not complete because tasks are checked off. Code, tests, and cited evidence must all exist.
+- **Architectural judgment:** trust and recovery decisions must trace back to the architecture docs or this file. If the trace is missing, the decision is not approved.
+- **Spec completeness:** every acceptance criterion must be mapped before implementation starts. Recovery work fails badly when "obvious" edge states are left implicit.
+- **Two-sided verification:** the mutation path and the user-visible read path must both change as intended. A fixed write path with unchanged health/retrieval behavior is still broken.
+
+---
+
 ## Rust Language Rules
 
 **Error Handling:**
@@ -229,6 +250,14 @@ _Epic 3 is read-heavy. The blind spot profile shifts from write-correctness (Epi
 - After modifying source files, re-index with jcodemunch: `index_folder` with `incremental: true`.
 - `TOKENIZOR_CONTROL_PLANE_BACKEND=in_memory` for local dev without SpacetimeDB.
 - Windows/MSYS2 development environment.
+
+---
+
+## Agent Selection
+
+- **Claude Opus 4.6** is the default primary implementer for Epic 4 story execution.
+- **GPT-5 Codex** is eligible for review, spikes, and narrowly bounded fixes. It is not eligible for unsupervised end-to-end ownership of trust-critical Epic 4 implementation until two consecutive clean stories land with zero integrity or process findings.
+- If Epic 4 implementation uses a different primary model, record the exception and rationale in the story file before development starts.
 
 ---
 

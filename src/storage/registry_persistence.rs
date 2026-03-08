@@ -41,6 +41,13 @@ pub struct RegistryPersistence {
     path: PathBuf,
 }
 
+pub trait RegistryQuery {
+    fn get_repository(&self, repo_id: &str) -> Result<Option<Repository>>;
+    fn get_runs_by_repo(&self, repo_id: &str) -> Result<Vec<IndexRun>>;
+    fn get_latest_completed_run(&self, repo_id: &str) -> Result<Option<IndexRun>>;
+    fn get_file_records(&self, run_id: &str) -> Result<Vec<FileRecord>>;
+}
+
 impl RegistryPersistence {
     pub fn new(path: PathBuf) -> Self {
         Self { path }
@@ -332,6 +339,24 @@ impl RegistryPersistence {
         }
 
         Ok(())
+    }
+}
+
+impl RegistryQuery for RegistryPersistence {
+    fn get_repository(&self, repo_id: &str) -> Result<Option<Repository>> {
+        RegistryPersistence::get_repository(self, repo_id)
+    }
+
+    fn get_runs_by_repo(&self, repo_id: &str) -> Result<Vec<IndexRun>> {
+        RegistryPersistence::get_runs_by_repo(self, repo_id)
+    }
+
+    fn get_latest_completed_run(&self, repo_id: &str) -> Result<Option<IndexRun>> {
+        RegistryPersistence::get_latest_completed_run(self, repo_id)
+    }
+
+    fn get_file_records(&self, run_id: &str) -> Result<Vec<FileRecord>> {
+        RegistryPersistence::get_file_records(self, run_id)
     }
 }
 

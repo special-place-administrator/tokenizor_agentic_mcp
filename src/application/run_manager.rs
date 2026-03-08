@@ -14,8 +14,8 @@ use crate::domain::{
 use crate::error::{Result, TokenizorError};
 use crate::indexing::pipeline::{IndexingPipeline, PipelineProgress};
 use crate::storage::BlobStore;
-use crate::storage::RegistryPersistence;
 use crate::storage::digest_hex;
+use crate::storage::{RegistryPersistence, RegistryQuery};
 
 pub struct ActiveRun {
     pub run_id: String,
@@ -617,6 +617,10 @@ impl RunManager {
     }
 
     pub fn persistence(&self) -> &RegistryPersistence {
+        &self.persistence
+    }
+
+    pub fn registry_query(&self) -> &dyn RegistryQuery {
         &self.persistence
     }
 

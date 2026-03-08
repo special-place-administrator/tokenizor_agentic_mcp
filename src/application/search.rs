@@ -9,13 +9,13 @@ use crate::domain::{
     VerifiedSourceResponse,
 };
 use crate::error::{Result, TokenizorError};
-use crate::storage::{BlobStore, RegistryPersistence, digest_hex};
+use crate::storage::{BlobStore, RegistryQuery, digest_hex};
 
 use super::RunManager;
 
 pub fn check_request_gate(
     repo_id: &str,
-    persistence: &RegistryPersistence,
+    persistence: &dyn RegistryQuery,
     run_manager: &RunManager,
 ) -> Result<()> {
     let repo = persistence.get_repository(repo_id)?;
@@ -85,7 +85,7 @@ pub fn check_request_gate(
 pub fn search_text(
     repo_id: &str,
     query: &str,
-    persistence: &RegistryPersistence,
+    persistence: &dyn RegistryQuery,
     run_manager: &RunManager,
     blob_store: &dyn BlobStore,
 ) -> Result<ResultEnvelope<Vec<SearchResultItem>>> {
@@ -103,7 +103,7 @@ pub fn search_text(
 fn search_text_ungated(
     repo_id: &str,
     query: &str,
-    persistence: &RegistryPersistence,
+    persistence: &dyn RegistryQuery,
     blob_store: &dyn BlobStore,
 ) -> Result<ResultEnvelope<Vec<SearchResultItem>>> {
     // Defense-in-depth: gate should have caught this, but guard against direct calls
@@ -217,7 +217,7 @@ pub fn search_symbols(
     repo_id: &str,
     query: &str,
     kind_filter: Option<SymbolKind>,
-    persistence: &RegistryPersistence,
+    persistence: &dyn RegistryQuery,
     run_manager: &RunManager,
 ) -> Result<ResultEnvelope<SymbolSearchResponse>> {
     if query.is_empty() {
@@ -235,7 +235,7 @@ fn search_symbols_ungated(
     repo_id: &str,
     query: &str,
     kind_filter: Option<SymbolKind>,
-    persistence: &RegistryPersistence,
+    persistence: &dyn RegistryQuery,
 ) -> Result<ResultEnvelope<SymbolSearchResponse>> {
     // Defense-in-depth: gate should have caught this, but guard against direct calls
     let latest_run = match persistence.get_latest_completed_run(repo_id)? {
@@ -346,7 +346,7 @@ fn search_symbols_ungated(
 pub fn get_file_outline(
     repo_id: &str,
     relative_path: &str,
-    persistence: &RegistryPersistence,
+    persistence: &dyn RegistryQuery,
     run_manager: &RunManager,
 ) -> Result<ResultEnvelope<FileOutlineResponse>> {
     check_request_gate(repo_id, persistence, run_manager)?;
@@ -357,7 +357,7 @@ pub fn get_file_outline(
 fn get_file_outline_ungated(
     repo_id: &str,
     relative_path: &str,
-    persistence: &RegistryPersistence,
+    persistence: &dyn RegistryQuery,
 ) -> Result<ResultEnvelope<FileOutlineResponse>> {
     let latest_run = match persistence.get_latest_completed_run(repo_id)? {
         Some(run) => run,
@@ -427,7 +427,7 @@ fn get_file_outline_ungated(
 
 pub fn get_repo_outline(
     repo_id: &str,
-    persistence: &RegistryPersistence,
+    persistence: &dyn RegistryQuery,
     run_manager: &RunManager,
 ) -> Result<ResultEnvelope<RepoOutlineResponse>> {
     check_request_gate(repo_id, persistence, run_manager)?;
@@ -437,7 +437,7 @@ pub fn get_repo_outline(
 
 fn get_repo_outline_ungated(
     repo_id: &str,
-    persistence: &RegistryPersistence,
+    persistence: &dyn RegistryQuery,
 ) -> Result<ResultEnvelope<RepoOutlineResponse>> {
     let latest_run = match persistence.get_latest_completed_run(repo_id)? {
         Some(run) => run,
@@ -520,7 +520,7 @@ pub fn get_symbol(
     relative_path: &str,
     symbol_name: &str,
     kind_filter: Option<SymbolKind>,
-    persistence: &RegistryPersistence,
+    persistence: &dyn RegistryQuery,
     run_manager: &RunManager,
     blob_store: &dyn BlobStore,
 ) -> Result<ResultEnvelope<VerifiedSourceResponse>> {
@@ -552,7 +552,7 @@ fn get_symbol_ungated(
     relative_path: &str,
     symbol_name: &str,
     kind_filter: Option<SymbolKind>,
-    persistence: &RegistryPersistence,
+    persistence: &dyn RegistryQuery,
     blob_store: &dyn BlobStore,
 ) -> Result<ResultEnvelope<VerifiedSourceResponse>> {
     let latest_run = match persistence.get_latest_completed_run(repo_id)? {
@@ -950,7 +950,7 @@ fn batch_code_slice_result(
 pub fn get_symbols(
     repo_id: &str,
     requests: &[BatchRetrievalRequest],
-    persistence: &crate::storage::RegistryPersistence,
+    persistence: &dyn RegistryQuery,
     run_manager: &super::RunManager,
     blob_store: &dyn BlobStore,
 ) -> Result<ResultEnvelope<crate::domain::GetSymbolsResponse>> {
@@ -972,7 +972,7 @@ pub fn get_symbols(
 fn get_symbols_ungated(
     repo_id: &str,
     requests: &[BatchRetrievalRequest],
-    persistence: &crate::storage::RegistryPersistence,
+    persistence: &dyn RegistryQuery,
     blob_store: &dyn BlobStore,
 ) -> Result<ResultEnvelope<crate::domain::GetSymbolsResponse>> {
     let latest_run = match persistence.get_latest_completed_run(repo_id)? {

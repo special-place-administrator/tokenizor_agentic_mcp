@@ -195,7 +195,7 @@ impl ApplicationContext {
         search::search_text(
             repo_id,
             query,
-            self.run_manager.persistence(),
+            self.run_manager.registry_query(),
             &self.run_manager,
             self.blob_store.as_ref(),
         )
@@ -211,7 +211,7 @@ impl ApplicationContext {
             repo_id,
             query,
             kind_filter,
-            self.run_manager.persistence(),
+            self.run_manager.registry_query(),
             &self.run_manager,
         )
     }
@@ -224,13 +224,17 @@ impl ApplicationContext {
         search::get_file_outline(
             repo_id,
             relative_path,
-            self.run_manager.persistence(),
+            self.run_manager.registry_query(),
             &self.run_manager,
         )
     }
 
     pub fn get_repo_outline(&self, repo_id: &str) -> Result<ResultEnvelope<RepoOutlineResponse>> {
-        search::get_repo_outline(repo_id, self.run_manager.persistence(), &self.run_manager)
+        search::get_repo_outline(
+            repo_id,
+            self.run_manager.registry_query(),
+            &self.run_manager,
+        )
     }
 
     pub fn get_symbol(
@@ -245,7 +249,7 @@ impl ApplicationContext {
             relative_path,
             symbol_name,
             kind_filter,
-            self.run_manager.persistence(),
+            self.run_manager.registry_query(),
             &self.run_manager,
             self.blob_store.as_ref(),
         )
@@ -259,7 +263,7 @@ impl ApplicationContext {
         search::get_symbols(
             repo_id,
             requests,
-            self.run_manager.persistence(),
+            self.run_manager.registry_query(),
             &self.run_manager,
             self.blob_store.as_ref(),
         )
