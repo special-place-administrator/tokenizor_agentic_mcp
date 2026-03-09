@@ -108,13 +108,14 @@ development_status:
   3-7-retrieve-multiple-symbols-or-code-slices-in-one-workflow: done
   epic-3-retrospective: done
 
-  epic-4: backlog
-  4-1-sweep-stale-leases-and-interrupted-state-on-startup: backlog
-  4-2-resume-interrupted-indexing-from-durable-checkpoints: backlog
-  4-3-trigger-deterministic-repair-for-suspect-or-incomplete-state: backlog
-  4-4-inspect-repository-health-and-repair-required-conditions: backlog
-  4-5-preserve-operational-history-for-runs-repairs-and-integrity-events: backlog
-  4-6-classify-action-required-states-and-signal-the-next-safe-action: backlog
+  epic-4: in-progress
+  4-1-sweep-stale-leases-and-interrupted-state-on-startup: done
+  4-2-resume-interrupted-indexing-from-durable-checkpoints: done
+  4-3-move-mutable-run-durability-to-the-spacetimedb-control-plane: in-progress
+  4-4-trigger-deterministic-repair-for-suspect-or-incomplete-state: backlog
+  4-5-inspect-repository-health-and-repair-required-conditions: backlog
+  4-6-preserve-operational-history-for-runs-repairs-and-integrity-events: backlog
+  4-7-classify-action-required-states-and-signal-the-next-safe-action: backlog
   epic-4-retrospective: optional
 
   epic-5: backlog

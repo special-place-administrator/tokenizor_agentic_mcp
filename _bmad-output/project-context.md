@@ -36,7 +36,7 @@ _This file contains critical rules and patterns that AI agents must follow when 
 | anyhow | 1.0 | CLI boundary only (main.rs) -- never in library code |
 | tracing | 0.1 | Structured logging instrumentation; never println! in library code |
 | tracing-subscriber | 0.3 | Log output formatting with `env-filter` feature |
-| SpacetimeDB | Local @ 127.0.0.1:3007 | Target-state structured operational state -- not wired for writes yet |
+| SpacetimeDB | Local @ 127.0.0.1:3007 | Authoritative control-plane state for mutable operational metadata |
 | Local CAS | SHA-256 content-addressed | Raw bytes only -- no metadata |
 
 ---
@@ -55,22 +55,18 @@ _This file contains critical rules and patterns that AI agents must follow when 
 
 **ADR-6: No mock crates** -- Hand-written fakes implementing the relevant trait with `AtomicUsize` call counters. Unreachable methods use `unreachable!("reason")`.
 
-**ADR-7: Local bootstrap registry as interim control-plane persistence** -- Until SpacetimeDB write-path is wired, all structured state (projects, workspaces, runs, checkpoints) persists via the local bootstrap registry JSON with atomic file writes and advisory locking. Do not attempt SpacetimeDB writes. All `SpacetimeControlPlane` write methods return `pending_write_error()`. Use `InMemoryControlPlane` for tests and local bootstrap registry for durable state.
+**ADR-7: Bootstrap registry narrowed; mutable run state moves to SpacetimeDB** -- The local bootstrap registry remains an interim persistence path only for bootstrap/project/workspace compatibility concerns. Starting with the Epic 4 control-plane correction, mutable operational state must move to SpacetimeDB-backed control-plane writes. Do not add new run/checkpoint/file-record/idempotency durability features to `RegistryPersistence` except temporary migration support.
 
 ---
 
-## Epic 2 Persistence Architecture
+## Persistence Architecture Correction
 
-- **Epic 2 durable persistence does NOT go through `ControlPlane` trait write methods.** Those methods remain stubs (`pending_write_error()` on SpacetimeDB, in-memory for tests).
-- **Epic 2 uses a dedicated `RegistryPersistence` service** that reads/writes the local bootstrap registry JSON file directly. This service handles runs, checkpoints, idempotency records, and file/symbol metadata alongside the existing project/workspace data.
-- **`RegistryPersistence` is a struct, not a trait.** Constructor takes `PathBuf` for registry file location. Tests use a temp directory. No trait abstraction for interim code.
-- **This is a temporary bridge.** When SpacetimeDB writes are wired (future epic), the persistence path migrates to `ControlPlane` trait methods and the registry persistence service is retired.
-- **`InMemoryControlPlane` is for tests only.** "Durable" means survives process exit -- verify via the registry file, not in-memory state.
-- **Registry writes use write-to-temp-then-rename.** Never write directly to the registry file. Follow Epic 1's existing pattern.
-- **Registry file access uses advisory file locking.** `fs2` crate or platform flock. Lock scope = the read-modify-write cycle only, NOT the entire run duration.
-- **Read-before-write integrity check.** Before checkpoint writes, verify the registry file still contains the expected project/workspace identity. Fail explicitly if missing or mismatched.
-- **New fields on persisted types must be backward-compatible.** Use `Option<T>` with `#[serde(default)]`. Test deserialization against the existing registry format from Epic 1.
-- **Run state persistence:** Single registry file with atomic rewrite, same as Epic 1. Revisit if profiling shows registry file >~1MB or atomic rewrites taking noticeable time.
+- **Mutable operational durability must go through the control-plane boundary.** Runs, checkpoints, per-run durable file metadata, idempotency records, typed recovery metadata, and operational history should no longer be extended on the local registry JSON path.
+- **`RunManager` should depend on a run-persistence abstraction, not directly on `RegistryPersistence`.** The concrete backend for the corrected path is SpacetimeDB via the control plane.
+- **`RegistryPersistence` remains temporary bootstrap and compatibility code.** It may still read or bridge older local state during migration, but it is no longer the intended long-term write path for mutable run durability.
+- **Discovery for resumable runs must be frozen per run.** Persist a discovery manifest and make checkpoint resume operate against that manifest rather than rediscovering the current filesystem and inferring the skip boundary from current paths.
+- **Raw bytes remain in local CAS.** Do not move byte-exact source content or large byte-sensitive artifacts into SpacetimeDB.
+- **Compatibility rules remain explicit.** Older registry-backed state must deserialize safely and any mixed-state migration behavior must fail clearly rather than mutate ambiguously.
 
 ---
 

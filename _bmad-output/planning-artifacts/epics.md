@@ -3,13 +3,9 @@ stepsCompleted:
   - step-01-validate-prerequisites
   - step-02-design-epics
   - step-03-create-stories
-  - step-04-final-validation
 inputDocuments:
   - _bmad-output/planning-artifacts/prd.md
   - _bmad-output/planning-artifacts/architecture.md
-  - _bmad-output/planning-artifacts/product-brief-tokenizor_agentic_mcp-2026-03-07.md
-  - docs/source-tree-analysis.md
-  - docs/provider_cli_integration_research.md
 ---
 
 # tokenizor_agentic_mcp - Epic Breakdown
@@ -104,23 +100,20 @@ NFR27: Indexing and repair work should use bounded concurrency and should not ma
 
 ### Additional Requirements
 
-- Build forward from the existing Rust 2024 Cargo and `rmcp` scaffold rather than re-bootstrap the repository from scratch.
-- Keep a layered boundary across `protocol`, `application`, `domain`, `storage`, `indexing`, `parsing`, and `observability`, with domain logic remaining testable without MCP or database runtime dependencies.
-- Use SpacetimeDB as the authoritative control plane for repositories, workspaces, index runs, checkpoints, leases, idempotency, health, repair, file metadata, and symbol metadata.
-- Use a local byte-exact content-addressed store for raw file bytes and byte-sensitive derived artifacts; raw bytes must be written exactly as read with no newline normalization or decode/re-encode.
-- Require byte/span verification against stored raw bytes before trusted retrieval is served.
-- Treat quarantine as a first-class outcome for suspect files, symbols, parse outputs, blobs, or retrieval spans; quarantine state must be inspectable and repairable.
-- Mutating operations such as indexing, repair, checkpoint, and invalidation must use canonical request hashing with deterministic idempotency-key replay behavior.
-- Long-running mutating operations must return durable run identifiers, expose progress, cancellation, and checkpoint visibility, and preserve explicit terminal states.
-- Startup must perform compatibility checks and recovery sweeps before new mutating work begins; shutdown must never be treated as a safe persistence boundary.
-- Preserve CLI/operator commands such as `init`, `doctor`, `migrate`, and `run` as first-class baseline product surfaces alongside MCP.
-- Baseline MCP support must include tools and a minimal useful resource set, with prompts designed in from the start where they materially improve adoption.
-- Retrieval-related query results must expose explicit trust and integrity state where relevant instead of collapsing trust-bearing outcomes into generic success/failure.
-- Baseline delivery must include at least one concrete retrieval-adoption mechanism in a primary workflow, not just generic MCP availability.
-- Tokenizor remains authoritative for active project/workspace resolution and related operational truth; provider integrations are consumers and must not become the source of truth for project, workspace, retrieval, or operational state.
-- Brownfield sequencing should reflect current implementation maturity: storage and health scaffolding already exist, while the indexing engine, parsing stack, run lifecycle, and retrieval surfaces still need substantial implementation depth.
-- Epic sequencing should prioritize the adoption-critical baseline providers and surfaces identified in research: Codex and Claude first, with MCP as the universal minimum and provider-specific adapters layered on top later.
-- The product must make retrieval the default path for repository outline, symbol search, text search, verified source retrieval, and codebase exploration before brute-force file rereads.
+- Build forward from the existing Rust 2024 Cargo scaffold with `tokio` and `rmcp`; do not re-bootstrap the repository from scratch.
+- Keep clear layer boundaries across `protocol`, `application`, `domain`, `storage`, `indexing`, `parsing`, and `observability`, with engine logic remaining transport-agnostic and testable outside MCP and runtime concerns.
+- Use SpacetimeDB as the authoritative control plane for projects, repositories, workspaces, index runs, checkpoints, leases, idempotency, health, quarantine, and metadata; treat the `spacetime` CLI as a bootstrap and management surface rather than the architectural dependency itself.
+- Use a local byte-exact CAS for raw source bytes and other byte-sensitive artifacts; raw content must be written exactly as read with no newline normalization or decode/re-encode.
+- Use tree-sitter-based parsing and symbol extraction in Rust for supported languages.
+- Require byte/span verification against stored raw bytes before trusted retrieval is served, and model blocked, suspect, quarantined, repair-required, and incompatible states explicitly rather than collapsing them into generic success or failure results.
+- Treat quarantine as a first-class, inspectable, and repairable state for suspect files, symbols, spans, parse outputs, and metadata.
+- Mutating operations such as indexing, checkpointing, repair, and invalidation must use explicit semantics plus idempotency handling, including deterministic rejection of conflicting replays.
+- Long-running mutating operations must return durable run identifiers and expose status inspection, cancellation, checkpoint visibility, and durable terminal states.
+- Startup must perform readiness, compatibility, and recovery sweeps before accepting new mutating work, and shutdown must never be treated as a safe persistence boundary.
+- Preserve CLI and operator surfaces such as `init`, `doctor`, `migrate`, and `run` as first-class baseline product surfaces alongside MCP tools, resources, and prompts where they materially improve usage.
+- Keep runtime and control-plane exposure local-first and loopback-bound by default; any non-local exposure must be explicit and opt-in.
+- Keep provider integrations as consumers of Tokenizor authority; they must not redefine project/workspace or retrieval truth and must not bypass application or protocol boundaries to reach storage directly.
+- Epic 4 planning must move mutable run durability from the interim local registry JSON path to the SpacetimeDB-backed control plane while keeping raw bytes in CAS and handling compatibility with prior local state explicitly.
 
 ### FR Coverage Map
 
@@ -181,27 +174,22 @@ Users can initialize Tokenizor, validate the local environment, register project
 **FRs covered:** FR1, FR2, FR3, FR4, FR5, FR6, FR7, FR33, FR38, FR39
 
 ### Epic 2: Durable Indexing and Run Control
-Users can start, monitor, checkpoint, cancel, and safely retry indexing work with durable run identities and deterministic mutation behavior.
+Users can start, monitor, checkpoint, cancel, re-run, and safely retry indexing work with durable run identities and deterministic mutation behavior.
 **FRs covered:** FR8, FR9, FR10, FR11, FR12, FR13, FR14, FR15, FR16, FR36
 
 ### Epic 3: Trusted Code Discovery and Verified Retrieval
-Users can access Tokenizor's core search, outline, and verified retrieval value through the baseline retrieval surface used by AI workflows, instead of brute-force file exploration.
+Users can search, outline, and retrieve verified code from indexed repositories through the core retrieval surface that AI workflows depend on.
 **FRs covered:** FR17, FR18, FR19, FR20, FR21, FR22, FR23, FR24, FR25, FR26, FR27, FR28, FR29
 
 ### Epic 4: Recovery, Repair, and Operational Confidence
-Users can recover interrupted work, diagnose unhealthy or suspect state, and repair the system without losing trust in the indexed repository.
+Users can recover interrupted work, inspect unhealthy or suspect state, trigger deterministic repair, and understand operational history well enough to restore trust safely.
 **FRs covered:** FR30, FR31, FR32, FR34, FR35, FR37
 
 ### Epic 5: Retrieval-First Workflow Integration and Adoption
-Users can make Tokenizor the first retrieval path in real AI coding workflows through adoption mechanisms, early-session reachability, observable usage behavior, authority-safe integrations, and supporting guidance.
+Users can connect Tokenizor to real AI coding workflows, make retrieval available early in a session, observe usage, preserve authority-safe integration boundaries, and access workflow and migration guidance.
 **FRs covered:** FR40, FR41, FR42, FR43, FR44, FR45, FR46, FR47, FR48, FR49
 
-**Epic 5 story ordering priority:**
-- concrete retrieval-adoption mechanism in a primary workflow
-- early-session reachability and retrieval-first behavior
-- usage observation and instrumentation
-- authority-safe integration behavior
-- documentation, migration guidance, and prompt or resource breadth
+<!-- Repeat for each epic in epics_list (N = 1, 2, 3...) -->
 
 ## Epic 1: Reliable Local Setup and Workspace Identity
 
@@ -242,684 +230,447 @@ So that MCP is not served from an unsafe or degraded local state.
 **Then** Tokenizor starts serving MCP through the baseline operator entrypoint
 **And** startup records clear healthy-state feedback
 
-**Given** readiness checks fail
-**When** I run Tokenizor
-**Then** Tokenizor refuses to start serving MCP
-**And** it returns explicit and actionable failure output instead of partial startup
+**Given** startup checks detect incompatibility, recovery-required state, or missing dependencies
+**When** I run the operator entrypoint
+**Then** Tokenizor blocks startup with an explicit reason and next-safe-action guidance
+**And** it does not silently serve MCP from a degraded state
 
-### Story 1.3: Initialize a Repository as a Durable Project Workspace
+### Story 1.3: Initialize a Repository or Folder into Tokenizor
 
 As a power user,
-I want to initialize a local repository into Tokenizor,
-So that the project and current workspace become durable identities across sessions.
+I want to initialize a local repository or folder into Tokenizor,
+So that it becomes durable project and workspace state I can reuse across sessions.
 
-**FRs implemented:** FR1, FR2, FR33, FR38
+**FRs implemented:** FR1, FR2, FR33
 
 **Acceptance Criteria:**
 
-**Given** I am inside a supported local repository or provide an explicit repository path
-**When** I run the initialization flow
-**Then** Tokenizor creates or reuses a durable project identity and registers the current workspace
-**And** the result remains stable across later sessions
+**Given** a healthy local environment and a repository or folder path
+**When** I run `init` for that path
+**Then** Tokenizor creates or registers the project and active workspace binding in authoritative state
+**And** the resulting identity is available to later sessions and workflows
 
-**Given** the same repository is initialized again with equivalent inputs
-**When** the operation is replayed
-**Then** Tokenizor behaves idempotently
-**And** it does not create duplicate project or workspace records
+**Given** the same repository or folder is initialized again with equivalent inputs
+**When** `init` is retried
+**Then** Tokenizor returns a deterministic existing-or-idempotent outcome
+**And** it does not create conflicting duplicate project or workspace records
 
-### Story 1.4: Inspect Known Projects and Workspaces
+### Story 1.4: Inspect Registered Projects and Workspaces
 
 As an operator,
-I want to inspect registered projects and workspaces,
-So that I can understand what Tokenizor currently knows and manage it safely.
+I want to inspect the projects and workspaces known to Tokenizor,
+So that I can understand and maintain the current authoritative state explicitly.
 
 **FRs implemented:** FR5, FR39
 
 **Acceptance Criteria:**
 
-**Given** one or more projects and workspaces are registered
-**When** I request the current registry view
-**Then** Tokenizor lists known projects and associated workspaces in scriptable output
-**And** the output is clear enough for advanced local maintenance
+**Given** one or more projects or workspaces are registered
+**When** I inspect known state
+**Then** Tokenizor lists the registered projects and workspaces with stable identifiers, roots, and relevant status information
+**And** the output is readable, actionable, and scriptable
 
-**Given** no projects are registered
-**When** I inspect the registry
-**Then** Tokenizor returns an explicit empty-state response
-**And** it does not imply hidden or partial state
+**Given** no projects or workspaces are registered
+**When** I inspect known state
+**Then** Tokenizor returns an explicit empty result
+**And** it does not imply state exists through silence or hidden defaults
 
-### Story 1.5: Resolve the Active Workspace from Context or Override
+### Story 1.5: Resolve the Active Project or Workspace for a Session
 
 As an AI coding workflow,
-I want Tokenizor to resolve the active project and workspace from the current directory or an explicit override,
-So that retrieval and operations target the correct repository context without manual rediscovery.
+I want Tokenizor to resolve the active project or workspace from current context or explicit override,
+So that repository-aware sessions attach to the correct scope without guesswork.
 
-**FRs implemented:** FR4
+**FRs implemented:** FR4, FR33
 
 **Acceptance Criteria:**
 
-**Given** the current working directory belongs to a registered workspace
-**When** active context resolution is requested
-**Then** Tokenizor returns the matching project and workspace as authoritative context
-**And** provider clients do not become the source of truth for that resolution
+**Given** the current working context maps to a registered workspace
+**When** active resolution is requested without an override
+**Then** Tokenizor returns the matching project and workspace identity
+**And** the result preserves durable continuity across later sessions in the same context
 
-**Given** an explicit override is provided
-**When** resolution is requested
-**Then** Tokenizor uses the override deterministically
-**And** it reports an error if the override is unknown or conflicts with registered state
+**Given** an explicit override is supplied
+**When** active resolution is requested
+**Then** Tokenizor resolves the requested registered target deterministically
+**And** it fails clearly if the override is unknown, ambiguous, or incompatible with the current context
 
-### Story 1.6: Add Additional Workspaces or Worktrees to an Existing Project
+### Story 1.6: Attach Additional Workspaces or Worktrees to an Existing Project
 
-As an operator,
-I want to associate additional workspaces or worktrees with an existing project,
-So that Tokenizor preserves one durable project identity across related working copies.
+As a power user,
+I want to associate multiple workspaces or worktrees with the same underlying project,
+So that Tokenizor preserves one project identity across related local working copies.
 
 **FRs implemented:** FR3
 
 **Acceptance Criteria:**
 
-**Given** a project already exists in Tokenizor
-**When** I register an additional workspace or worktree for that project
-**Then** Tokenizor links it to the existing project identity
-**And** it does not create an unrelated duplicate project
+**Given** an existing project is already registered
+**When** I attach another compatible workspace or worktree to that project
+**Then** Tokenizor preserves one underlying project identity with distinct workspace bindings
+**And** later inspection and resolution surfaces reflect the association correctly
 
-**Given** multiple workspaces are associated with one project
-**When** I inspect the registry
-**Then** all linked workspaces are shown clearly
-**And** their relationship to the shared project is explicit
+**Given** a workspace attachment conflicts with an existing binding or does not safely match the target project
+**When** I attempt the association
+**Then** Tokenizor rejects the request explicitly
+**And** it does not silently rewrite or merge authoritative state
 
-### Story 1.7: Migrate or Update Workspace State Safely
+### Story 1.7: Update or Migrate Project and Workspace State Safely
 
 As an operator,
-I want to migrate or update workspace state when lifecycle changes occur,
-So that Tokenizor remains accurate without corrupting durable context.
+I want to update or migrate project and workspace state when lifecycle changes occur,
+So that durable identity remains correct without hidden mutation or drift.
 
-**FRs implemented:** FR6
+**FRs implemented:** FR2, FR6, FR38, FR39
 
 **Acceptance Criteria:**
 
-**Given** a registered workspace path or local lifecycle state has changed
-**When** I run the migration or update flow
-**Then** Tokenizor updates durable state safely
-**And** preserves continuity for later sessions where possible
+**Given** registered project or workspace state needs an explicit update or migration
+**When** I run the supported update or migrate flow
+**Then** Tokenizor applies the requested change safely and records the resulting state transition
+**And** the updated state remains inspectable through normal project and workspace views
 
-**Given** a requested migration cannot be completed safely
-**When** the operation fails
-**Then** Tokenizor reports the failure explicitly
-**And** it does not silently corrupt project or workspace state
+**Given** the requested change is incompatible, ambiguous, or unsafe
+**When** the update or migration is attempted
+**Then** Tokenizor fails clearly with actionable guidance
+**And** it does not silently rewrite authoritative project or workspace state
 
 ## Epic 2: Durable Indexing and Run Control
 
-Users can start, monitor, checkpoint, cancel, and safely retry indexing work with durable run identities and deterministic mutation behavior.
+Users can start, monitor, checkpoint, cancel, re-run, and safely retry indexing work with durable run identities and deterministic mutation behavior.
 
-### Story 2.1: Start an Indexed Run with Durable Run Identity
+### Story 2.1: Start Indexing with a Durable Run Identity
 
 As a power user,
-I want to start an indexing run for a repository or workspace and receive a durable run ID,
-So that I can track and manage indexing work over time.
+I want to start indexing for a repository or folder and receive a durable run identity,
+So that I can track and manage indexing as real operational work.
 
-**FRs implemented:** FR8, FR16
+**FRs implemented:** FR8
 
 **Acceptance Criteria:**
 
-**Given** a registered repository or workspace is ready for indexing
-**When** I start an indexing operation
-**Then** Tokenizor creates a durable run record, assigns an explicit initial lifecycle state, and returns its run ID
-**And** the run is associated with the correct project and workspace context plus durable ownership or lease semantics where applicable
+**Given** a registered repository or folder and healthy runtime prerequisites
+**When** I start indexing
+**Then** Tokenizor creates a durable indexing run record and returns its stable run identity
+**And** the run enters an explicit lifecycle state rather than being treated as fire-and-forget work
 
-**Given** the indexing request is retried with the same idempotent inputs
-**When** Tokenizor processes the request
-**Then** it returns the stored result for the same effective request
-**And** it does not create a duplicate run
+**Given** indexing cannot begin because prerequisites, compatibility checks, or active mutation rules fail
+**When** I request indexing
+**Then** Tokenizor rejects the request with a clear reason
+**And** it does not create misleading partial run state
 
-### Story 2.2: Execute Indexing for the Initial Quality-Focus Language Set
+### Story 2.2: Index Supported Repositories Across the Baseline Language Coverage Set
 
 As a power user,
-I want Tokenizor to execute indexing for the initial quality-focus language set (`Rust`, `Python`, `JavaScript / TypeScript`, and `Go`),
-So that the first trusted retrieval slice is implementable at high quality.
+I want Tokenizor to index supported repositories across the baseline language coverage set,
+So that later retrieval workflows can rely on broad repository coverage instead of a narrow language subset.
 
 **FRs implemented:** FR9
 
 **Acceptance Criteria:**
 
-**Given** a repository contains eligible `Rust`, `Python`, `JavaScript / TypeScript`, or `Go` files
+**Given** a repository containing supported baseline languages
 **When** an indexing run executes
-**Then** Tokenizor discovers and processes eligible files under bounded concurrency
-**And** the run records explicit per-file processing progress within the correct run and repository context
+**Then** Tokenizor discovers, filters, and records indexable files across the supported language coverage set
+**And** unsupported or skipped files are handled explicitly without poisoning the run
 
-**Given** a repository also contains files outside the initial quality-focus language set
-**When** language eligibility is evaluated for the run
-**Then** Tokenizor marks only `Rust`, `Python`, `JavaScript / TypeScript`, and `Go` files as in scope for this story
-**And** it does not claim indexing support for other languages during this execution slice
+**Given** indexing encounters per-file parse or extraction issues during a supported run
+**When** the run continues
+**Then** Tokenizor isolates affected files or artifacts safely
+**And** the overall run remains inspectable rather than collapsing into silent corruption
 
-**Given** some files fail parsing or extraction during the run
-**When** processing continues
-**Then** the affected files are isolated safely
-**And** the full run is not treated as globally poisoned by a single file failure
-
-### Story 2.3: Persist File-Level Indexing Outputs and Symbol/File Metadata for the Initial Quality-Focus Language Set
-
-As a power user,
-I want Tokenizor to persist file-level indexing outputs and symbol/file metadata for the initial quality-focus language set,
-So that the first bounded indexing slice produces durable, inspectable indexing state instead of only transient run activity.
-
-**FRs implemented:** FR9
-
-**Acceptance Criteria:**
-
-**Given** an indexing run successfully processes eligible `Rust`, `Python`, `JavaScript / TypeScript`, or `Go` files
-**When** file-level indexing results are committed
-**Then** Tokenizor persists durable file records plus symbol and file metadata for those processed files
-**And** the persisted outputs are linked to the correct repository, workspace, and run context
-
-**Given** a processed file has no extractable symbols or produces suspect metadata during persistence
-**When** commit-time validation runs
-**Then** Tokenizor records an explicit file-level outcome such as empty-symbol, failed, or quarantined
-**And** it does not silently claim trusted symbol coverage for that file
-
-**Given** the repository contains files outside the initial quality-focus language set
-**When** persistence for this story completes
-**Then** Tokenizor persists usable indexing outputs only for the in-scope initial quality-focus slice
-**And** it does not represent out-of-scope languages as supported persisted outputs for this story
-
-### Story 2.4: Extend Indexing Through a Repeatable Broader-Language Onboarding Pattern
-
-As a power user,
-I want Tokenizor to extend indexing through a repeatable broader-language onboarding pattern,
-So that additional languages can be added as implementation-sized follow-on slices instead of one oversized parity story.
-
-**FRs implemented:** FR9
-
-**Acceptance Criteria:**
-
-**Given** one explicitly named broader-language slice outside the initial quality-focus set is onboarded through the new pattern
-**When** an indexing run executes against a repository containing that slice
-**Then** Tokenizor discovers, processes, and persists usable file-level indexing outputs plus symbol/file metadata for the onboarded slice
-**And** the onboarded slice uses the same run, commit, and inspection contracts as the initial quality-focus stories without redesigning the overall indexing lifecycle
-
-**Given** files in the onboarded broader-language slice fail parsing, extraction, or commit-time validation
-**When** processing continues
-**Then** Tokenizor records explicit per-file failure outcomes for those files
-**And** the onboarding pattern reuses the shared failure-isolation behavior rather than requiring one-off handling for that language
-
-**Given** a repository also contains broader baseline languages that have not yet been onboarded through the pattern
-**When** indexing completes
-**Then** Tokenizor reports only the explicitly onboarded slice as supported for that run
-**And** it preserves an inspectable not-yet-supported outcome for the remaining broader-language files instead of implying full baseline parity coverage
-
-### Story 2.5: Inspect Run Status and Health
+### Story 2.3: Inspect Run Status, Health, and Live Progress
 
 As an operator,
-I want to inspect indexing run status and health,
-So that I can understand whether active or recent indexing work is healthy, degraded, or needs intervention.
+I want to inspect indexing run status, health, and live progress,
+So that I can tell what active or recent indexing work is doing without guessing.
 
-**FRs implemented:** FR12, FR36
+**FRs implemented:** FR12, FR13, FR36
 
 **Acceptance Criteria:**
 
-**Given** an indexing run is active or recently completed
-**When** I request run status
-**Then** Tokenizor returns the run lifecycle state plus the current health classification for that run
-**And** the response distinguishes active, completed, cancelled, interrupted, degraded, and unhealthy conditions rather than collapsing them into a generic status
-
-**Given** a run is interrupted, degraded, or unhealthy
+**Given** an indexing run exists
 **When** I inspect run status
-**Then** Tokenizor reports that condition explicitly
-**And** it exposes enough state for an operator to determine whether cancellation, repair, or later recovery work is required
-
-### Story 2.6: Observe Live or Near-Live Indexing Progress
-
-As an operator,
-I want live or near-live progress visibility for active indexing runs,
-So that I can tell whether work is advancing without waiting for terminal completion.
-
-**FRs implemented:** FR13
-
-**Acceptance Criteria:**
+**Then** Tokenizor reports the run's current lifecycle state, health, and durable identifiers
+**And** the response distinguishes active, completed, cancelled, failed, and blocked conditions explicitly
 
 **Given** an indexing run is active
-**When** I request run progress
-**Then** Tokenizor returns the current phase plus concrete progress fields such as processed work, remaining work, or last completed checkpoint
-**And** the reported progress state is no more than 1 second behind the actual run state under normal operation
+**When** I inspect progress
+**Then** Tokenizor returns near-live progress information for that run
+**And** the progress view remains available without requiring log scraping or hidden internal knowledge
 
-**Given** a run is no longer active
-**When** I request run progress
-**Then** Tokenizor returns the last durable progress snapshot or terminal outcome explicitly
-**And** it does not present completed, cancelled, or failed work as if it were still live
-
-### Story 2.7: Cancel an Active Indexing Run Safely
+### Story 2.4: Cancel an Active Indexing Run Safely
 
 As an operator,
 I want to cancel an active indexing run,
-So that I can stop or restart work without leaving ambiguous run state behind.
+So that I can stop or restart work without leaving ambiguous operational state behind.
 
 **FRs implemented:** FR14
 
 **Acceptance Criteria:**
 
-**Given** an indexing run is active
+**Given** an indexing run is active and eligible for cancellation
 **When** I request cancellation
-**Then** Tokenizor transitions the run into an explicit cancelled terminal state
-**And** cancellation is visible through later run inspection
+**Then** Tokenizor records the cancellation request and transitions the run to a durable terminal cancellation state
+**And** new inspection requests show that the run was cancelled explicitly
 
-**Given** a run is already terminal
-**When** cancellation is requested
-**Then** Tokenizor responds deterministically
-**And** it does not create contradictory run state
+**Given** a run is already terminal or not cancellable
+**When** I request cancellation
+**Then** Tokenizor returns a clear non-cancellable outcome
+**And** it does not silently mutate historical run state
 
-### Story 2.8: Checkpoint Long-Running Indexing Work
+### Story 2.5: Checkpoint Long-Running Indexing Work
 
 As an operator,
-I want to checkpoint indexing progress during long-running work,
-So that interrupted runs can later resume from durable progress.
+I want to checkpoint long-running indexing work,
+So that interrupted runs can preserve meaningful progress for later recovery.
 
 **FRs implemented:** FR15
 
 **Acceptance Criteria:**
 
-**Given** a long-running indexing run is in progress
+**Given** an indexing run is active and has progressed far enough to checkpoint
 **When** a checkpoint is created
-**Then** Tokenizor persists checkpoint state durably before reporting success
-**And** the checkpoint is associated with the correct run identity
+**Then** Tokenizor durably records checkpoint state associated with the run
+**And** later recovery logic can inspect that checkpoint without reconstructing it from logs
 
-**Given** no valid active run exists
-**When** checkpoint creation is requested
-**Then** Tokenizor returns an explicit failure
-**And** it does not create orphan checkpoint state
+**Given** checkpoint creation is requested when the run is not eligible or durable state cannot be committed
+**When** checkpointing is attempted
+**Then** Tokenizor fails explicitly
+**And** it does not report a checkpoint as successful before durability is achieved
 
-### Story 2.9: Re-index Managed Repository or Workspace State Deterministically
-
-As an operator,
-I want to re-index managed repository or workspace state deterministically,
-So that Tokenizor can refresh indexed state after source changes without ambiguous run behavior.
-
-**FRs implemented:** FR10, FR16
-
-**Acceptance Criteria:**
-
-**Given** an indexed repository or workspace has changed
-**When** I trigger re-indexing
-**Then** Tokenizor starts a new managed run against the correct target
-**And** prior state remains inspectable until replacement policy is applied
-
-**Given** the re-index request is replayed with the same effective inputs
-**When** Tokenizor processes the request
-**Then** it behaves idempotently
-**And** it does not create conflicting managed refresh work
-
-### Story 2.10: Invalidate Indexed State So It Is No Longer Trusted
+### Story 2.6: Retry Mutating Operations with Deterministic Idempotency
 
 As an operator,
-I want to invalidate indexed state that should no longer be trusted,
-So that retrieval flows cannot silently use stale or unsafe repository state.
-
-**FRs implemented:** FR11
-
-**Acceptance Criteria:**
-
-**Given** I request invalidation for a repository or workspace
-**When** the invalidation is processed
-**Then** Tokenizor marks the indexed state as invalid for trusted use
-**And** later retrieval flows do not silently treat invalidated state as healthy
-
-**Given** invalidated state exists
-**When** I inspect repository or run status
-**Then** Tokenizor reports that trust-impacting condition explicitly
-**And** the system preserves a clear path toward re-index or repair
-
-### Story 2.11: Reject Conflicting Idempotent Replays
-
-As an operator,
-I want conflicting replays of idempotent indexing mutations to fail deterministically,
-So that retries cannot silently mutate state under a reused idempotency identity.
+I want supported indexing mutations to behave deterministically when retried,
+So that repeated requests do not create conflicting or ambiguous operational state.
 
 **FRs implemented:** FR16
 
 **Acceptance Criteria:**
 
-**Given** a mutating indexing-related request has already been recorded with an idempotency key
-**When** the same key is replayed with different effective inputs
-**Then** Tokenizor rejects the replay deterministically
-**And** it preserves the original request record and outcome
+**Given** a supported mutating request is replayed with the same idempotency identity and equivalent effective input
+**When** Tokenizor receives the replay
+**Then** it returns the stored or equivalent prior outcome deterministically
+**And** it does not create duplicate operational state
 
-**Given** the same key is replayed with the same effective inputs
-**When** Tokenizor processes the request
-**Then** it returns the stored outcome
-**And** it does not execute a second conflicting mutation
+**Given** a request reuses an existing idempotency identity with materially different effective input
+**When** Tokenizor receives the replay
+**Then** it rejects the request as a conflicting replay
+**And** the response makes the conflict explicit rather than silently reinterpreting the request
+
+### Story 2.7: Re-Index Previously Indexed State After Source Changes
+
+As a power user,
+I want to re-index a previously indexed repository or workspace after source changes,
+So that Tokenizor can refresh durable indexed state without making me rebuild everything manually.
+
+**FRs implemented:** FR10
+
+**Acceptance Criteria:**
+
+**Given** a repository or workspace already has indexed state
+**When** I request re-indexing after source changes
+**Then** Tokenizor starts a new indexing run scoped to refreshing that known target
+**And** the resulting run remains inspectable through normal run-status surfaces
+
+**Given** the requested target is unknown, incompatible, or blocked by current mutation rules
+**When** I request re-indexing
+**Then** Tokenizor fails clearly with actionable guidance
+**And** it does not silently create orphaned refresh state
+
+### Story 2.8: Invalidate Indexed State for a Clean Rebuild
+
+As an operator,
+I want to invalidate indexed state for a repository or workspace,
+So that I can force a clean rebuild when prior indexed data should no longer be trusted.
+
+**FRs implemented:** FR11
+
+**Acceptance Criteria:**
+
+**Given** a repository or workspace has existing indexed state
+**When** I request invalidation
+**Then** Tokenizor marks the relevant indexed state as invalid for trusted use
+**And** later status or retrieval-adjacent surfaces can distinguish that invalidated condition explicitly
+
+**Given** invalidation is requested for an unknown target or during an unsafe conflicting mutation state
+**When** the request is processed
+**Then** Tokenizor rejects the request clearly
+**And** it does not partially clear or silently corrupt authoritative state
 
 ## Epic 3: Trusted Code Discovery and Verified Retrieval
 
-Users can access Tokenizor's core search, outline, and verified retrieval value through the baseline retrieval surface used by AI workflows, instead of brute-force file exploration.
+Users can search, outline, and retrieve verified code from indexed repositories through the core retrieval surface that AI workflows depend on.
 
 ### Story 3.1: Search Indexed Repositories by Text
 
-As an AI coding user,
-I want to search indexed repositories by text,
-So that I can find relevant code locations without brute-force file rereads.
+As a power user,
+I want to search indexed repositories by text content,
+So that I can locate relevant code and artifacts without brute-force file rereads.
 
 **FRs implemented:** FR17, FR23
 
 **Acceptance Criteria:**
 
-**Given** a repository has indexed searchable content
-**When** I perform a text search
-**Then** Tokenizor returns matching results scoped to the correct repository or workspace context
-**And** the response is fast enough to support normal coding workflow use
+**Given** a repository has indexed searchable text state
+**When** I run a text search query
+**Then** Tokenizor returns matching results scoped to the requested repository or workspace
+**And** the response remains explicit about unsupported, blocked, or invalid search conditions
 
-**Given** no matches exist
-**When** I perform a text search
-**Then** Tokenizor returns an explicit empty result
-**And** it does not imply stale or hidden matches
+**Given** the target repository is unindexed, invalidated, or otherwise not safely queryable
+**When** I run a text search query
+**Then** Tokenizor returns a clear non-trusted or unavailable outcome
+**And** it does not pretend that an empty result means the repository was safely searched
 
 ### Story 3.2: Search Indexed Repositories by Symbol
 
-As an AI coding user,
+As a power user,
 I want to search indexed repositories by symbol,
-So that I can navigate to relevant code structures quickly.
+So that I can navigate code structure through semantic lookup rather than raw filename guessing.
 
 **FRs implemented:** FR18, FR23
 
 **Acceptance Criteria:**
 
-**Given** symbol metadata exists for indexed files
-**When** I search by symbol
-**Then** Tokenizor returns matching symbol results for the correct project or workspace context
-**And** symbol results include enough metadata to support further retrieval or navigation
+**Given** a repository has indexed symbol metadata
+**When** I run a symbol search query
+**Then** Tokenizor returns matching symbols with stable identifying context such as file path, kind, and location metadata
+**And** the response remains scoped to authoritative indexed state
 
-**Given** symbol extraction is incomplete or unavailable for some files
-**When** I search by symbol
-**Then** Tokenizor returns the best valid results available
-**And** it does not overstate coverage for missing symbol data
+**Given** symbol metadata is partial, stale, or unavailable for the requested target
+**When** I run a symbol search query
+**Then** Tokenizor reports that trust or availability limitation explicitly
+**And** it does not silently overstate symbol coverage
 
-### Story 3.3: Retrieve File and Repository Outlines
-
-As an AI coding user,
-I want to retrieve structural outlines for files and repositories,
-So that I can understand code organization quickly before reading raw files.
-
-**FRs implemented:** FR19, FR20, FR23
-
-**Acceptance Criteria:**
-
-**Given** indexed file and repository structure metadata exists
-**When** I request a file outline or repository outline
-**Then** Tokenizor returns the requested structural view for the active context
-**And** the response distinguishes missing outline data from valid empty structure
-
-**Given** a requested file or repository is not known to the active context
-**When** I request an outline
-**Then** Tokenizor returns an explicit failure or not-found result
-**And** it does not silently fall back to unrelated scope
-
-### Story 3.4: Expose the Full Baseline Retrieval Slice Through MCP
+### Story 3.3: Retrieve a Structural Outline for a File
 
 As an AI coding workflow,
-I want Tokenizor's core search, outline, and verified retrieval capabilities exposed through the baseline MCP retrieval surface,
-So that trusted repository discovery and grounded code retrieval are usable from the primary AI-facing entrypoint.
+I want to retrieve a structural outline for a file,
+So that I can understand file shape quickly before deeper retrieval.
 
-**FRs implemented:** FR24
+**FRs implemented:** FR19, FR23
 
 **Acceptance Criteria:**
 
-**Given** Tokenizor is running through its baseline operator entrypoint
-**When** an MCP client connects
-**Then** baseline MCP tools for search, outline, verified symbol retrieval, and batched retrieval are available
-**And** those tools resolve against Tokenizor's authoritative project and workspace context
+**Given** a file exists in authoritative indexed state
+**When** I request its structural outline
+**Then** Tokenizor returns the file outline with the indexed structural elements available for that file
+**And** the response identifies the target file deterministically
 
-**Given** the MCP client invokes retrieval tools without a valid active context
-**When** the request is processed
-**Then** Tokenizor returns an explicit actionable failure
-**And** it does not let the client silently redefine repository truth
+**Given** the file is unindexed, invalidated, or affected by integrity issues
+**When** I request its outline
+**Then** Tokenizor returns an explicit blocked, degraded, or unavailable outcome
+**And** it does not serve the outline as trusted if the underlying indexed state is not safe
+
+### Story 3.4: Retrieve a Structural Outline for a Repository
+
+As an AI coding workflow,
+I want to retrieve a structural outline for a repository,
+So that I can orient to codebase shape without manually re-exploring the tree from scratch.
+
+**FRs implemented:** FR20, FR23
+
+**Acceptance Criteria:**
+
+**Given** a repository has authoritative indexed state
+**When** I request its repository outline
+**Then** Tokenizor returns the repository structure using the indexed outline surface
+**And** the response is suitable for early-session codebase orientation
+
+**Given** repository outline data is incomplete, invalidated, or blocked by trust conditions
+**When** I request the outline
+**Then** Tokenizor returns an explicit trust or availability state
+**And** it does not quietly degrade into misleading partial trust
 
 ### Story 3.5: Retrieve Verified Source for a Symbol or Code Slice
 
-As an AI coding user,
-I want to retrieve source for a symbol or code slice from indexed content,
-So that I can rely on returned code as trustworthy retrieval rather than guessed output.
+As an AI coding workflow,
+I want to retrieve verified source for a symbol or equivalent code slice,
+So that I can rely on Tokenizor as a trustworthy source-serving layer.
 
-**FRs implemented:** FR21, FR25, FR28, FR29
+**FRs implemented:** FR21, FR25, FR26, FR27, FR28
 
 **Acceptance Criteria:**
 
-**Given** indexed symbol or code-slice metadata points to stored raw bytes
+**Given** indexed symbol metadata and raw CAS bytes are both available and span verification succeeds
+**When** I request source for a symbol or equivalent code slice
+**Then** Tokenizor returns the requested source as trusted retrieval
+**And** the response indicates the verification-backed trust outcome explicitly
+
+**Given** span verification fails or the underlying raw bytes cannot safely support the requested slice
 **When** I request source retrieval
-**Then** Tokenizor verifies the requested span against byte-exact stored content before serving trusted output
-**And** the result includes explicit modeled trust or integrity outcomes where relevant rather than generic protocol errors
+**Then** Tokenizor returns an explicit blocked, suspect, quarantined, or repair-required outcome
+**And** it never serves the failed retrieval as trusted source
 
-**Given** the requested source passes verification
-**When** retrieval completes
-**Then** Tokenizor returns the verified source slice
-**And** it preserves exact raw source fidelity
+**Given** trusted retrieval is served from stored source content
+**When** Tokenizor slices and returns the requested code span
+**Then** the response is derived from byte-exact CAS-backed raw bytes without newline normalization or decode-reencode mutation
+**And** the trusted result preserves exact raw source fidelity for the requested slice
 
-### Story 3.6: Block or Quarantine Suspect Retrieval
-
-As an AI coding user,
-I want suspect retrieval to fail explicitly instead of being served as trustworthy,
-So that integrity problems do not silently poison my coding workflow.
-
-**FRs implemented:** FR26, FR27, FR29
-
-**Acceptance Criteria:**
-
-**Given** retrieval verification fails because of stale spans, corrupted metadata, or byte mismatch
-**When** source retrieval is requested
-**Then** Tokenizor blocks, quarantines, or marks the result suspect explicitly
-**And** it does not serve the result as trusted code
-
-**Given** a retrieval result is blocked or quarantined
-**When** the result is returned
-**Then** Tokenizor exposes actionable trust or integrity state
-**And** the response makes repair or re-index implications understandable
-
-### Story 3.7: Retrieve Multiple Symbols or Code Slices in One Workflow
+### Story 3.6: Retrieve Multiple Symbols or Code Slices in One Request Flow
 
 As an AI coding workflow,
-I want to retrieve multiple symbols or code slices in one request path,
-So that I can gather grounded code context efficiently.
+I want to retrieve multiple symbols or code slices in one request flow,
+So that I can gather related code context efficiently without repeating single-item retrieval overhead.
 
 **FRs implemented:** FR22
 
 **Acceptance Criteria:**
 
-**Given** multiple valid retrieval targets exist in the active context
+**Given** multiple requested symbols or code slices are resolvable from indexed state
 **When** I request batched retrieval
-**Then** Tokenizor returns each result with independent trust or integrity state where relevant
-**And** one failed item does not silently invalidate unrelated successful items
+**Then** Tokenizor returns a structured multi-result response for the requested set
+**And** each item preserves its own trust or integrity outcome rather than collapsing the batch into one undifferentiated status
 
-**Given** some requested items are missing or suspect
-**When** batched retrieval completes
-**Then** Tokenizor reports mixed outcomes explicitly
-**And** it preserves determinism about which items were trusted, blocked, or absent
+**Given** one or more requested items cannot be served as trusted retrieval
+**When** batched retrieval is processed
+**Then** Tokenizor reports item-level blocked, suspect, quarantined, or unavailable outcomes explicitly
+**And** successfully verified items remain distinguishable from failed ones
 
-#### Epic 3 Execution Narrative
+### Story 3.7: Distinguish Trusted Retrieval from Repair-Required Results
 
-*Added 2026-03-08 during sprint planning. Derived from first-principles analysis and architecture decision records.*
+As a power user,
+I want retrieval responses to distinguish trusted results from repair-required or suspect results,
+So that I can decide whether to proceed, retry later, or trigger repair.
 
-**Scope Boundaries — Epic 3 does NOT cover:**
+**FRs implemented:** FR29
 
-- Live filesystem change detection or watch-based invalidation
-- Write-side operations (re-indexing, repair, state mutation)
-- Freshness policy enforcement (deferred to Epic 4/5)
-- Cross-repository or cross-workspace search
-- MCP resource endpoints (deferred to Epic 5)
+**Acceptance Criteria:**
 
-**Phase 0: Shared Read-Side Contract (Prerequisite)**
+**Given** a retrieval-adjacent query or source request completes
+**When** Tokenizor returns the response
+**Then** the result model exposes explicit trust or integrity state rather than a generic success boolean
+**And** callers can tell whether the result is trusted, degraded, blocked, quarantined, or repair-required
 
-The contract is specified before Story 3.1 is considered started. It is reviewed against the requirements of 3.1, 3.2, 3.3, 3.5, 3.6, and 3.7 before any story begins. First implementation happens during 3.1, but the contract is not shaped by any single consumer.
+**Given** the repository or file state requires operator intervention before trusted retrieval is possible
+**When** Tokenizor returns the result
+**Then** the response surfaces that action-required condition explicitly
+**And** it does not hide recovery needs behind vague error text
 
-The contract includes:
-- **Request-level gating**: Health/context gate checks repo validity before any item processing. Unhealthy, invalidated, or context-invalid repos fail the entire request uniformly — no silent degraded service.
-- **Result envelope**: `outcome` + `trust` + `provenance` on every item/result
-- **Result-state disambiguation**: explicit empty vs missing vs stale vs quarantined
-- **Quarantined-file exclusion rules**
-- **Active-context resolution**
+### Story 3.8: Expose Baseline Retrieval Capabilities Through MCP
 
-**Phase 1: Search & Outlines (3.1, 3.2, 3.3 — parallel-eligible)**
+As an AI coding workflow,
+I want Tokenizor's core search, outline, and retrieval capabilities available through MCP,
+So that AI clients can use indexed discovery instead of repeated raw repository exploration.
 
-Parallel only after the contract is defined. Each story conforms to the shared contract.
+**FRs implemented:** FR24
 
-**Phase 2: Verified Retrieval (3.5)**
+**Acceptance Criteria:**
 
-Core verification path. Byte-exact verification against stored content. Returns outcome + trust.
+**Given** Tokenizor is connected to an MCP-capable client
+**When** the client invokes baseline retrieval tools
+**Then** Tokenizor exposes text search, symbol search, file outline, repository outline, and verified source retrieval through MCP
+**And** those MCP results preserve the same trust and integrity semantics as the underlying application layer
 
-**Phase 3: Suspect Blocking (3.6)**
-
-Blocking/quarantine behavior and explicit suspect outcomes. Tracked separately from 3.5 even if implemented alongside it.
-
-**Phase 4: Batched Retrieval (3.7)**
-
-Per-item outcomes with batch summary. Request-level gating passes first — if it fails, the whole batch fails uniformly before item processing. If it passes, mixed per-item outcomes are returned. Deterministic, request-order preserved.
-
-**Phase 5: MCP Exposure (3.4)**
-
-Fine-grained tools using canonical names:
-- `search_text`
-- `search_symbols`
-- `get_file_outline`
-- `get_repo_outline`
-- `get_symbol`
-- `get_symbols`
-
-Built last, once the capability contract is stable.
-
-**Architecture Decisions:**
-
-| ADR | Decision | Rationale |
-|-----|----------|-----------|
-| ADR-1 | Contract specified before 3.1 starts; reviewed against all stories | Prevents contract from being shaped by a single consumer |
-| ADR-2 | Split `outcome` + `trust` fields; request-level gating before item processing | Orthogonal concerns; unhealthy repos fail early, not silently degraded |
-| ADR-3 | Fine-grained MCP tools (6 canonical names) | Matches jCodeMunch pattern, better AI client discovery |
-| ADR-4 | Per-item outcomes in batch, only after request gating passes | Preserves valid work; gate failure = uniform batch failure |
-
-**Execution Guidance:**
-
-- **Critical path**: Story 3.5 (Verified Retrieval) is the Epic 3 critical-path story. It carries the highest combined dependency load and implementation risk. Allocate the heaviest design and test attention here.
-- **Phase 0 review gate**: The shared read-side contract has high risk but no visible user value. It requires an explicit review gate — confirmed against the requirements of 3.1, 3.2, 3.3, 3.5, 3.6, and 3.7 — before any Phase 1 story starts.
-- **Phase 1 serialization**: If capacity forces sequencing within Phase 1, prefer 3.1 or 3.2 before 3.3. Text and symbol search exercise more of the contract surface (query patterns, result semantics, provenance) than outlines do.
-- **3.3 as confidence builder**: Story 3.3 (Outlines) has the highest scope clarity and lowest risk, making it a safe early confidence-building story — but not the best contract-shaping story.
-
-**Failure Mode Guidance:**
-
-- **Request-fatal vs item-local failures**: The contract must explicitly distinguish which conditions block the entire request vs which are reported per-item. Request-fatal: invalidated repo, quarantined repo, no active context, interrupted/incomplete index state, health-gate failure. Item-local: individual file quarantined, stale symbol metadata for a specific file, missing symbol in otherwise healthy index. Request gating runs first; item-level outcomes apply only after the gate passes.
-- **Retrieval verification model**: Verified retrieval checks blob_id, span offset/length boundaries, and that the extracted slice matches expected indexed metadata. Mismatch → fail closed. Trust is against indexed state, not live disk. If the workspace drifts after indexing, that is an index-freshness concern (modeled through repo/run health state), not a retrieval verification bug.
-- **Quarantine exclusion**: This is a contract-level filter, not a per-story implementation detail. Quarantine operates at two levels:
-  - *Repo-level*: entire repository quarantined → request-fatal, all operations blocked.
-  - *File-level*: individual file quarantined → excluded from search results; returned with `trust: quarantined` for targeted outline/retrieval requests.
-- **Full-chain integration test (required gate)**: At least one end-to-end integration path must exercise index → search/outline/retrieve → trust decision → MCP surface before Epic 3 is considered done. This is a mandatory quality gate, not optional.
-- **MCP tool naming**: Canonical names (`search_text`, `search_symbols`, `get_file_outline`, `get_repo_outline`, `get_symbol`, `get_symbols`) are decided. Coexistence with jCodeMunch is an integration decision to be resolved during Story 3.4, not preemptively mitigated via namespace prefixes.
-
-**Adversarial Findings (Red Team):**
-
-- **Active mutation blocking**: Request gating must consult authoritative run/lease state from Epic 2. Reads during active mutation are request-fatal. The implementation must define the exact ordering and atomicity guarantees for "run becomes active" — idempotency enforcement (Story 2.11) and lease acquisition are not the same mechanism and must not be conflated.
-- **MCP context integrity**: MCP retrieval tools must not accept repo/workspace override parameters. They operate against the resolved active context. Context switching is a separate, explicit operation — never a side effect of a retrieval call.
-- **Quarantine policy**: Search results exclude quarantined items unconditionally. Outline and retrieval results for specifically requested targets may return results with explicit `trust: quarantined` to support targeted diagnosis. This policy is consistent across all retrieval surfaces.
-- **Scope of `verified`**: `trust: verified` means verified against indexed-state integrity only — not against live workspace state. Freshness is conveyed through provenance metadata (index timestamp, run_id). Policy decisions based on freshness belong to Epic 4 (health inspection) and Epic 5 (workflow guidance). Epic 3 does not silently block old-but-valid indexes.
-
-**Planning Model:**
-
-*Phase readiness criteria* — each phase has an entry gate before stories move to `ready-for-dev`:
-
-| Phase | Entry Gate |
-|-------|-----------|
-| Phase 0 (Contract) | Contract type definitions drafted; cross-check documented against ACs for 3.1, 3.2, 3.3, 3.5, 3.6, and 3.7 |
-| Phase 1 (3.1, 3.2, 3.3) | Contract review gate passed; story files created with implementation notes referencing contract types |
-| Phase 2 (3.5) | Phase 1 stories done; verification approach documented in story file; blob/span access patterns confirmed against Epic 2 storage |
-| Phase 3 (3.6) | 3.5 done; quarantine policy confirmed; next_action categories aligned with Epic 4 |
-| Phase 4 (3.7) | 3.5 done; batch size limits decided; per-item outcome model confirmed |
-| Phase 5 (3.4) | 3.1–3.7 done; canonical tool names confirmed; coexistence strategy decided; integration test plan written |
-
-*Story ownership boundaries:*
-
-- 3.5 defines the retrieval result model and verified-path behavior.
-- 3.6 owns blocked/quarantined behavior, explicit suspect outcomes, and associated tests.
-
-*Integration test strategy (incremental):*
-
-- Phase 0 starts a read-side integration test skeleton covering contract conformance, search, and retrieval behavior.
-- Story 3.4 extends it to MCP end-to-end coverage, exercising the full chain: index → search/outline/retrieve → trust decision → MCP surface.
-
-*Epic 3 state transition:*
-
-- `epic-3` becomes `in-progress` when the first story file is created. This matches the existing sprint-status convention.
-
-*Contract review mechanism:* PR containing type/interface definitions for the result envelope, request gate, and provenance struct. PR description includes a checklist cross-referencing each story's ACs. Merged = gate passed.
-
-*The contract review gate and integration test checkpoints are planning-level gates within this narrative. They are not separate sprint-status entries.*
-
-**Contract Gaps (from self-consistency validation):**
-
-*Must-have contract additions:*
-
-- **Symbol result payload (3.2)**: Symbol search results must include: symbol name, symbol kind, file path, and line/span metadata — enough to drive follow-up retrieval or navigation without a second round-trip.
-- **Symbol coverage semantics (3.2)**: Results must distinguish: language/file type unsupported for symbol extraction, partial coverage (some files indexed but not all), and no matches in fully-covered scope. "Does not overstate coverage" requires an explicit coverage signal.
-- **Raw byte fidelity (3.5)**: Bytes returned must equal stored bytes exactly. No line-ending conversion, no encoding normalization, no whitespace transformation. This is a contract-level invariant, not an implementation detail.
-- **Index completeness policy**: Active, interrupted, checkpoint-incomplete, or otherwise incomplete index state is request-fatal for trusted Epic 3 read operations unless a future explicit degraded-read mode is introduced. Incomplete indexes violate the "no silent degradation" principle.
-- **Epic 3→4 shared next_action vocabulary**: Blocked or quarantined responses must use a shared vocabulary compatible with Epic 4's action classification. Initial categories: `reindex`, `repair`, `wait`, `resolve_context`.
-
-*Story-specific constraints (added to individual story files, not global contract):*
-
-- **Performance targets (NFR)**:
-  - `search_text`: p50 ≤ 150 ms, p95 ≤ 500 ms
-  - `search_symbols`: p50 ≤ 100 ms, p95 ≤ 300 ms
-  - `get_file_outline`: p50 ≤ 120 ms, p95 ≤ 350 ms
-  - `get_symbol` / verified retrieval: p50 ≤ 150 ms, p95 ≤ 400 ms
-- **Symbol metadata schema details**: Exact field names and types belong in 3.2's story file.
-- **Outline completeness indicators**: Coverage metadata for outlines belongs in 3.3's story file.
-
-**Epic 2 Read-Side Interface Dependency:**
-
-Epic 3 depends on Epic 2 read-side interfaces/access patterns for:
-- Blob lookup by blob_id (raw byte retrieval for verification)
-- Symbol metadata lookup (name, kind, file path, line/span)
-- Run/lease state lookup (active mutation detection for request gating)
-- Invalidation state lookup (repo-level and file-level invalidation flags)
-- Checkpoint/completeness status lookup (index completion state for request gating)
-
-If these interfaces evolve or an abstraction layer is introduced, Epic 3's read paths must be updated accordingly.
-
-**Sprint Risk Mitigations (from pre-mortem analysis):**
-
-*Process gates:*
-
-1. **Distill narrative into story files**: When each Story 3.x file is created at prep time, the SM must distill the relevant contract requirements, failure mode rules, and constraints from this narrative into story-specific implementation notes. The narrative is thorough but will not be read at implementation time unless the relevant bits are in the work item.
-2. **Contract-conformance test gating**: Every Epic 3 story must pass the evolving contract-conformance test skeleton before it can move to `done`. The skeleton grows with each story. Story 3.4 should be integration *wiring*, not integration *discovery*.
-3. **Epic 2 interface verification in Phase 0**: Before any story starts, confirm that each of the 5 listed Epic 2 read-side interfaces has an actual function/method/API that implements it. This is 30 minutes of code exploration. If an interface doesn't exist, that's a Phase 0 blocker.
-4. **Phase 0 time box**: Contract PR must be opened within 2 working days, merged within 3. The contract is types and interfaces (~200 lines), not a design document. "Reviewed against all stories" means a checklist in the PR — one line per story AC: "covered by [type/field/gate]" or "not applicable."
-
-*Gating thresholds (hard block vs soft warning):*
-
-- **Hard block (request-fatal)**: no active context, invalidated repo, repo-level quarantine, active mutation in progress, interrupted/checkpoint-incomplete index.
-- **Soft warning (via provenance/trust metadata)**: aged-but-complete index, partial symbol coverage for supported queries, minor non-fatal health warnings. The caller is informed, not blocked.
-
-*Per-story latency checks:*
-
-- Each story's "done" criteria must include a basic latency sanity check against the relevant NFR target. Not the full benchmark suite, but a test-fixture assertion that the operation completes within a reasonable bound. Performance is not deferred to a later pass.
+**Given** the requested retrieval cannot be served safely
+**When** the MCP tool call completes
+**Then** the response preserves explicit blocked, suspect, quarantined, or repair-required semantics as appropriate
+**And** the protocol surface does not collapse trust-bearing domain outcomes into misleading generic success
 
 ## Epic 4: Recovery, Repair, and Operational Confidence
 
-Users can recover interrupted work, diagnose unhealthy or suspect state, and repair the system without losing trust in the indexed repository.
-
-### Epic 4.0 Hardening Checkpoint
-
-This checkpoint formalizes the Epic 3 retrospective hardening work that must be finished before normal Epic 4 story execution begins. These items are delivery-hardening tasks, not new product-scope FR stories. They exist to close the process, protocol, performance, and supervision gaps discovered at the end of Epic 3.
-
-**Gate rule:** Story 4.1 must not be created or moved to `ready-for-dev` until `4.0.1`, `4.0.2`, `4.0.4`, and `4.0.5` are complete and written down. `4.0.3` must be complete before the first Epic 4 implementation begins. `4.0.6` may proceed in parallel, but any unfinished work must be called out explicitly as debt in the relevant story record.
-
-| Task | Required Before | Purpose |
-|---|---|---|
-| 4.0.1 | Story 4.1 creation | Add the Epic 4 five-gate Definition of Done to the story template so "done" means code exists, contract matches, and trust is proven. |
-| 4.0.2 | Story 4.1 creation | Update `project-context.md` with Epic 4 Recovery Architecture rules covering state mutation, observable retrieval changes, durability, and blind spots. |
-| 4.0.3 | First Epic 4 implementation | Document the Epic 4 agent selection policy so trust-critical recovery work stays under the approved supervision model. |
-| 4.0.4 | Story 4.1 creation | Add full-chain MCP `call_tool` integration coverage for one success and one failure-shaping path. |
-| 4.0.5 | Story 4.1 creation | Record registry-read benchmark evidence against the Epic 3 retrieval NFRs using the approved mixed-query fixture. |
-| 4.0.6 | Parallel with Epic 4 start | Extract a read-only query interface from `RegistryPersistence`, or keep the debt explicit in the story record if unfinished. |
-
-**Checkpoint deliverables**
-
-- story template updated with the Epic 4 five-gate Definition of Done
-- `project-context.md` updated with an `Epic 4 Recovery Architecture` section and `Agent Selection` section
-- protocol-level MCP integration evidence recorded in `tests/`
-- benchmark evidence recorded in `_bmad-output/implementation-artifacts/epic3-registry-benchmark.md`
-- read-side `RegistryPersistence` boundary either extracted or explicitly carried as debt
+Users can recover interrupted work, inspect unhealthy or suspect state, trigger deterministic repair, and understand operational history well enough to restore trust safely.
 
 ### Story 4.1: Sweep Stale Leases and Interrupted State on Startup
 
@@ -961,7 +712,27 @@ So that long-running work does not always restart from zero.
 **Then** Tokenizor returns an explicit recovery outcome
 **And** it points to deterministic re-index as the safe fallback
 
-### Story 4.3: Trigger Deterministic Repair for Suspect or Incomplete State
+### Story 4.3: Move Mutable Run Durability to the SpacetimeDB Control Plane
+
+As an operator,
+I want runs, checkpoints, per-run durable file metadata, idempotency records, and recovery metadata to persist through the authoritative control plane,
+So that recovery and operational state are durable, scalable, and aligned with the intended architecture.
+
+**FRs implemented:** FR15, FR30, FR34
+
+**Acceptance Criteria:**
+
+**Given** Tokenizor creates or mutates indexing run state
+**When** durable operational metadata is written
+**Then** the write goes through the SpacetimeDB-backed control plane rather than direct interim local-registry mutation
+**And** the resulting state remains inspectable through existing run APIs
+
+**Given** an interrupted run is eligible for recovery
+**When** resume occurs
+**Then** Tokenizor uses persisted checkpoint and recovery metadata from the control-plane-backed durability path
+**And** it does not depend on unsafe implicit reconstruction of mutable state from ad hoc local files
+
+### Story 4.4: Trigger Deterministic Repair for Suspect or Incomplete State
 
 As an operator,
 I want to trigger deterministic repair flows for suspect, stale, or incomplete indexed state,
@@ -981,13 +752,13 @@ So that I can restore trusted retrieval without guessing which action is safe.
 **Then** Tokenizor reports that explicit outcome
 **And** it does not silently mark the state healthy
 
-### Story 4.4: Inspect Repository Health and Repair-Required Conditions
+### Story 4.5: Inspect Repository Health and Repair-Required Conditions
 
 As an operator,
 I want to inspect repository health and repair-required conditions,
 So that I can decide whether retrieval is safe or intervention is needed.
 
-**FRs implemented:** FR35
+**FRs implemented:** FR32, FR35
 
 **Acceptance Criteria:**
 
@@ -1001,7 +772,7 @@ So that I can decide whether retrieval is safe or intervention is needed.
 **Then** Tokenizor reports an explicit healthy state
 **And** it does not rely on silence to imply safety
 
-### Story 4.5: Preserve Operational History for Runs, Repairs, and Integrity Events
+### Story 4.6: Preserve Operational History for Runs, Repairs, and Integrity Events
 
 As an operator,
 I want operational history preserved for runs, checkpoints, repairs, and integrity-related failures,
@@ -1021,7 +792,7 @@ So that I can understand what happened and why the current state should or shoul
 **Then** Tokenizor exposes enough structured detail to explain the current state
 **And** it avoids leaking raw source content by default
 
-### Story 4.6: Classify Action-Required States and Signal the Next Safe Action
+### Story 4.7: Classify Action-Required States and Signal the Next Safe Action
 
 As an operator,
 I want stale, interrupted, suspect, repair-required, and degraded states classified explicitly with next-safe-action guidance,
@@ -1043,12 +814,12 @@ So that I can respond correctly without mistaking action-required conditions for
 
 ## Epic 5: Retrieval-First Workflow Integration and Adoption
 
-Users can make Tokenizor the first retrieval path in real AI coding workflows through adoption mechanisms, early-session reachability, observable usage behavior, authority-safe integrations, and supporting guidance.
+Users can connect Tokenizor to real AI coding workflows, make retrieval available early in a session, observe usage, preserve authority-safe integration boundaries, and access workflow and migration guidance.
 
 ### Story 5.1: Implement a Codex `AGENTS.md` Retrieval-First Bootstrap
 
 As a power user of Codex,
-I want a repository-local `AGENTS.md` bootstrap that directs Codex to use Tokenizor MCP retrieval before broad repository exploration,
+I want a repository-local `AGENTS.md` bootstrap that directs Codex to use Tokenizor retrieval before broad repository exploration,
 So that the baseline product proves retrieval-first behavior through a concrete Codex surface that can be verified in session traces.
 
 **FRs implemented:** FR40, FR42
@@ -1071,7 +842,7 @@ As an AI coding workflow,
 I want Tokenizor reachable at session start or on the first repository-oriented prompt,
 So that repository discovery and retrieval can influence exploration before broad file rereads begin.
 
-**FRs implemented:** FR41
+**FRs implemented:** FR40, FR41
 
 **Acceptance Criteria:**
 
@@ -1165,7 +936,7 @@ So that I can adopt Tokenizor correctly and maintain it confidently.
 **Then** it remains aligned with current supported behavior
 **And** it avoids promising unsupported workflow magic
 
-### Story 5.7: Provide Migration Guidance from jcodemunch-mcp
+### Story 5.7: Provide Migration Guidance from `jcodemunch-mcp`
 
 As a migrating user,
 I want parity and migration guidance from `jcodemunch-mcp`,

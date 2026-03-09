@@ -395,23 +395,24 @@ This makes runtime bring-up an explicit trust and operability gate rather than a
 
 This makes crash recovery and deployment safety part of normal system behavior rather than exceptional repair work.
 
-**Interim Persistence Decision (ADR — Epic 1 Retrospective, 2026-03-07)**
+**Persistence Correction (ADR Update — Epic 4, 2026-03-08)**
 
-Decision: Until SpacetimeDB write-path integration is complete, all structured durable state (projects, workspaces, runs, checkpoints, idempotency records) persists via the local bootstrap registry JSON file with atomic writes (write-to-temp-then-rename) and advisory file locking.
+Decision: Starting in Epic 4, mutable operational state must move to the SpacetimeDB-backed control plane. `index_runs`, checkpoints, per-run durable file records, idempotency records, typed recovery metadata, and related operational history are no longer planned to remain on the local bootstrap registry JSON path. The local registry remains a bootstrap and compatibility mechanism for project and workspace registration until that path is migrated separately.
 
 Rationale:
-- Proven across Epic 1 (Stories 1.3–1.7) — 5 stories built successfully on this persistence path
-- The `ControlPlane` trait boundary (`Arc<dyn ControlPlane>`) already abstracts the backend — swapping to SpacetimeDB is a backend change, not a rewrite
-- Coupling SpacetimeDB write integration with Epic 2 business logic (indexing, parsing, checkpointing) would mean debugging infrastructure and domain logic simultaneously
-- Epic 1 retrospective data showed this was the team's unanimous recommendation
+- The PRD and baseline architecture already define SpacetimeDB as the authoritative control plane for operational state.
+- Story 4.2 proved resume correctness but also exposed that per-file durable run writes through the monolithic registry JSON create avoidable persistence debt.
+- Continuing Epic 4 recovery work on `RegistryPersistence` would deepen the architecture mismatch and make later migration harder.
+- The existing `ControlPlane` boundary should become the real mutable-state boundary rather than a deferred abstraction.
 
 Constraints:
-- `SpacetimeControlPlane` write methods (`upsert_repository`, `create_index_run`, `write_checkpoint`, `put_idempotency_record`) return `pending_write_error()` — do not wire them
-- `InMemoryControlPlane` is for tests only — it does not survive process exit
-- Epic 2 introduces a dedicated `RegistryPersistence` struct for durable read/write against the registry JSON file — this is interim code that retires when SpacetimeDB writes are wired
-- New fields on persisted types must be backward-compatible (`Option<T>` with `#[serde(default)]`) to avoid breaking existing Epic 1 registry files
+- Raw file bytes and other byte-sensitive large artifacts remain in local CAS.
+- `RunManager` must stop depending directly on `RegistryPersistence` for mutable run state and instead depend on a control-plane-backed run persistence boundary.
+- Resume and checkpoint semantics must use a persisted discovery manifest per run; checkpoint recovery should advance by manifest position, not by live rediscovery of the current filesystem.
+- Compatibility for already-persisted local registry state must be handled explicitly during migration.
+- `RegistryPersistence` may remain temporarily for bootstrap/project-workspace data and compatibility reads, but it is no longer the target write path for mutable run durability.
 
-Retirement trigger: A future epic (Epic 3+) wires SpacetimeDB write methods on `SpacetimeControlPlane`, at which point the `RegistryPersistence` struct is retired and durable state flows through the `ControlPlane` trait.
+Retirement trigger: Completion of the Epic 4 control-plane migration story that wires SpacetimeDB-backed writes for mutable run state and moves recovery flows onto that path.
 
 **Runtime Boundary Model**
 - baseline implementation may remain process-local

@@ -117,6 +117,7 @@ The baseline is technically successful when:
 - indexing can resume and recover reliably enough for real repeated use
 - project and workspace continuity materially reduce session forgetfulness
 - SpacetimeDB-backed operational state is real, durable, and useful in practice
+- mutable run, checkpoint, recovery, repair, and idempotency state reaches the authoritative control plane during baseline implementation rather than remaining on an interim local-only write path
 - at least one retrieval-adoption mechanism materially increases retrieval-first usage behavior
 
 The following failures are unacceptable in the baseline release:
@@ -125,6 +126,7 @@ The following failures are unacceptable in the baseline release:
 - indexing that cannot resume or recover reliably enough to support real use
 - project/workspace continuity breaking often enough that sessions still feel forgetful
 - SpacetimeDB operational state being mostly conceptual instead of operationally useful
+- recovery and operational workflows shipping on top of an interim local-only mutable-state path after the architecture has already declared SpacetimeDB authoritative
 - adoption or routing mechanisms failing to materially influence retrieval-first usage behavior
 
 ### Measurable Outcomes
