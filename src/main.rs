@@ -94,6 +94,19 @@ fn attach() -> Result<()> {
 
 fn migrate() -> Result<()> {
     let args = std::env::args().skip(2).collect::<Vec<_>>();
+    if matches!(args.as_slice(), [scope] if scope == "control-plane" || scope == "mutable-state") {
+        let config = ServerConfig::from_env()?;
+        let application = ApplicationContext::from_config(config)?;
+        let report = application.migrate_control_plane_mutable_state()?;
+
+        println!("{}", serde_json::to_string_pretty(&report)?);
+
+        if report.is_ready() {
+            return Ok(());
+        }
+
+        bail!("{}", doctor_failure_message(&report));
+    }
     let (source_path, target_path) = match args.as_slice() {
         [] => (None, None),
         [source_path, target_path] => (
@@ -102,7 +115,7 @@ fn migrate() -> Result<()> {
         ),
         _ => {
             bail!(
-                "migrate expects either no path arguments or an explicit `<from-path> <to-path>` pair"
+                "migrate expects either no path arguments, an explicit `<from-path> <to-path>` pair, or the `control-plane` subcommand"
             )
         }
     };

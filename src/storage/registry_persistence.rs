@@ -7,8 +7,8 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    AuthorityMode, Checkpoint, FileRecord, IdempotencyRecord, IndexRun, IndexRunStatus,
-    RegistryKind, Repository, Workspace,
+    AuthorityMode, Checkpoint, DiscoveryManifest, FileRecord, IdempotencyRecord, IndexRun,
+    IndexRunStatus, RegistryKind, Repository, Workspace,
 };
 use crate::error::{Result, TokenizorError};
 
@@ -35,13 +35,15 @@ pub(crate) struct RegistryData {
     pub run_file_records: BTreeMap<String, Vec<FileRecord>>,
     #[serde(default)]
     pub checkpoints: Vec<Checkpoint>,
+    #[serde(default)]
+    pub discovery_manifests: BTreeMap<String, DiscoveryManifest>,
 }
 
 pub struct RegistryPersistence {
     path: PathBuf,
 }
 
-pub trait RegistryQuery {
+pub trait RegistryQuery: Send + Sync {
     fn get_repository(&self, repo_id: &str) -> Result<Option<Repository>>;
     fn get_runs_by_repo(&self, repo_id: &str) -> Result<Vec<IndexRun>>;
     fn get_latest_completed_run(&self, repo_id: &str) -> Result<Option<IndexRun>>;
@@ -53,8 +55,23 @@ impl RegistryPersistence {
         Self { path }
     }
 
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub(crate) fn load(&self) -> Result<RegistryData> {
         load_registry_data(&self.path)
+    }
+
+    pub(crate) fn clear_mutable_state(&self) -> Result<()> {
+        self.read_modify_write(|data| {
+            data.runs.clear();
+            data.idempotency_records.clear();
+            data.run_file_records.clear();
+            data.checkpoints.clear();
+            data.discovery_manifests.clear();
+            Ok(())
+        })
     }
 
     pub fn save_run(&self, run: &IndexRun) -> Result<()> {
@@ -83,9 +100,7 @@ impl RegistryPersistence {
                     TokenizorError::NotFound(format!("run `{run_id}` not found in registry"))
                 })?;
             run.status = status.clone();
-            if error_summary.is_some() {
-                run.error_summary = error_summary.clone();
-            }
+            run.error_summary = error_summary.clone();
             Ok(())
         })
     }
@@ -99,12 +114,14 @@ impl RegistryPersistence {
                 .ok_or_else(|| {
                     TokenizorError::NotFound(format!("run `{run_id}` not found in registry"))
                 })?;
-            // Skip if already terminal (e.g. cancelled before pipeline started)
-            if run.status.is_terminal() {
+            // Skip terminal runs unless they are being explicitly resumed from Interrupted.
+            if run.status.is_terminal() && run.status != IndexRunStatus::Interrupted {
                 return Ok(());
             }
             run.status = IndexRunStatus::Running;
-            run.started_at_unix_ms = Some(started_at_unix_ms);
+            if run.started_at_unix_ms.is_none() {
+                run.started_at_unix_ms = Some(started_at_unix_ms);
+            }
             Ok(())
         })
     }
@@ -127,9 +144,7 @@ impl RegistryPersistence {
                 })?;
             run.status = status.clone();
             run.finished_at_unix_ms = Some(finished_at_unix_ms);
-            if error_summary.is_some() {
-                run.error_summary = error_summary.clone();
-            }
+            run.error_summary = error_summary.clone();
             run.not_yet_supported = not_yet_supported.clone();
             Ok(())
         })
@@ -260,8 +275,27 @@ impl RegistryPersistence {
 
     pub fn save_file_records(&self, run_id: &str, records: &[FileRecord]) -> Result<()> {
         self.read_modify_write(|data| {
-            data.run_file_records
-                .insert(run_id.to_string(), records.to_vec());
+            let existing = data
+                .run_file_records
+                .entry(run_id.to_string())
+                .or_insert_with(Vec::new);
+
+            let mut merged = BTreeMap::new();
+            for record in existing.iter().cloned() {
+                merged.insert(record.relative_path.clone(), record);
+            }
+            for record in records.iter().cloned() {
+                merged.insert(record.relative_path.clone(), record);
+            }
+
+            let mut merged_records: Vec<FileRecord> = merged.into_values().collect();
+            merged_records.sort_by(|left, right| {
+                left.relative_path
+                    .to_lowercase()
+                    .cmp(&right.relative_path.to_lowercase())
+                    .then_with(|| left.relative_path.cmp(&right.relative_path))
+            });
+            *existing = merged_records;
             Ok(())
         })
     }
@@ -306,6 +340,19 @@ impl RegistryPersistence {
             .into_iter()
             .filter(|c| c.run_id == run_id)
             .max_by_key(|c| c.created_at_unix_ms))
+    }
+
+    pub fn save_discovery_manifest(&self, manifest: &DiscoveryManifest) -> Result<()> {
+        self.read_modify_write(|data| {
+            data.discovery_manifests
+                .insert(manifest.run_id.clone(), manifest.clone());
+            Ok(())
+        })
+    }
+
+    pub fn get_discovery_manifest(&self, run_id: &str) -> Result<Option<DiscoveryManifest>> {
+        let data = self.load()?;
+        Ok(data.discovery_manifests.get(run_id).cloned())
     }
 
     fn read_modify_write(
@@ -362,6 +409,31 @@ impl RegistryQuery for RegistryPersistence {
 
 fn lock_path(path: &Path) -> PathBuf {
     path.with_extension("persistence.lock")
+}
+
+pub(crate) fn is_owned_registry_temp_artifact_path(registry_path: &Path, candidate: &Path) -> bool {
+    if candidate.parent() != registry_path.parent() {
+        return false;
+    }
+
+    let registry_name = registry_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "registry.json".to_string());
+    let Some(candidate_name) = candidate
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+    else {
+        return false;
+    };
+
+    let prefix = format!(".{registry_name}.");
+    if !candidate_name.starts_with(&prefix) || !candidate_name.ends_with(".tmp") {
+        return false;
+    }
+
+    let middle = &candidate_name[prefix.len()..candidate_name.len() - ".tmp".len()];
+    !middle.is_empty() && middle.chars().all(|ch| ch.is_ascii_digit())
 }
 
 struct PersistenceLock {
@@ -541,6 +613,7 @@ mod tests {
             not_yet_supported: None,
             prior_run_id: None,
             description: None,
+            recovery_state: None,
         }
     }
 
@@ -905,8 +978,8 @@ mod tests {
     fn test_save_file_records_roundtrip() {
         let (_dir, persistence) = temp_registry();
         let records = vec![
-            sample_file_record("src/main.rs", "run-1"),
             sample_file_record("src/lib.rs", "run-1"),
+            sample_file_record("src/main.rs", "run-1"),
         ];
 
         persistence.save_file_records("run-1", &records).unwrap();
@@ -946,6 +1019,64 @@ mod tests {
         assert!(loaded_run.is_some());
         let loaded_records = persistence.get_file_records("run-1").unwrap();
         assert_eq!(loaded_records.len(), 1);
+    }
+
+    #[test]
+    fn test_save_file_records_upserts_by_relative_path() {
+        let (_dir, persistence) = temp_registry();
+
+        let original = sample_file_record("src/main.rs", "run-1");
+        persistence
+            .save_file_records("run-1", std::slice::from_ref(&original))
+            .unwrap();
+
+        let mut updated = sample_file_record("src/main.rs", "run-1");
+        updated.byte_len = 200;
+        updated.content_hash = "updated".to_string();
+        persistence
+            .save_file_records("run-1", std::slice::from_ref(&updated))
+            .unwrap();
+
+        let loaded = persistence.get_file_records("run-1").unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].byte_len, 200);
+        assert_eq!(loaded[0].content_hash, "updated");
+    }
+
+    #[test]
+    fn test_transition_to_running_preserves_original_started_at() {
+        let (_dir, persistence) = temp_registry();
+        let mut run = sample_run("run-1", "repo-1", IndexRunStatus::Interrupted);
+        run.started_at_unix_ms = Some(1111);
+        persistence.save_run(&run).unwrap();
+
+        persistence.transition_to_running("run-1", 2222).unwrap();
+
+        let loaded = persistence.find_run("run-1").unwrap().unwrap();
+        assert_eq!(loaded.status, IndexRunStatus::Running);
+        assert_eq!(loaded.started_at_unix_ms, Some(1111));
+    }
+
+    #[test]
+    fn test_update_run_status_with_finish_clears_prior_error_summary() {
+        let (_dir, persistence) = temp_registry();
+        let run = sample_run("run-1", "repo-1", IndexRunStatus::Interrupted);
+        persistence.save_run(&run).unwrap();
+        persistence
+            .update_run_status(
+                "run-1",
+                IndexRunStatus::Interrupted,
+                Some("stale run detected during startup sweep".to_string()),
+            )
+            .unwrap();
+
+        persistence
+            .update_run_status_with_finish("run-1", IndexRunStatus::Succeeded, None, 2000, None)
+            .unwrap();
+
+        let loaded = persistence.find_run("run-1").unwrap().unwrap();
+        assert_eq!(loaded.status, IndexRunStatus::Succeeded);
+        assert_eq!(loaded.error_summary, None);
     }
 
     #[test]
@@ -1445,5 +1576,39 @@ mod tests {
         assert_eq!(repo.status, crate::domain::RepositoryStatus::Ready);
         assert!(repo.quarantined_at_unix_ms.is_none());
         assert!(repo.quarantine_reason.is_none());
+    }
+
+    #[test]
+    fn test_owned_registry_temp_artifact_matches_only_registry_sibling_pattern() {
+        let registry = PathBuf::from(".tokenizor/control-plane/project-workspace-registry.json");
+        let owned = registry
+            .parent()
+            .unwrap()
+            .join(".project-workspace-registry.json.1234567890.tmp");
+        let wrong_name = registry
+            .parent()
+            .unwrap()
+            .join(".other-registry.json.1234567890.tmp");
+        let nested = registry
+            .parent()
+            .unwrap()
+            .join("nested")
+            .join(".project-workspace-registry.json.1234567890.tmp");
+
+        assert!(is_owned_registry_temp_artifact_path(&registry, &owned));
+        assert!(!is_owned_registry_temp_artifact_path(
+            &registry,
+            &wrong_name
+        ));
+        assert!(!is_owned_registry_temp_artifact_path(&registry, &nested));
+
+        let non_numeric_middle = registry
+            .parent()
+            .unwrap()
+            .join(".project-workspace-registry.json.backup.tmp");
+        assert!(!is_owned_registry_temp_artifact_path(
+            &registry,
+            &non_numeric_middle
+        ));
     }
 }

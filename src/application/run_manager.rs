@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use tokio::task::JoinHandle;
@@ -7,15 +8,21 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::domain::{
-    Checkpoint, FileOutcomeSummary, FileRecord, IdempotencyRecord, IdempotencyStatus, IndexRun,
-    IndexRunMode, IndexRunStatus, InvalidationResult, PersistedFileOutcome, RepositoryStatus,
-    RunHealth, RunPhase, RunProgressSnapshot, RunStatusReport, unix_timestamp_ms,
+    Checkpoint, ComponentHealth, DiscoveryManifest, FileOutcome, FileOutcomeSummary,
+    FileProcessingResult, FileRecord, HealthIssueCategory, IdempotencyRecord, IdempotencyStatus,
+    IndexRun, IndexRunMode, IndexRunStatus, InvalidationResult, LanguageId, NextAction,
+    PersistedFileOutcome, RecoveryStateKind, RepositoryStatus, ResumeRejectReason,
+    ResumeRunOutcome, RunHealth, RunPhase, RunProgressSnapshot, RunRecoveryState, RunStatusReport,
+    unix_timestamp_ms,
 };
 use crate::error::{Result, TokenizorError};
-use crate::indexing::pipeline::{IndexingPipeline, PipelineProgress};
+use crate::indexing::pipeline::{IndexingPipeline, PipelineProgress, PipelineResumeState};
 use crate::storage::BlobStore;
 use crate::storage::digest_hex;
-use crate::storage::{RegistryPersistence, RegistryQuery};
+use crate::storage::registry_persistence::is_owned_registry_temp_artifact_path;
+use crate::storage::{
+    ControlPlane, LocalCasBlobStore, RegistryBackedControlPlane, RegistryPersistence, RegistryQuery,
+};
 
 pub struct ActiveRun {
     pub run_id: String,
@@ -25,40 +32,908 @@ pub struct ActiveRun {
     pub checkpoint_cursor_fn: Option<Arc<dyn Fn() -> Option<String> + Send + Sync>>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StartupRecoveryReport {
+    pub transitioned_run_ids: Vec<String>,
+    pub transitioned_runs: Vec<StartupRecoveredRunTransition>,
+    pub cleaned_temp_artifacts: Vec<StartupRecoveredTempArtifact>,
+    pub blocking_findings: Vec<StartupRecoveryFinding>,
+    pub operator_guidance: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartupRecoveredTempArtifact {
+    pub surface: StartupCleanupSurface,
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StartupCleanupSurface {
+    RegistryTemp,
+    CasTemp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartupRecoveryFinding {
+    pub name: String,
+    pub detail: String,
+    pub remediation: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartupRecoveredRunTransition {
+    pub run_id: String,
+    pub repo_id: String,
+    pub from_status: IndexRunStatus,
+    pub to_status: IndexRunStatus,
+}
+
+const STALE_RUNNING_STARTUP_SWEEP_SUMMARY: &str = "stale run detected during startup sweep";
+const STALE_QUEUED_INTERRUPTED_STARTUP_SWEEP_SUMMARY: &str =
+    "stale queued run recovered as interrupted during startup sweep because durable work exists";
+const STALE_QUEUED_ABORTED_STARTUP_SWEEP_SUMMARY: &str =
+    "stale queued run aborted during startup sweep because no durable work was found";
+
+impl StartupCleanupSurface {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::RegistryTemp => "registry temp artifact",
+            Self::CasTemp => "CAS temp artifact",
+        }
+    }
+
+    fn check_name(&self) -> &'static str {
+        match self {
+            Self::RegistryTemp => "startup_recovery_registry_temp",
+            Self::CasTemp => "startup_recovery_cas_temp",
+        }
+    }
+
+    fn cleanup_remediation(&self) -> &'static str {
+        match self {
+            Self::RegistryTemp => {
+                "Repair or migrate the registry state, or wait for the conflicting process to release the artifact, then restart Tokenizor."
+            }
+            Self::CasTemp => {
+                "Repair the local CAS state, or wait for the conflicting process to release the artifact, then restart Tokenizor."
+            }
+        }
+    }
+}
+
+impl StartupRecoveryReport {
+    pub fn is_noop(&self) -> bool {
+        self.transitioned_runs.is_empty()
+            && self.cleaned_temp_artifacts.is_empty()
+            && self.blocking_findings.is_empty()
+    }
+
+    pub fn has_blocking_findings(&self) -> bool {
+        !self.blocking_findings.is_empty()
+    }
+
+    pub fn interrupted_run_count(&self) -> usize {
+        self.transitioned_runs
+            .iter()
+            .filter(|transition| transition.to_status == IndexRunStatus::Interrupted)
+            .count()
+    }
+
+    pub fn aborted_run_count(&self) -> usize {
+        self.transitioned_runs
+            .iter()
+            .filter(|transition| transition.to_status == IndexRunStatus::Aborted)
+            .count()
+    }
+
+    pub fn readiness_checks(&self) -> Vec<ComponentHealth> {
+        let mut checks = Vec::new();
+
+        if !self.transitioned_runs.is_empty() {
+            let interrupted_ids =
+                self.transitioned_run_ids_for_status(&IndexRunStatus::Interrupted);
+            let aborted_ids = self.transitioned_run_ids_for_status(&IndexRunStatus::Aborted);
+            let mut transition_groups = Vec::new();
+            if !interrupted_ids.is_empty() {
+                transition_groups.push(format!(
+                    "interrupted={} ({})",
+                    interrupted_ids.len(),
+                    interrupted_ids.join(", ")
+                ));
+            }
+            if !aborted_ids.is_empty() {
+                transition_groups.push(format!(
+                    "aborted={} ({})",
+                    aborted_ids.len(),
+                    aborted_ids.join(", ")
+                ));
+            }
+            checks.push(ComponentHealth::warning(
+                "startup_recovery_runs",
+                HealthIssueCategory::Recovery,
+                format!(
+                    "startup sweep recovered {} stale run(s): {}",
+                    self.transitioned_runs.len(),
+                    transition_groups.join("; ")
+                ),
+                self.transition_guidance()
+                    .unwrap_or("Inspect recovered runs before trusting prior results."),
+            ));
+        }
+
+        if !self.cleaned_temp_artifacts.is_empty() {
+            let mut registry_count = 0usize;
+            let mut cas_count = 0usize;
+            for artifact in &self.cleaned_temp_artifacts {
+                match artifact.surface {
+                    StartupCleanupSurface::RegistryTemp => registry_count += 1,
+                    StartupCleanupSurface::CasTemp => cas_count += 1,
+                }
+            }
+
+            let mut surfaces = Vec::new();
+            if registry_count > 0 {
+                surfaces.push(format!("registry={registry_count}"));
+            }
+            if cas_count > 0 {
+                surfaces.push(format!("cas={cas_count}"));
+            }
+
+            checks.push(ComponentHealth::warning(
+                "startup_recovery_cleanup",
+                HealthIssueCategory::Recovery,
+                format!(
+                    "startup sweep removed {} stale temp artifact(s) from Tokenizor-owned paths ({})",
+                    self.cleaned_temp_artifacts.len(),
+                    surfaces.join(", ")
+                ),
+                "No immediate action is required. If stale temp artifacts recur, wait for active processes to exit and run repair before starting new mutations.",
+            ));
+        }
+
+        checks.extend(self.blocking_findings.iter().map(|finding| {
+            ComponentHealth::error(
+                finding.name.clone(),
+                HealthIssueCategory::Recovery,
+                finding.detail.clone(),
+                finding.remediation.clone(),
+            )
+        }));
+
+        checks
+    }
+
+    fn push_guidance(&mut self, guidance: impl Into<String>) {
+        let guidance = guidance.into();
+        if !self
+            .operator_guidance
+            .iter()
+            .any(|existing| existing == &guidance)
+        {
+            self.operator_guidance.push(guidance);
+        }
+    }
+
+    fn push_run_transition(&mut self, transition: StartupRecoveredRunTransition) {
+        self.transitioned_run_ids.push(transition.run_id.clone());
+        self.transitioned_runs.push(transition);
+    }
+
+    fn push_blocking_finding(&mut self, finding: StartupRecoveryFinding) {
+        self.push_guidance(finding.remediation.clone());
+        self.blocking_findings.push(finding);
+    }
+
+    fn transitioned_run_ids_for_status(&self, status: &IndexRunStatus) -> Vec<String> {
+        self.transitioned_runs
+            .iter()
+            .filter(|transition| &transition.to_status == status)
+            .map(|transition| transition.run_id.clone())
+            .collect()
+    }
+
+    fn transition_guidance(&self) -> Option<&'static str> {
+        match (
+            self.interrupted_run_count() > 0,
+            self.aborted_run_count() > 0,
+        ) {
+            (true, true) => Some(
+                "Inspect interrupted runs and resume if eligible; otherwise reindex or repair before trusting prior results. Start a fresh index for startup-aborted queued runs with no durable work.",
+            ),
+            (true, false) => Some(
+                "Inspect interrupted runs and choose the next safe action: resume if eligible; otherwise reindex or repair before trusting prior results.",
+            ),
+            (false, true) => Some(
+                "Startup recovery aborted stale queued runs with no durable work. Next safe action: start a fresh index or reindex; do not resume those runs.",
+            ),
+            (false, false) => None,
+        }
+    }
+}
+
 pub struct RunManager {
-    persistence: RegistryPersistence,
+    control_plane: Arc<dyn ControlPlane>,
+    persistence: Arc<RunManagerPersistenceAdapter>,
+    registry_path: Option<PathBuf>,
+    blob_root: Option<PathBuf>,
     active_runs: Mutex<HashMap<String, ActiveRun>>,
+}
+
+pub struct RunManagerPersistenceAdapter {
+    control_plane: Arc<dyn ControlPlane>,
+    registry: Arc<RegistryPersistence>,
+}
+
+impl RunManagerPersistenceAdapter {
+    fn new(control_plane: Arc<dyn ControlPlane>, registry: Arc<RegistryPersistence>) -> Self {
+        Self {
+            control_plane,
+            registry,
+        }
+    }
+
+    fn mirrors_bootstrap_registry(&self) -> bool {
+        self.control_plane.backend_name() != "local_registry"
+    }
+
+    fn uses_registry_mutable_state_fallback(&self) -> bool {
+        self.control_plane.backend_name() == "in_memory"
+    }
+
+    fn mirrors_mutable_state_to_registry(&self) -> bool {
+        self.control_plane.backend_name() == "in_memory"
+    }
+
+    pub fn find_run(&self, run_id: &str) -> Result<Option<IndexRun>> {
+        match self.control_plane.find_run(run_id)? {
+            Some(run) => Ok(Some(run)),
+            None if self.uses_registry_mutable_state_fallback() => self.registry.find_run(run_id),
+            None => Ok(None),
+        }
+    }
+
+    pub fn find_runs_by_status(&self, status: &IndexRunStatus) -> Result<Vec<IndexRun>> {
+        let runs = self.control_plane.find_runs_by_status(status)?;
+        if runs.is_empty() && self.uses_registry_mutable_state_fallback() {
+            self.registry.find_runs_by_status(status)
+        } else {
+            Ok(runs)
+        }
+    }
+
+    pub fn list_runs(&self) -> Result<Vec<IndexRun>> {
+        let runs = self.control_plane.list_runs()?;
+        if runs.is_empty() && self.uses_registry_mutable_state_fallback() {
+            self.registry.list_runs()
+        } else {
+            Ok(runs)
+        }
+    }
+
+    pub fn get_runs_by_repo(&self, repo_id: &str) -> Result<Vec<IndexRun>> {
+        if self.uses_registry_mutable_state_fallback() {
+            self.registry.get_runs_by_repo(repo_id)
+        } else {
+            self.control_plane.get_runs_by_repo(repo_id)
+        }
+    }
+
+    pub fn get_latest_completed_run(&self, repo_id: &str) -> Result<Option<IndexRun>> {
+        if self.uses_registry_mutable_state_fallback() {
+            self.registry.get_latest_completed_run(repo_id)
+        } else {
+            self.control_plane.get_latest_completed_run(repo_id)
+        }
+    }
+
+    pub fn get_repository(&self, repo_id: &str) -> Result<Option<crate::domain::Repository>> {
+        match self.control_plane.get_repository(repo_id)? {
+            Some(repository) => Ok(Some(repository)),
+            None => self.registry.get_repository(repo_id),
+        }
+    }
+
+    pub fn get_file_records(&self, run_id: &str) -> Result<Vec<FileRecord>> {
+        if self.uses_registry_mutable_state_fallback() {
+            self.registry.get_file_records(run_id)
+        } else {
+            self.control_plane.get_file_records(run_id)
+        }
+    }
+
+    pub fn get_latest_checkpoint(&self, run_id: &str) -> Result<Option<Checkpoint>> {
+        match self.control_plane.get_latest_checkpoint(run_id)? {
+            Some(checkpoint) => Ok(Some(checkpoint)),
+            None if self.uses_registry_mutable_state_fallback() => {
+                self.registry.get_latest_checkpoint(run_id)
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn find_idempotency_record(&self, key: &str) -> Result<Option<IdempotencyRecord>> {
+        match self.control_plane.find_idempotency_record(key)? {
+            Some(record) => Ok(Some(record)),
+            None if self.uses_registry_mutable_state_fallback() => {
+                self.registry.find_idempotency_record(key)
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn get_discovery_manifest(&self, run_id: &str) -> Result<Option<DiscoveryManifest>> {
+        match self.control_plane.get_discovery_manifest(run_id)? {
+            Some(manifest) => Ok(Some(manifest)),
+            None if self.uses_registry_mutable_state_fallback() => {
+                self.registry.get_discovery_manifest(run_id)
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn save_run(&self, run: &IndexRun) -> Result<()> {
+        if self.mirrors_mutable_state_to_registry() {
+            self.registry.save_run(run)?;
+        }
+        self.control_plane.save_run(run)
+    }
+
+    pub fn update_run_status(
+        &self,
+        run_id: &str,
+        status: IndexRunStatus,
+        error_summary: Option<String>,
+    ) -> Result<()> {
+        if self.mirrors_mutable_state_to_registry() {
+            self.registry
+                .update_run_status(run_id, status.clone(), error_summary.clone())?;
+        }
+        match self
+            .control_plane
+            .update_run_status(run_id, status, error_summary)
+        {
+            Ok(()) | Err(TokenizorError::NotFound(_))
+                if self.mirrors_mutable_state_to_registry() =>
+            {
+                Ok(())
+            }
+            other => other,
+        }
+    }
+
+    pub fn transition_to_running(&self, run_id: &str, started_at_unix_ms: u64) -> Result<()> {
+        if self.mirrors_mutable_state_to_registry() {
+            self.registry
+                .transition_to_running(run_id, started_at_unix_ms)?;
+        }
+        match self
+            .control_plane
+            .transition_to_running(run_id, started_at_unix_ms)
+        {
+            Ok(()) | Err(TokenizorError::NotFound(_))
+                if self.mirrors_mutable_state_to_registry() =>
+            {
+                Ok(())
+            }
+            other => other,
+        }
+    }
+
+    pub fn update_run_status_with_finish(
+        &self,
+        run_id: &str,
+        status: IndexRunStatus,
+        error_summary: Option<String>,
+        finished_at_unix_ms: u64,
+        not_yet_supported: Option<std::collections::BTreeMap<crate::domain::LanguageId, u64>>,
+    ) -> Result<()> {
+        if self.mirrors_mutable_state_to_registry() {
+            self.registry.update_run_status_with_finish(
+                run_id,
+                status.clone(),
+                error_summary.clone(),
+                finished_at_unix_ms,
+                not_yet_supported.clone(),
+            )?;
+        }
+        match self.control_plane.update_run_status_with_finish(
+            run_id,
+            status,
+            error_summary,
+            finished_at_unix_ms,
+            not_yet_supported,
+        ) {
+            Ok(()) | Err(TokenizorError::NotFound(_))
+                if self.mirrors_mutable_state_to_registry() =>
+            {
+                Ok(())
+            }
+            other => other,
+        }
+    }
+
+    pub fn cancel_run_if_active(&self, run_id: &str, finished_at_unix_ms: u64) -> Result<bool> {
+        let changed = if self.mirrors_mutable_state_to_registry() {
+            self.registry
+                .cancel_run_if_active(run_id, finished_at_unix_ms)?
+        } else {
+            false
+        };
+        match self
+            .control_plane
+            .cancel_run_if_active(run_id, finished_at_unix_ms)
+        {
+            Ok(result) if self.mirrors_mutable_state_to_registry() => Ok(changed || result),
+            Err(TokenizorError::NotFound(_)) if self.mirrors_mutable_state_to_registry() => {
+                Ok(changed)
+            }
+            other => other,
+        }
+    }
+
+    pub fn save_file_records(&self, run_id: &str, records: &[FileRecord]) -> Result<()> {
+        if self.mirrors_mutable_state_to_registry() {
+            self.registry.save_file_records(run_id, records)?;
+        }
+        self.control_plane.save_file_records(run_id, records)
+    }
+
+    pub fn save_checkpoint(&self, checkpoint: &Checkpoint) -> Result<()> {
+        if self.mirrors_mutable_state_to_registry() {
+            self.registry.save_checkpoint(checkpoint)?;
+        }
+        self.control_plane.save_checkpoint(checkpoint)
+    }
+
+    pub fn save_repository(&self, repository: &crate::domain::Repository) -> Result<()> {
+        self.control_plane.save_repository(repository)?;
+        if self.mirrors_bootstrap_registry() {
+            self.registry.save_repository(repository)?;
+        }
+        Ok(())
+    }
+
+    pub fn update_repository_status(
+        &self,
+        repo_id: &str,
+        status: RepositoryStatus,
+        invalidated_at_unix_ms: Option<u64>,
+        invalidation_reason: Option<String>,
+        quarantined_at_unix_ms: Option<u64>,
+        quarantine_reason: Option<String>,
+    ) -> Result<()> {
+        let registry_status = status.clone();
+        let registry_invalidation_reason = invalidation_reason.clone();
+        let registry_quarantine_reason = quarantine_reason.clone();
+        self.control_plane.update_repository_status(
+            repo_id,
+            status,
+            invalidated_at_unix_ms,
+            invalidation_reason,
+            quarantined_at_unix_ms,
+            quarantine_reason,
+        )?;
+        if self.mirrors_bootstrap_registry() {
+            self.registry.update_repository_status(
+                repo_id,
+                registry_status,
+                invalidated_at_unix_ms,
+                registry_invalidation_reason,
+                quarantined_at_unix_ms,
+                registry_quarantine_reason,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn save_idempotency_record(&self, record: &IdempotencyRecord) -> Result<()> {
+        if self.mirrors_mutable_state_to_registry() {
+            self.registry.save_idempotency_record(record)?;
+        }
+        self.control_plane.save_idempotency_record(record)
+    }
+
+    pub fn save_discovery_manifest(&self, manifest: &DiscoveryManifest) -> Result<()> {
+        if self.mirrors_mutable_state_to_registry() {
+            self.registry.save_discovery_manifest(manifest)?;
+        }
+        self.control_plane.save_discovery_manifest(manifest)
+    }
+}
+
+impl RegistryQuery for RunManagerPersistenceAdapter {
+    fn get_repository(&self, repo_id: &str) -> Result<Option<crate::domain::Repository>> {
+        RunManagerPersistenceAdapter::get_repository(self, repo_id)
+    }
+
+    fn get_runs_by_repo(&self, repo_id: &str) -> Result<Vec<IndexRun>> {
+        RunManagerPersistenceAdapter::get_runs_by_repo(self, repo_id)
+    }
+
+    fn get_latest_completed_run(&self, repo_id: &str) -> Result<Option<IndexRun>> {
+        RunManagerPersistenceAdapter::get_latest_completed_run(self, repo_id)
+    }
+
+    fn get_file_records(&self, run_id: &str) -> Result<Vec<FileRecord>> {
+        RunManagerPersistenceAdapter::get_file_records(self, run_id)
+    }
+}
+
+impl ControlPlane for RunManagerPersistenceAdapter {
+    fn backend_name(&self) -> &'static str {
+        self.control_plane.backend_name()
+    }
+
+    fn health_check(&self) -> Result<ComponentHealth> {
+        self.control_plane.health_check()
+    }
+
+    fn deployment_checks(&self) -> Result<Vec<ComponentHealth>> {
+        self.control_plane.deployment_checks()
+    }
+
+    fn find_run(&self, run_id: &str) -> Result<Option<IndexRun>> {
+        RunManagerPersistenceAdapter::find_run(self, run_id)
+    }
+
+    fn find_runs_by_status(&self, status: &IndexRunStatus) -> Result<Vec<IndexRun>> {
+        RunManagerPersistenceAdapter::find_runs_by_status(self, status)
+    }
+
+    fn list_runs(&self) -> Result<Vec<IndexRun>> {
+        RunManagerPersistenceAdapter::list_runs(self)
+    }
+
+    fn get_runs_by_repo(&self, repo_id: &str) -> Result<Vec<IndexRun>> {
+        RunManagerPersistenceAdapter::get_runs_by_repo(self, repo_id)
+    }
+
+    fn get_latest_completed_run(&self, repo_id: &str) -> Result<Option<IndexRun>> {
+        RunManagerPersistenceAdapter::get_latest_completed_run(self, repo_id)
+    }
+
+    fn get_repository(&self, repo_id: &str) -> Result<Option<crate::domain::Repository>> {
+        RunManagerPersistenceAdapter::get_repository(self, repo_id)
+    }
+
+    fn get_file_records(&self, run_id: &str) -> Result<Vec<FileRecord>> {
+        RunManagerPersistenceAdapter::get_file_records(self, run_id)
+    }
+
+    fn get_latest_checkpoint(&self, run_id: &str) -> Result<Option<Checkpoint>> {
+        RunManagerPersistenceAdapter::get_latest_checkpoint(self, run_id)
+    }
+
+    fn find_idempotency_record(&self, key: &str) -> Result<Option<IdempotencyRecord>> {
+        RunManagerPersistenceAdapter::find_idempotency_record(self, key)
+    }
+
+    fn get_discovery_manifest(&self, run_id: &str) -> Result<Option<DiscoveryManifest>> {
+        RunManagerPersistenceAdapter::get_discovery_manifest(self, run_id)
+    }
+
+    fn save_run(&self, run: &IndexRun) -> Result<()> {
+        RunManagerPersistenceAdapter::save_run(self, run)
+    }
+
+    fn update_run_status(
+        &self,
+        run_id: &str,
+        status: IndexRunStatus,
+        error_summary: Option<String>,
+    ) -> Result<()> {
+        RunManagerPersistenceAdapter::update_run_status(self, run_id, status, error_summary)
+    }
+
+    fn transition_to_running(&self, run_id: &str, started_at_unix_ms: u64) -> Result<()> {
+        RunManagerPersistenceAdapter::transition_to_running(self, run_id, started_at_unix_ms)
+    }
+
+    fn update_run_status_with_finish(
+        &self,
+        run_id: &str,
+        status: IndexRunStatus,
+        error_summary: Option<String>,
+        finished_at_unix_ms: u64,
+        not_yet_supported: Option<std::collections::BTreeMap<crate::domain::LanguageId, u64>>,
+    ) -> Result<()> {
+        RunManagerPersistenceAdapter::update_run_status_with_finish(
+            self,
+            run_id,
+            status,
+            error_summary,
+            finished_at_unix_ms,
+            not_yet_supported,
+        )
+    }
+
+    fn cancel_run_if_active(&self, run_id: &str, finished_at_unix_ms: u64) -> Result<bool> {
+        RunManagerPersistenceAdapter::cancel_run_if_active(self, run_id, finished_at_unix_ms)
+    }
+
+    fn save_file_records(&self, run_id: &str, records: &[FileRecord]) -> Result<()> {
+        RunManagerPersistenceAdapter::save_file_records(self, run_id, records)
+    }
+
+    fn save_checkpoint(&self, checkpoint: &Checkpoint) -> Result<()> {
+        RunManagerPersistenceAdapter::save_checkpoint(self, checkpoint)
+    }
+
+    fn save_repository(&self, repository: &crate::domain::Repository) -> Result<()> {
+        RunManagerPersistenceAdapter::save_repository(self, repository)
+    }
+
+    fn update_repository_status(
+        &self,
+        repo_id: &str,
+        status: RepositoryStatus,
+        invalidated_at_unix_ms: Option<u64>,
+        invalidation_reason: Option<String>,
+        quarantined_at_unix_ms: Option<u64>,
+        quarantine_reason: Option<String>,
+    ) -> Result<()> {
+        RunManagerPersistenceAdapter::update_repository_status(
+            self,
+            repo_id,
+            status,
+            invalidated_at_unix_ms,
+            invalidation_reason,
+            quarantined_at_unix_ms,
+            quarantine_reason,
+        )
+    }
+
+    fn save_idempotency_record(&self, record: &IdempotencyRecord) -> Result<()> {
+        RunManagerPersistenceAdapter::save_idempotency_record(self, record)
+    }
+
+    fn save_discovery_manifest(&self, manifest: &DiscoveryManifest) -> Result<()> {
+        RunManagerPersistenceAdapter::save_discovery_manifest(self, manifest)
+    }
 }
 
 impl RunManager {
     pub fn new(persistence: RegistryPersistence) -> Self {
+        Self::with_optional_blob_root(persistence, None)
+    }
+
+    pub fn with_blob_root(persistence: RegistryPersistence, blob_root: PathBuf) -> Self {
+        Self::with_optional_blob_root(persistence, Some(blob_root))
+    }
+
+    fn with_optional_blob_root(
+        persistence: RegistryPersistence,
+        blob_root: Option<PathBuf>,
+    ) -> Self {
+        let registry_path = persistence.path().to_path_buf();
+        let persistence = Arc::new(persistence);
+        let control_plane: Arc<dyn ControlPlane> =
+            Arc::new(RegistryBackedControlPlane::new(Arc::clone(&persistence)));
+        Self::with_services(control_plane, persistence, Some(registry_path), blob_root)
+    }
+
+    pub fn with_services(
+        control_plane: Arc<dyn ControlPlane>,
+        registry: Arc<RegistryPersistence>,
+        registry_path: Option<PathBuf>,
+        blob_root: Option<PathBuf>,
+    ) -> Self {
+        let persistence = Arc::new(RunManagerPersistenceAdapter::new(
+            Arc::clone(&control_plane),
+            registry,
+        ));
+        let control_plane: Arc<dyn ControlPlane> = persistence.clone();
         Self {
+            control_plane,
             persistence,
+            registry_path,
+            blob_root,
             active_runs: Mutex::new(HashMap::new()),
         }
     }
 
-    pub fn startup_sweep(&self) -> Result<Vec<String>> {
-        let running_runs = self
-            .persistence
-            .find_runs_by_status(&IndexRunStatus::Running)?;
+    pub fn startup_sweep(&self) -> Result<StartupRecoveryReport> {
+        let mut report = StartupRecoveryReport::default();
 
-        let mut transitioned = Vec::new();
-        for run in &running_runs {
-            self.persistence.update_run_status(
-                &run.run_id,
+        let mut running_runs = match self
+            .control_plane
+            .find_runs_by_status(&IndexRunStatus::Running)
+        {
+            Ok(runs) => runs,
+            Err(error) => {
+                report.push_blocking_finding(StartupRecoveryFinding {
+                    name: "startup_recovery_runs".to_string(),
+                    detail: format!(
+                        "startup sweep could not inspect persisted runs before mutating work: {error}"
+                    ),
+                    remediation:
+                        "Repair or migrate the registry state before starting new mutations."
+                            .to_string(),
+                });
+                return Ok(report);
+            }
+        };
+        let mut queued_runs = match self
+            .control_plane
+            .find_runs_by_status(&IndexRunStatus::Queued)
+        {
+            Ok(runs) => runs,
+            Err(error) => {
+                report.push_blocking_finding(StartupRecoveryFinding {
+                    name: "startup_recovery_runs".to_string(),
+                    detail: format!(
+                        "startup sweep could not inspect persisted runs before mutating work: {error}"
+                    ),
+                    remediation:
+                        "Repair or migrate the registry state before starting new mutations."
+                            .to_string(),
+                });
+                return Ok(report);
+            }
+        };
+        running_runs.sort_by(|left, right| left.run_id.cmp(&right.run_id));
+        queued_runs.sort_by(|left, right| left.run_id.cmp(&right.run_id));
+
+        for run in running_runs {
+            self.apply_startup_run_transition(
+                &run,
                 IndexRunStatus::Interrupted,
-                Some("stale run detected during startup sweep".to_string()),
-            )?;
-            info!(
-                run_id = %run.run_id,
-                repo_id = %run.repo_id,
-                "startup sweep: transitioned stale run from Running to Interrupted"
+                STALE_RUNNING_STARTUP_SWEEP_SUMMARY,
+                &mut report,
             );
-            transitioned.push(run.run_id.clone());
         }
 
-        Ok(transitioned)
+        for run in queued_runs {
+            let (target_status, error_summary) = match self.classify_stale_queued_run(&run) {
+                Ok(result) => result,
+                Err(error) => {
+                    warn!(
+                        run_id = %run.run_id,
+                        repo_id = %run.repo_id,
+                        ?error,
+                        "startup sweep: failed to inspect stale queued run durability"
+                    );
+                    report.push_blocking_finding(StartupRecoveryFinding {
+                        name: "startup_recovery_runs".to_string(),
+                        detail: format!(
+                            "startup sweep could not inspect durable state for stale queued run `{}`: {error}",
+                            run.run_id
+                        ),
+                        remediation:
+                            "Repair or migrate the registry state before starting new mutations."
+                                .to_string(),
+                    });
+                    continue;
+                }
+            };
+            self.apply_startup_run_transition(&run, target_status, error_summary, &mut report);
+        }
+
+        if report.interrupted_run_count() > 0 {
+            report.push_guidance(
+                "Inspect interrupted runs and choose the next safe action: resume if eligible; otherwise reindex or repair before trusting prior results.",
+            );
+        }
+        if report.aborted_run_count() > 0 {
+            report.push_guidance(
+                "Startup recovery aborted stale queued runs with no durable work. Next safe action: start a fresh index or reindex; do not resume those runs.",
+            );
+        }
+
+        if let Some(registry_path) = &self.registry_path {
+            sweep_owned_temp_artifacts(
+                registry_path.parent(),
+                |path| is_owned_registry_temp_artifact_path(registry_path, path),
+                StartupCleanupSurface::RegistryTemp,
+                &mut report,
+            );
+        }
+
+        if let Some(blob_root) = &self.blob_root {
+            let cas_temp_dir = LocalCasBlobStore::temp_dir_from_root(blob_root);
+            sweep_owned_temp_artifacts(
+                Some(cas_temp_dir.as_path()),
+                |path| LocalCasBlobStore::is_owned_temp_blob_path(blob_root, path),
+                StartupCleanupSurface::CasTemp,
+                &mut report,
+            );
+        }
+
+        if !report.cleaned_temp_artifacts.is_empty() {
+            report.push_guidance(
+                "Startup recovery removed stale Tokenizor temp artifacts. If they recur, wait for active processes to exit and run repair before starting new mutations.",
+            );
+        }
+
+        Ok(report)
+    }
+
+    fn classify_stale_queued_run(&self, run: &IndexRun) -> Result<(IndexRunStatus, &'static str)> {
+        let has_checkpoint = self
+            .control_plane
+            .get_latest_checkpoint(&run.run_id)?
+            .is_some();
+        let has_durable_records = if has_checkpoint {
+            false
+        } else {
+            !self.control_plane.get_file_records(&run.run_id)?.is_empty()
+        };
+
+        if has_checkpoint || has_durable_records {
+            Ok((
+                IndexRunStatus::Interrupted,
+                STALE_QUEUED_INTERRUPTED_STARTUP_SWEEP_SUMMARY,
+            ))
+        } else {
+            Ok((
+                IndexRunStatus::Aborted,
+                STALE_QUEUED_ABORTED_STARTUP_SWEEP_SUMMARY,
+            ))
+        }
+    }
+
+    fn apply_startup_run_transition(
+        &self,
+        run: &IndexRun,
+        to_status: IndexRunStatus,
+        error_summary: &'static str,
+        report: &mut StartupRecoveryReport,
+    ) {
+        let update_result = match &to_status {
+            IndexRunStatus::Aborted => self.control_plane.update_run_status_with_finish(
+                &run.run_id,
+                to_status.clone(),
+                Some(error_summary.to_string()),
+                unix_timestamp_ms(),
+                None,
+            ),
+            _ => self.control_plane.update_run_status(
+                &run.run_id,
+                to_status.clone(),
+                Some(error_summary.to_string()),
+            ),
+        };
+
+        match update_result {
+            Ok(()) => {
+                info!(
+                    run_id = %run.run_id,
+                    repo_id = %run.repo_id,
+                    from_status = ?run.status,
+                    to_status = ?to_status,
+                    reason = error_summary,
+                    "startup sweep: transitioned stale run"
+                );
+                report.push_run_transition(StartupRecoveredRunTransition {
+                    run_id: run.run_id.clone(),
+                    repo_id: run.repo_id.clone(),
+                    from_status: run.status.clone(),
+                    to_status,
+                });
+            }
+            Err(error) => {
+                warn!(
+                    run_id = %run.run_id,
+                    repo_id = %run.repo_id,
+                    from_status = ?run.status,
+                    to_status = ?to_status,
+                    ?error,
+                    "startup sweep: failed to transition stale run"
+                );
+                report.push_blocking_finding(StartupRecoveryFinding {
+                    name: "startup_recovery_runs".to_string(),
+                    detail: format!(
+                        "startup sweep could not transition stale run `{}` from {:?} to {:?}: {error}",
+                        run.run_id,
+                        run.status,
+                        to_status
+                    ),
+                    remediation:
+                        "Repair or migrate the registry state before starting new mutations."
+                            .to_string(),
+                });
+            }
+        }
     }
 
     pub fn start_run(&self, repo_id: &str, mode: IndexRunMode) -> Result<IndexRun> {
@@ -70,7 +945,7 @@ impl RunManager {
         }
         drop(active_runs);
 
-        let persisted_active = self.persistence.list_runs()?;
+        let persisted_active = self.control_plane.list_runs()?;
         let has_active_persisted = persisted_active.iter().any(|r| {
             r.repo_id == repo_id
                 && matches!(r.status, IndexRunStatus::Queued | IndexRunStatus::Running)
@@ -99,9 +974,10 @@ impl RunManager {
             not_yet_supported: None,
             prior_run_id: None,
             description: None,
+            recovery_state: None,
         };
 
-        self.persistence.save_run(&run)?;
+        self.control_plane.save_run(&run)?;
 
         info!(
             run_id = %run.run_id,
@@ -140,6 +1016,52 @@ impl RunManager {
         })
     }
 
+    fn persist_durable_file_record(&self, record: &FileRecord) -> Result<()> {
+        self.control_plane
+            .save_file_records(&record.run_id, std::slice::from_ref(record))
+    }
+
+    fn save_recovery_state(
+        &self,
+        run: &IndexRun,
+        state: Option<RunRecoveryState>,
+        error_summary: Option<String>,
+    ) -> Result<IndexRun> {
+        let mut updated = run.clone();
+        updated.recovery_state = state;
+        updated.error_summary = error_summary;
+        self.control_plane.save_run(&updated)?;
+        Ok(updated)
+    }
+
+    fn resume_rejected(
+        &self,
+        run: &IndexRun,
+        reason: ResumeRejectReason,
+        next_action: NextAction,
+        detail: impl Into<String>,
+    ) -> Result<ResumeRunOutcome> {
+        let detail = detail.into();
+        let updated = self.save_recovery_state(
+            run,
+            Some(RunRecoveryState {
+                state: RecoveryStateKind::ResumeRejected,
+                rejection_reason: Some(reason.clone()),
+                next_action: Some(next_action.clone()),
+                detail: Some(detail.clone()),
+                updated_at_unix_ms: unix_timestamp_ms(),
+            }),
+            run.error_summary.clone(),
+        )?;
+
+        Ok(ResumeRunOutcome::Rejected {
+            run: updated,
+            reason,
+            next_action,
+            detail,
+        })
+    }
+
     pub fn start_run_idempotent(
         &self,
         repo_id: &str,
@@ -149,9 +1071,12 @@ impl RunManager {
         let idempotency_key = format!("index::{repo_id}::{workspace_id}");
         let request_hash = compute_request_hash(repo_id, workspace_id, &mode);
 
-        if let Some(existing) = self.persistence.find_idempotency_record(&idempotency_key)? {
+        if let Some(existing) = self
+            .control_plane
+            .find_idempotency_record(&idempotency_key)?
+        {
             let run_id = existing.result_ref.as_deref().unwrap_or("");
-            let referenced_run = self.persistence.find_run(run_id)?;
+            let referenced_run = self.control_plane.find_run(run_id)?;
             let is_stale = match &referenced_run {
                 Some(run) => run.status.is_terminal(),
                 None => true, // orphaned record
@@ -200,7 +1125,7 @@ impl RunManager {
             created_at_unix_ms: unix_timestamp_ms(),
             expires_at_unix_ms: None,
         };
-        self.persistence.save_idempotency_record(&record)?;
+        self.control_plane.save_idempotency_record(&record)?;
 
         Ok(IdempotentRunResult::NewRun { run })
     }
@@ -221,9 +1146,12 @@ impl RunManager {
         let mode = IndexRunMode::Reindex;
         let request_hash = compute_request_hash(repo_id, ws_id, &mode);
 
-        if let Some(existing) = self.persistence.find_idempotency_record(&idempotency_key)? {
+        if let Some(existing) = self
+            .control_plane
+            .find_idempotency_record(&idempotency_key)?
+        {
             let run_id = existing.result_ref.as_deref().unwrap_or("");
-            let referenced_run = self.persistence.find_run(run_id)?;
+            let referenced_run = self.control_plane.find_run(run_id)?;
             let is_stale = match &referenced_run {
                 Some(run) => run.status.is_terminal(),
                 None => true, // orphaned record
@@ -268,7 +1196,7 @@ impl RunManager {
         }
         drop(active_runs);
 
-        let persisted_active = self.persistence.list_runs()?;
+        let persisted_active = self.control_plane.list_runs()?;
         let has_active_persisted = persisted_active.iter().any(|r| {
             r.repo_id == repo_id
                 && matches!(r.status, IndexRunStatus::Queued | IndexRunStatus::Running)
@@ -281,7 +1209,7 @@ impl RunManager {
 
         // Auto-discover prior_run_id
         let prior_run_id = self
-            .persistence
+            .control_plane
             .get_latest_completed_run(repo_id)?
             .map(|r| r.run_id);
 
@@ -304,9 +1232,10 @@ impl RunManager {
             not_yet_supported: None,
             prior_run_id,
             description: reason.map(|r| r.to_string()),
+            recovery_state: None,
         };
 
-        self.persistence.save_run(&run)?;
+        self.control_plane.save_run(&run)?;
 
         // Save idempotency record
         let record = IdempotencyRecord {
@@ -318,7 +1247,7 @@ impl RunManager {
             created_at_unix_ms: requested_at,
             expires_at_unix_ms: None,
         };
-        self.persistence.save_idempotency_record(&record)?;
+        self.control_plane.save_idempotency_record(&record)?;
 
         info!(
             run_id = %run.run_id,
@@ -341,7 +1270,7 @@ impl RunManager {
     ) -> Result<InvalidationResult> {
         // Validate repo exists first
         let repo = self
-            .persistence
+            .control_plane
             .get_repository(repo_id)?
             .ok_or_else(|| TokenizorError::NotFound(format!("repository not found: {repo_id}")))?;
 
@@ -367,7 +1296,10 @@ impl RunManager {
         // If an old idempotency record exists, the repo was previously invalidated but the
         // effect was later reversed (e.g., by re-indexing). The record is stale — fall
         // through to re-apply the invalidation and overwrite the idempotency record.
-        if let Some(_stale) = self.persistence.find_idempotency_record(&idempotency_key)? {
+        if let Some(_stale) = self
+            .control_plane
+            .find_idempotency_record(&idempotency_key)?
+        {
             debug!(
                 idempotency_key = %idempotency_key,
                 "stale idempotency record found — repo no longer invalidated, re-applying"
@@ -384,7 +1316,7 @@ impl RunManager {
         }
         drop(active_runs);
 
-        let persisted_active = self.persistence.list_runs()?;
+        let persisted_active = self.control_plane.list_runs()?;
         let has_active_persisted = persisted_active.iter().any(|r| {
             r.repo_id == repo_id
                 && matches!(r.status, IndexRunStatus::Queued | IndexRunStatus::Running)
@@ -400,7 +1332,7 @@ impl RunManager {
         let now = unix_timestamp_ms();
         let previous_status = repo.status.clone();
 
-        self.persistence.update_repository_status(
+        self.control_plane.update_repository_status(
             repo_id,
             RepositoryStatus::Invalidated,
             Some(now),
@@ -419,7 +1351,7 @@ impl RunManager {
             created_at_unix_ms: now,
             expires_at_unix_ms: None,
         };
-        self.persistence.save_idempotency_record(&record)?;
+        self.control_plane.save_idempotency_record(&record)?;
 
         info!(
             repo_id = %repo_id,
@@ -448,11 +1380,240 @@ impl RunManager {
         Ok((run, progress))
     }
 
+    pub fn resume_run(
+        self: &Arc<Self>,
+        run_id: &str,
+        repo_root: PathBuf,
+        blob_store: Arc<dyn BlobStore>,
+    ) -> Result<ResumeRunOutcome> {
+        let run = self
+            .control_plane
+            .find_run(run_id)?
+            .ok_or_else(|| TokenizorError::NotFound(format!("run '{run_id}' not found")))?;
+
+        if run.status != IndexRunStatus::Interrupted {
+            let next_action = match run.status {
+                IndexRunStatus::Queued | IndexRunStatus::Running => NextAction::Wait,
+                _ => NextAction::Reindex,
+            };
+            return self.resume_rejected(
+                &run,
+                ResumeRejectReason::RunNotInterrupted,
+                next_action,
+                format!(
+                    "run `{run_id}` is not interrupted and cannot resume from a checkpoint while status is `{:?}`",
+                    run.status
+                ),
+            );
+        }
+
+        if self.has_active_run(&run.repo_id) {
+            return self.resume_rejected(
+                &run,
+                ResumeRejectReason::ActiveRunConflict,
+                NextAction::Wait,
+                format!(
+                    "repository `{}` already has an active indexing run in memory",
+                    run.repo_id
+                ),
+            );
+        }
+
+        let persisted_active = self.control_plane.list_runs()?;
+        if persisted_active.iter().any(|candidate| {
+            candidate.repo_id == run.repo_id
+                && candidate.run_id != run.run_id
+                && matches!(
+                    candidate.status,
+                    IndexRunStatus::Queued | IndexRunStatus::Running
+                )
+        }) {
+            return self.resume_rejected(
+                &run,
+                ResumeRejectReason::ActiveRunConflict,
+                NextAction::Wait,
+                format!(
+                    "repository `{}` already has another persisted active run",
+                    run.repo_id
+                ),
+            );
+        }
+
+        if let Some(repo) = self.control_plane.get_repository(&run.repo_id)? {
+            match repo.status {
+                RepositoryStatus::Invalidated => {
+                    return self.resume_rejected(
+                        &run,
+                        ResumeRejectReason::RepositoryInvalidated,
+                        NextAction::Reindex,
+                        "repository indexed state has been invalidated; deterministic re-index is the safe fallback",
+                    );
+                }
+                RepositoryStatus::Failed => {
+                    return self.resume_rejected(
+                        &run,
+                        ResumeRejectReason::RepositoryFailed,
+                        NextAction::Repair,
+                        "repository is in failed state; repair is required before trusting partial run outputs",
+                    );
+                }
+                RepositoryStatus::Degraded => {
+                    return self.resume_rejected(
+                        &run,
+                        ResumeRejectReason::RepositoryDegraded,
+                        NextAction::Repair,
+                        "repository is in degraded state; repair is required before resuming interrupted work",
+                    );
+                }
+                RepositoryStatus::Quarantined => {
+                    return self.resume_rejected(
+                        &run,
+                        ResumeRejectReason::RepositoryQuarantined,
+                        NextAction::Repair,
+                        "repository is quarantined; repair is required before resuming interrupted work",
+                    );
+                }
+                RepositoryStatus::Pending | RepositoryStatus::Ready => {}
+            }
+        }
+
+        let checkpoint = match self.control_plane.get_latest_checkpoint(&run.run_id)? {
+            Some(checkpoint) => checkpoint,
+            None => {
+                return self.resume_rejected(
+                    &run,
+                    ResumeRejectReason::MissingCheckpoint,
+                    NextAction::Reindex,
+                    format!("run `{run_id}` has no persisted checkpoint to resume from"),
+                );
+            }
+        };
+
+        if checkpoint.cursor.trim().is_empty() {
+            return self.resume_rejected(
+                &run,
+                ResumeRejectReason::EmptyCheckpointCursor,
+                NextAction::Reindex,
+                format!("run `{run_id}` has a checkpoint with an empty cursor"),
+            );
+        }
+
+        let manifest = match self.control_plane.get_discovery_manifest(&run.run_id)? {
+            Some(manifest) => manifest,
+            None => {
+                return self.resume_rejected(
+                    &run,
+                    ResumeRejectReason::MissingDiscoveryManifest,
+                    NextAction::Reindex,
+                    format!(
+                        "run `{run_id}` has no persisted discovery manifest; start a fresh re-index to re-establish deterministic resume boundaries"
+                    ),
+                );
+            }
+        };
+        let manifest_paths = match validate_discovery_manifest(&manifest) {
+            Ok(paths) => paths,
+            Err(detail) => {
+                return self.resume_rejected(
+                    &run,
+                    ResumeRejectReason::CorruptDiscoveryManifest,
+                    NextAction::Reindex,
+                    detail,
+                );
+            }
+        };
+        let cursor_index = match manifest_paths
+            .iter()
+            .position(|path| path == &checkpoint.cursor)
+        {
+            Some(index) => index,
+            None => {
+                return self.resume_rejected(
+                    &run,
+                    ResumeRejectReason::CheckpointCursorMissing,
+                    NextAction::Reindex,
+                    format!(
+                        "checkpoint cursor `{}` is missing from the persisted discovery manifest",
+                        checkpoint.cursor
+                    ),
+                );
+            }
+        };
+
+        let durable_records = self.control_plane.get_file_records(&run.run_id)?;
+        let durable_paths: std::collections::HashSet<&str> = durable_records
+            .iter()
+            .map(|record| record.relative_path.as_str())
+            .collect();
+        if let Some(missing_path) = manifest_paths
+            .iter()
+            .take(cursor_index + 1)
+            .find(|path| !durable_paths.contains(path.as_str()))
+            .cloned()
+        {
+            return self.resume_rejected(
+                &run,
+                ResumeRejectReason::MissingDurableOutputs,
+                NextAction::Reindex,
+                format!(
+                    "checkpoint cursor `{}` is ahead of durable file record `{missing_path}`",
+                    checkpoint.cursor
+                ),
+            );
+        }
+
+        let resumed_run = self.save_recovery_state(
+            &run,
+            Some(RunRecoveryState {
+                state: RecoveryStateKind::Resumed,
+                rejection_reason: None,
+                next_action: None,
+                detail: Some(format!(
+                    "resumed from persisted discovery manifest at checkpoint `{}` after skipping {} durable files",
+                    checkpoint.cursor,
+                    cursor_index + 1
+                )),
+                updated_at_unix_ms: unix_timestamp_ms(),
+            }),
+            None,
+        )?;
+
+        self.spawn_pipeline_for_run_with_resume(
+            &resumed_run,
+            repo_root,
+            blob_store,
+            Some(PipelineResumeState {
+                cursor: checkpoint.cursor.clone(),
+                total_files: manifest_paths.len() as u64,
+                files_processed: checkpoint.files_processed,
+                symbols_extracted: checkpoint.symbols_written,
+                files_failed: 0,
+                manifest_paths: manifest_paths.clone(),
+            }),
+        );
+
+        Ok(ResumeRunOutcome::Resumed {
+            run: resumed_run,
+            checkpoint,
+            durable_files_skipped: (cursor_index + 1) as u64,
+        })
+    }
+
     fn spawn_pipeline_for_run(
         self: &Arc<Self>,
         run: &IndexRun,
         repo_root: PathBuf,
         blob_store: Arc<dyn BlobStore>,
+    ) -> Arc<PipelineProgress> {
+        self.spawn_pipeline_for_run_with_resume(run, repo_root, blob_store, None)
+    }
+
+    fn spawn_pipeline_for_run_with_resume(
+        self: &Arc<Self>,
+        run: &IndexRun,
+        repo_root: PathBuf,
+        blob_store: Arc<dyn BlobStore>,
+        resume_from: Option<PipelineResumeState>,
     ) -> Arc<PipelineProgress> {
         let run_id = run.run_id.clone();
         let repo_id_owned = run.repo_id.clone();
@@ -468,9 +1629,25 @@ impl RunManager {
             }
         });
 
-        let pipeline = IndexingPipeline::new(run_id.clone(), repo_root, token.clone())
+        let manager_for_records = Arc::clone(self);
+        let durable_record_callback = Box::new(move |record: &FileRecord| {
+            manager_for_records.persist_durable_file_record(record)
+        });
+        let manager_for_manifest = Arc::clone(self);
+        let discovery_manifest_callback = Box::new(move |manifest: &DiscoveryManifest| {
+            manager_for_manifest
+                .control_plane
+                .save_discovery_manifest(manifest)
+        });
+
+        let mut pipeline = IndexingPipeline::new(run_id.clone(), repo_root, token.clone())
             .with_cas(blob_store, repo_id_owned.clone())
+            .with_discovery_manifest_callback(discovery_manifest_callback)
+            .with_durable_record_callback(durable_record_callback)
             .with_checkpoint_callback(checkpoint_callback, 100);
+        if let Some(resume_state) = resume_from {
+            pipeline = pipeline.with_resume_state(resume_state);
+        }
         let progress = pipeline.progress();
         let tracker = pipeline.checkpoint_tracker();
 
@@ -479,7 +1656,7 @@ impl RunManager {
         let handle = tokio::spawn(async move {
             // Transition to Running with start timestamp (skips if already terminal)
             if let Err(e) = manager
-                .persistence
+                .control_plane
                 .transition_to_running(&run_id, unix_timestamp_ms())
             {
                 error!(run_id = %run_id, error = %e, "failed to transition to Running");
@@ -488,7 +1665,7 @@ impl RunManager {
             }
 
             // If already cancelled before pipeline starts, skip execution
-            let already_terminal = match manager.persistence.find_run(&run_id) {
+            let already_terminal = match manager.control_plane.find_run(&run_id) {
                 Ok(Some(r)) => r.status.is_terminal(),
                 Ok(None) => false,
                 Err(e) => {
@@ -503,45 +1680,13 @@ impl RunManager {
             }
 
             let result = pipeline.execute().await;
-
-            // Batch-save file records to registry
-            let mut file_record_error: Option<String> = None;
-            if !result.file_records.is_empty() {
-                let record_count = result.file_records.len();
-                if let Err(e) = manager
-                    .persistence
-                    .save_file_records(&run_id, &result.file_records)
-                {
-                    error!(
-                        run_id = %run_id,
-                        records = record_count,
-                        error = %e,
-                        "failed to save file records to registry"
-                    );
-                    file_record_error = Some(format!(
-                        "failed to persist {record_count} file records: {e}"
-                    ));
-                } else {
-                    info!(
-                        run_id = %run_id,
-                        records = record_count,
-                        "file records saved to registry"
-                    );
-                }
-            }
-
-            // Merge file record save error into error_summary so it's visible on the run
-            let final_error_summary = match (result.error_summary, file_record_error) {
-                (Some(pipeline_err), Some(record_err)) => {
-                    Some(format!("{pipeline_err}; {record_err}"))
-                }
-                (Some(err), None) | (None, Some(err)) => Some(err),
-                (None, None) => None,
-            };
+            let should_clear_invalidation =
+                run_completion_clears_repository_invalidation(&result.status, &result.results);
+            let final_error_summary = result.error_summary;
 
             // Check if the run was already cancelled (or otherwise made terminal)
             // by cancel_run() before we update status — prevents overwriting Cancelled
-            let already_terminal = match manager.persistence.find_run(&run_id) {
+            let already_terminal = match manager.control_plane.find_run(&run_id) {
                 Ok(Some(r)) => r.status.is_terminal(),
                 Ok(None) => false,
                 Err(e) => {
@@ -557,7 +1702,7 @@ impl RunManager {
                 } else {
                     Some(result.not_yet_supported)
                 };
-                if let Err(e) = manager.persistence.update_run_status_with_finish(
+                if let Err(e) = manager.control_plane.update_run_status_with_finish(
                     &run_id,
                     result.status.clone(),
                     final_error_summary,
@@ -567,11 +1712,11 @@ impl RunManager {
                     error!(run_id = %run_id, error = %e, "failed to update final run status");
                 }
 
-                // Clear invalidation on successful run completion
-                if result.status == IndexRunStatus::Succeeded {
-                    if let Ok(Some(repo)) = manager.persistence.get_repository(&repo_id_owned) {
+                // Only fully healthy succeeded runs should clear repository invalidation.
+                if should_clear_invalidation {
+                    if let Ok(Some(repo)) = manager.control_plane.get_repository(&repo_id_owned) {
                         if repo.status == RepositoryStatus::Invalidated {
-                            if let Err(e) = manager.persistence.update_repository_status(
+                            if let Err(e) = manager.control_plane.update_repository_status(
                                 &repo_id_owned,
                                 RepositoryStatus::Ready,
                                 None,
@@ -585,6 +1730,12 @@ impl RunManager {
                             }
                         }
                     }
+                } else if result.status == IndexRunStatus::Succeeded {
+                    info!(
+                        repo_id = %repo_id_owned,
+                        run_id = %run_id,
+                        "leaving repository invalidated because reindex completed with degraded file outcomes"
+                    );
                 }
             } else {
                 debug!(run_id = %run_id, "run already terminal — skipping status update");
@@ -616,17 +1767,17 @@ impl RunManager {
         active_runs.remove(repo_id);
     }
 
-    pub fn persistence(&self) -> &RegistryPersistence {
-        &self.persistence
+    pub fn persistence(&self) -> &RunManagerPersistenceAdapter {
+        self.persistence.as_ref()
     }
 
     pub fn registry_query(&self) -> &dyn RegistryQuery {
-        &self.persistence
+        self.persistence.as_ref()
     }
 
     pub fn inspect_run(&self, run_id: &str) -> Result<RunStatusReport> {
         let run = self
-            .persistence
+            .control_plane
             .find_run(run_id)?
             .ok_or_else(|| TokenizorError::NotFound(format!("run '{run_id}' not found")))?;
 
@@ -635,7 +1786,7 @@ impl RunManager {
 
     pub fn cancel_run(&self, run_id: &str) -> Result<RunStatusReport> {
         let run = self
-            .persistence
+            .control_plane
             .find_run(run_id)?
             .ok_or_else(|| TokenizorError::NotFound(format!("run '{run_id}' not found")))?;
 
@@ -656,7 +1807,7 @@ impl RunManager {
 
         // Atomic, race-safe persistence update
         let changed = self
-            .persistence
+            .control_plane
             .cancel_run_if_active(run_id, unix_timestamp_ms())?;
 
         if changed {
@@ -669,7 +1820,7 @@ impl RunManager {
 
     pub fn checkpoint_run(&self, run_id: &str) -> Result<Checkpoint> {
         let run = self
-            .persistence
+            .control_plane
             .find_run(run_id)?
             .ok_or_else(|| TokenizorError::NotFound(format!("run '{run_id}' not found")))?;
 
@@ -722,7 +1873,7 @@ impl RunManager {
             created_at_unix_ms: unix_timestamp_ms(),
         };
 
-        self.persistence.save_checkpoint(&checkpoint)?;
+        self.control_plane.save_checkpoint(&checkpoint)?;
 
         info!(
             run_id = %run_id,
@@ -740,8 +1891,8 @@ impl RunManager {
         status: Option<&IndexRunStatus>,
     ) -> Result<Vec<RunStatusReport>> {
         let runs = match status {
-            Some(s) => self.persistence.find_runs_by_status(s)?,
-            None => self.persistence.list_runs()?,
+            Some(s) => self.control_plane.find_runs_by_status(s)?,
+            None => self.control_plane.list_runs()?,
         };
 
         let filtered = match repo_id {
@@ -762,7 +1913,7 @@ impl RunManager {
     }
 
     pub fn list_recent_run_ids(&self, limit: usize) -> Vec<String> {
-        let all_runs = self.persistence.list_runs().unwrap_or_default();
+        let all_runs = self.control_plane.list_runs().unwrap_or_default();
         let mut sorted = all_runs;
         // Sort by requested_at (not started_at) because started_at is Option<u64>
         // and may be None for Queued runs. requested_at is always set.
@@ -771,7 +1922,13 @@ impl RunManager {
     }
 
     fn build_run_report(&self, run: IndexRun) -> Result<RunStatusReport> {
-        let is_active = run.status == IndexRunStatus::Running && self.has_active_run(&run.repo_id);
+        let has_active_run = self.has_active_run(&run.repo_id);
+        let is_active = has_active_run
+            && (run.status == IndexRunStatus::Running
+                || matches!(
+                    run.recovery_state.as_ref().map(|state| &state.state),
+                    Some(RecoveryStateKind::Resumed)
+                ));
 
         let progress = if is_active {
             self.get_active_progress(&run.repo_id)
@@ -780,7 +1937,7 @@ impl RunManager {
         };
 
         let file_outcome_summary = if run.status.is_terminal() {
-            let records = self.persistence.get_file_records(&run.run_id)?;
+            let records = self.control_plane.get_file_records(&run.run_id)?;
             if records.is_empty() {
                 None
             } else {
@@ -809,7 +1966,7 @@ impl RunManager {
         let mut action_required = action_required_message(&run, &health);
 
         // Surface repo-level invalidation in action_required
-        if let Ok(Some(repo)) = self.persistence.get_repository(&run.repo_id) {
+        if let Ok(Some(repo)) = self.control_plane.get_repository(&run.repo_id) {
             if repo.status == RepositoryStatus::Invalidated {
                 let invalidation_note =
                     "repository indexed state has been invalidated — re-index or repair required";
@@ -886,14 +2043,61 @@ fn classify_run_health(run: &IndexRun, file_summary: Option<&FileOutcomeSummary>
     }
 }
 
+fn run_completion_clears_repository_invalidation(
+    status: &IndexRunStatus,
+    results: &[FileProcessingResult],
+) -> bool {
+    *status == IndexRunStatus::Succeeded
+        && results
+            .iter()
+            .all(|result| matches!(result.outcome, FileOutcome::Processed))
+}
+
 fn action_required_message(run: &IndexRun, health: &RunHealth) -> Option<String> {
-    match &run.status {
-        IndexRunStatus::Interrupted => {
-            Some("Run was interrupted. Resume with re-index or repair.".into())
+    if let Some(recovery) = &run.recovery_state {
+        if recovery.state == RecoveryStateKind::Resumed
+            && matches!(
+                run.status,
+                IndexRunStatus::Interrupted | IndexRunStatus::Running
+            )
+        {
+            return Some(
+                "Resume accepted. Next safe action: wait for the managed run to complete.".into(),
+            );
         }
+        if recovery.state == RecoveryStateKind::ResumeRejected {
+            let next_action = recovery
+                .next_action
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "reindex".to_string());
+            let detail = recovery
+                .detail
+                .as_deref()
+                .unwrap_or("resume was rejected for this run");
+            return Some(format!(
+                "Resume rejected: {detail}. Next safe action: {next_action}."
+            ));
+        }
+    }
+
+    match &run.status {
+        IndexRunStatus::Interrupted => Some(
+            "Run was interrupted. Next safe action: resume from the last durable checkpoint if eligible; otherwise reindex."
+                .into(),
+        ),
         IndexRunStatus::Failed => {
             let detail = run.error_summary.as_deref().unwrap_or("unknown error");
             Some(format!("Run failed: {detail}. Investigate and re-run."))
+        }
+        IndexRunStatus::Aborted
+            if run.error_summary.as_deref()
+                == Some(STALE_QUEUED_ABORTED_STARTUP_SWEEP_SUMMARY) =>
+        {
+            Some(
+                "Run was abandoned during startup recovery because no durable work existed. Next safe action: start a fresh index or reindex; do not resume."
+                    .into(),
+            )
         }
         IndexRunStatus::Aborted => Some(
             "Run aborted (circuit breaker). Check file-level errors, consider repair mode.".into(),
@@ -924,9 +2128,337 @@ fn build_file_outcome_summary(records: &[FileRecord]) -> FileOutcomeSummary {
     summary
 }
 
+fn validate_discovery_manifest(
+    manifest: &DiscoveryManifest,
+) -> std::result::Result<Vec<String>, String> {
+    if manifest.run_id.trim().is_empty() {
+        return Err("persisted discovery manifest is missing its run id".to_string());
+    }
+    if manifest.relative_paths.is_empty() {
+        return Err(format!(
+            "persisted discovery manifest for run `{}` contains no indexable paths",
+            manifest.run_id
+        ));
+    }
+
+    let mut seen = std::collections::BTreeSet::new();
+    for relative_path in &manifest.relative_paths {
+        if relative_path.trim().is_empty() {
+            return Err(format!(
+                "persisted discovery manifest for run `{}` contains an empty relative path",
+                manifest.run_id
+            ));
+        }
+        let extension = Path::new(relative_path)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .ok_or_else(|| {
+                format!(
+                    "persisted discovery manifest path `{relative_path}` is missing a supported file extension"
+                )
+            })?;
+        let Some(language) = LanguageId::from_extension(extension) else {
+            return Err(format!(
+                "persisted discovery manifest path `{relative_path}` uses unsupported extension `{extension}`"
+            ));
+        };
+        if language.support_tier() == crate::domain::SupportTier::Unsupported {
+            return Err(format!(
+                "persisted discovery manifest path `{relative_path}` resolved to unsupported language `{:?}`",
+                language
+            ));
+        }
+        if !seen.insert(relative_path.clone()) {
+            return Err(format!(
+                "persisted discovery manifest for run `{}` contains duplicate path `{relative_path}`",
+                manifest.run_id
+            ));
+        }
+    }
+
+    let mut expected_order = manifest.relative_paths.clone();
+    expected_order.sort_by(|left, right| {
+        left.to_lowercase()
+            .cmp(&right.to_lowercase())
+            .then_with(|| left.cmp(right))
+    });
+    if expected_order != manifest.relative_paths {
+        return Err(format!(
+            "persisted discovery manifest for run `{}` is not in deterministic path order",
+            manifest.run_id
+        ));
+    }
+
+    Ok(manifest.relative_paths.clone())
+}
+
+fn sweep_owned_temp_artifacts(
+    scan_dir: Option<&Path>,
+    owns_path: impl Fn(&Path) -> bool,
+    surface: StartupCleanupSurface,
+    report: &mut StartupRecoveryReport,
+) {
+    let Some(scan_dir) = scan_dir else {
+        return;
+    };
+
+    let entries = match fs::read_dir(scan_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            report.push_blocking_finding(StartupRecoveryFinding {
+                name: surface.check_name().to_string(),
+                detail: format!(
+                    "startup sweep could not inspect {}s in `{}`: {}",
+                    surface.label(),
+                    scan_dir.display(),
+                    error
+                ),
+                remediation: surface.cleanup_remediation().to_string(),
+            });
+            return;
+        }
+    };
+
+    let mut candidates = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) => {
+                let path = entry.path();
+                if owns_path(&path) {
+                    candidates.push(path);
+                }
+            }
+            Err(error) => {
+                report.push_blocking_finding(StartupRecoveryFinding {
+                    name: surface.check_name().to_string(),
+                    detail: format!(
+                        "startup sweep could not enumerate {}s in `{}`: {}",
+                        surface.label(),
+                        scan_dir.display(),
+                        error
+                    ),
+                    remediation: surface.cleanup_remediation().to_string(),
+                });
+            }
+        }
+    }
+
+    candidates.sort_by(|left, right| left.to_string_lossy().cmp(&right.to_string_lossy()));
+
+    for path in candidates {
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                report.push_blocking_finding(StartupRecoveryFinding {
+                    name: surface.check_name().to_string(),
+                    detail: format!(
+                        "startup sweep could not stat {} `{}`: {}",
+                        surface.label(),
+                        path.display(),
+                        error
+                    ),
+                    remediation: surface.cleanup_remediation().to_string(),
+                });
+                continue;
+            }
+        };
+
+        if !metadata.is_file() {
+            report.push_blocking_finding(StartupRecoveryFinding {
+                name: surface.check_name().to_string(),
+                detail: format!(
+                    "startup sweep found a malformed {} at `{}`; expected a file",
+                    surface.label(),
+                    path.display()
+                ),
+                remediation: surface.cleanup_remediation().to_string(),
+            });
+            continue;
+        }
+
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                debug!(
+                    surface = surface.check_name(),
+                    path = %path.display(),
+                    "startup sweep: removed stale temp artifact"
+                );
+                report
+                    .cleaned_temp_artifacts
+                    .push(StartupRecoveredTempArtifact {
+                        surface: surface.clone(),
+                        path,
+                    });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                report.push_blocking_finding(StartupRecoveryFinding {
+                    name: surface.check_name().to_string(),
+                    detail: format!(
+                        "startup sweep could not remove {} `{}`: {}",
+                        surface.label(),
+                        path.display(),
+                        error
+                    ),
+                    remediation: surface.cleanup_remediation().to_string(),
+                });
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::InMemoryControlPlane;
+
+    struct AuthoritativeInMemoryControlPlane {
+        backing: InMemoryControlPlane,
+    }
+
+    impl Default for AuthoritativeInMemoryControlPlane {
+        fn default() -> Self {
+            Self {
+                backing: InMemoryControlPlane::default(),
+            }
+        }
+    }
+
+    impl ControlPlane for AuthoritativeInMemoryControlPlane {
+        fn backend_name(&self) -> &'static str {
+            "spacetimedb"
+        }
+
+        fn health_check(&self) -> Result<ComponentHealth> {
+            self.backing.health_check()
+        }
+
+        fn deployment_checks(&self) -> Result<Vec<ComponentHealth>> {
+            self.backing.deployment_checks()
+        }
+
+        fn find_run(&self, run_id: &str) -> Result<Option<IndexRun>> {
+            self.backing.find_run(run_id)
+        }
+
+        fn find_runs_by_status(&self, status: &IndexRunStatus) -> Result<Vec<IndexRun>> {
+            self.backing.find_runs_by_status(status)
+        }
+
+        fn list_runs(&self) -> Result<Vec<IndexRun>> {
+            self.backing.list_runs()
+        }
+
+        fn get_runs_by_repo(&self, repo_id: &str) -> Result<Vec<IndexRun>> {
+            self.backing.get_runs_by_repo(repo_id)
+        }
+
+        fn get_latest_completed_run(&self, repo_id: &str) -> Result<Option<IndexRun>> {
+            self.backing.get_latest_completed_run(repo_id)
+        }
+
+        fn get_repository(&self, repo_id: &str) -> Result<Option<crate::domain::Repository>> {
+            self.backing.get_repository(repo_id)
+        }
+
+        fn get_file_records(&self, run_id: &str) -> Result<Vec<FileRecord>> {
+            self.backing.get_file_records(run_id)
+        }
+
+        fn get_latest_checkpoint(&self, run_id: &str) -> Result<Option<Checkpoint>> {
+            self.backing.get_latest_checkpoint(run_id)
+        }
+
+        fn find_idempotency_record(&self, key: &str) -> Result<Option<IdempotencyRecord>> {
+            self.backing.find_idempotency_record(key)
+        }
+
+        fn get_discovery_manifest(&self, run_id: &str) -> Result<Option<DiscoveryManifest>> {
+            self.backing.get_discovery_manifest(run_id)
+        }
+
+        fn save_run(&self, run: &IndexRun) -> Result<()> {
+            self.backing.save_run(run)
+        }
+
+        fn update_run_status(
+            &self,
+            run_id: &str,
+            status: IndexRunStatus,
+            error_summary: Option<String>,
+        ) -> Result<()> {
+            self.backing
+                .update_run_status(run_id, status, error_summary)
+        }
+
+        fn transition_to_running(&self, run_id: &str, started_at_unix_ms: u64) -> Result<()> {
+            self.backing
+                .transition_to_running(run_id, started_at_unix_ms)
+        }
+
+        fn update_run_status_with_finish(
+            &self,
+            run_id: &str,
+            status: IndexRunStatus,
+            error_summary: Option<String>,
+            finished_at_unix_ms: u64,
+            not_yet_supported: Option<std::collections::BTreeMap<crate::domain::LanguageId, u64>>,
+        ) -> Result<()> {
+            self.backing.update_run_status_with_finish(
+                run_id,
+                status,
+                error_summary,
+                finished_at_unix_ms,
+                not_yet_supported,
+            )
+        }
+
+        fn cancel_run_if_active(&self, run_id: &str, finished_at_unix_ms: u64) -> Result<bool> {
+            self.backing
+                .cancel_run_if_active(run_id, finished_at_unix_ms)
+        }
+
+        fn save_file_records(&self, run_id: &str, records: &[FileRecord]) -> Result<()> {
+            self.backing.save_file_records(run_id, records)
+        }
+
+        fn save_checkpoint(&self, checkpoint: &Checkpoint) -> Result<()> {
+            self.backing.save_checkpoint(checkpoint)
+        }
+
+        fn save_repository(&self, repository: &crate::domain::Repository) -> Result<()> {
+            self.backing.save_repository(repository)
+        }
+
+        fn update_repository_status(
+            &self,
+            repo_id: &str,
+            status: RepositoryStatus,
+            invalidated_at_unix_ms: Option<u64>,
+            invalidation_reason: Option<String>,
+            quarantined_at_unix_ms: Option<u64>,
+            quarantine_reason: Option<String>,
+        ) -> Result<()> {
+            self.backing.update_repository_status(
+                repo_id,
+                status,
+                invalidated_at_unix_ms,
+                invalidation_reason,
+                quarantined_at_unix_ms,
+                quarantine_reason,
+            )
+        }
+
+        fn save_idempotency_record(&self, record: &IdempotencyRecord) -> Result<()> {
+            self.backing.save_idempotency_record(record)
+        }
+
+        fn save_discovery_manifest(&self, manifest: &DiscoveryManifest) -> Result<()> {
+            self.backing.save_discovery_manifest(manifest)
+        }
+    }
 
     fn temp_run_manager() -> (tempfile::TempDir, RunManager) {
         let dir = tempfile::tempdir().unwrap();
@@ -934,6 +2466,114 @@ mod tests {
         let persistence = RegistryPersistence::new(path);
         let manager = RunManager::new(persistence);
         (dir, manager)
+    }
+
+    #[test]
+    fn test_persistence_adapter_does_not_write_mutable_run_state_to_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry =
+            std::sync::Arc::new(RegistryPersistence::new(dir.path().join("registry.json")));
+        let adapter = RunManagerPersistenceAdapter::new(
+            std::sync::Arc::new(AuthoritativeInMemoryControlPlane::default()),
+            std::sync::Arc::clone(&registry),
+        );
+
+        let run = IndexRun {
+            run_id: "run-1".to_string(),
+            repo_id: "repo-1".to_string(),
+            mode: IndexRunMode::Full,
+            status: IndexRunStatus::Running,
+            requested_at_unix_ms: 1000,
+            started_at_unix_ms: Some(1001),
+            finished_at_unix_ms: None,
+            idempotency_key: Some("idem-1".to_string()),
+            request_hash: Some("hash-1".to_string()),
+            checkpoint_cursor: None,
+            error_summary: None,
+            not_yet_supported: None,
+            prior_run_id: None,
+            description: Some("adapter test".to_string()),
+            recovery_state: None,
+        };
+        let file_record = FileRecord {
+            relative_path: "src/lib.rs".to_string(),
+            language: LanguageId::Rust,
+            blob_id: "blob-1".to_string(),
+            byte_len: 12,
+            content_hash: "deadbeef".to_string(),
+            outcome: PersistedFileOutcome::Committed,
+            symbols: Vec::new(),
+            run_id: run.run_id.clone(),
+            repo_id: run.repo_id.clone(),
+            committed_at_unix_ms: 1002,
+        };
+        let checkpoint = Checkpoint {
+            run_id: run.run_id.clone(),
+            cursor: file_record.relative_path.clone(),
+            files_processed: 1,
+            symbols_written: 0,
+            created_at_unix_ms: 1003,
+        };
+        let idempotency = IdempotencyRecord {
+            operation: "index_repository".to_string(),
+            idempotency_key: "idem-1".to_string(),
+            request_hash: "hash-1".to_string(),
+            status: IdempotencyStatus::Succeeded,
+            result_ref: Some(run.run_id.clone()),
+            created_at_unix_ms: 1004,
+            expires_at_unix_ms: None,
+        };
+        let manifest = DiscoveryManifest {
+            run_id: run.run_id.clone(),
+            discovered_at_unix_ms: 1005,
+            relative_paths: vec!["src/lib.rs".to_string()],
+        };
+
+        adapter.save_run(&run).unwrap();
+        adapter
+            .save_file_records(&run.run_id, std::slice::from_ref(&file_record))
+            .unwrap();
+        adapter.save_checkpoint(&checkpoint).unwrap();
+        adapter.save_idempotency_record(&idempotency).unwrap();
+        adapter.save_discovery_manifest(&manifest).unwrap();
+
+        let registry_data = registry.load().unwrap();
+        assert!(registry_data.runs.is_empty());
+        assert!(registry_data.run_file_records.is_empty());
+        assert!(registry_data.checkpoints.is_empty());
+        assert!(registry_data.idempotency_records.is_empty());
+        assert!(registry_data.discovery_manifests.is_empty());
+    }
+
+    #[test]
+    fn test_persistence_adapter_preserves_repository_bootstrap_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry =
+            std::sync::Arc::new(RegistryPersistence::new(dir.path().join("registry.json")));
+        let adapter = RunManagerPersistenceAdapter::new(
+            std::sync::Arc::new(InMemoryControlPlane::default()),
+            std::sync::Arc::clone(&registry),
+        );
+
+        let repository = crate::domain::Repository {
+            repo_id: "repo-1".to_string(),
+            kind: crate::domain::RepositoryKind::Local,
+            root_uri: "file:///repo-1".to_string(),
+            project_identity: "repo-1".to_string(),
+            project_identity_kind: crate::domain::ProjectIdentityKind::LocalRootPath,
+            default_branch: Some("main".to_string()),
+            last_known_revision: None,
+            status: RepositoryStatus::Ready,
+            invalidated_at_unix_ms: None,
+            invalidation_reason: None,
+            quarantined_at_unix_ms: None,
+            quarantine_reason: None,
+        };
+
+        adapter.save_repository(&repository).unwrap();
+
+        let persisted = registry.get_repository(&repository.repo_id).unwrap();
+        assert_eq!(persisted, Some(repository));
     }
 
     #[test]
@@ -946,7 +2586,11 @@ mod tests {
         assert!(run.started_at_unix_ms.is_none());
         assert!(run.finished_at_unix_ms.is_none());
 
-        let persisted = manager.persistence.find_run(&run.run_id).unwrap().unwrap();
+        let persisted = manager
+            .persistence()
+            .find_run(&run.run_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(persisted.run_id, run.run_id);
         assert_eq!(persisted.status, IndexRunStatus::Queued);
     }
@@ -996,22 +2640,44 @@ mod tests {
                 not_yet_supported: None,
                 prior_run_id: None,
                 description: None,
+                recovery_state: None,
             };
             persistence.save_run(&run).unwrap();
         }
 
         let persistence = RegistryPersistence::new(path);
         let manager = RunManager::new(persistence);
-        let transitioned = manager.startup_sweep().unwrap();
+        let recovery = manager.startup_sweep().unwrap();
 
-        assert_eq!(transitioned, vec!["stale-run".to_string()]);
-        let run = manager.persistence.find_run("stale-run").unwrap().unwrap();
+        assert_eq!(recovery.transitioned_run_ids, vec!["stale-run".to_string()]);
+        assert_eq!(
+            recovery.transitioned_runs,
+            vec![StartupRecoveredRunTransition {
+                run_id: "stale-run".to_string(),
+                repo_id: "repo-1".to_string(),
+                from_status: IndexRunStatus::Running,
+                to_status: IndexRunStatus::Interrupted,
+            }]
+        );
+        assert!(recovery.cleaned_temp_artifacts.is_empty());
+        assert!(recovery.blocking_findings.is_empty());
+        assert!(
+            recovery
+                .operator_guidance
+                .iter()
+                .any(|message| message.contains("resume") || message.contains("repair"))
+        );
+        let run = manager
+            .persistence()
+            .find_run("stale-run")
+            .unwrap()
+            .unwrap();
         assert_eq!(run.status, IndexRunStatus::Interrupted);
         assert!(run.error_summary.is_some());
     }
 
     #[test]
-    fn test_startup_sweep_ignores_non_running_statuses() {
+    fn test_startup_sweep_transitions_stale_queued_run_with_checkpoint_to_interrupted() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("registry.json");
 
@@ -1032,8 +2698,173 @@ mod tests {
                 not_yet_supported: None,
                 prior_run_id: None,
                 description: None,
+                recovery_state: None,
             })
             .unwrap();
+        persistence
+            .save_checkpoint(&Checkpoint {
+                run_id: "queued-run".to_string(),
+                cursor: "src/lib.rs".to_string(),
+                files_processed: 1,
+                symbols_written: 3,
+                created_at_unix_ms: 1001,
+            })
+            .unwrap();
+
+        let manager = RunManager::new(RegistryPersistence::new(path));
+        let recovery = manager.startup_sweep().unwrap();
+
+        assert_eq!(
+            recovery.transitioned_run_ids,
+            vec!["queued-run".to_string()]
+        );
+        assert_eq!(recovery.interrupted_run_count(), 1);
+        assert_eq!(recovery.aborted_run_count(), 0);
+        assert!(recovery.cleaned_temp_artifacts.is_empty());
+        assert!(recovery.blocking_findings.is_empty());
+
+        let run = manager
+            .persistence()
+            .find_run("queued-run")
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.status, IndexRunStatus::Interrupted);
+        assert_eq!(
+            run.error_summary.as_deref(),
+            Some(STALE_QUEUED_INTERRUPTED_STARTUP_SWEEP_SUMMARY)
+        );
+    }
+
+    #[test]
+    fn test_startup_sweep_transitions_stale_queued_run_with_durable_file_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+
+        let persistence = RegistryPersistence::new(path.clone());
+        persistence
+            .save_run(&IndexRun {
+                run_id: "queued-run".to_string(),
+                repo_id: "repo-1".to_string(),
+                mode: IndexRunMode::Full,
+                status: IndexRunStatus::Queued,
+                requested_at_unix_ms: 1000,
+                started_at_unix_ms: None,
+                finished_at_unix_ms: None,
+                idempotency_key: None,
+                request_hash: None,
+                checkpoint_cursor: None,
+                error_summary: None,
+                not_yet_supported: None,
+                prior_run_id: None,
+                description: None,
+                recovery_state: None,
+            })
+            .unwrap();
+        persistence
+            .save_file_records(
+                "queued-run",
+                &[FileRecord {
+                    relative_path: "src/main.rs".into(),
+                    language: crate::domain::LanguageId::Rust,
+                    blob_id: "blob-1".into(),
+                    byte_len: 42,
+                    content_hash: "hash-1".into(),
+                    outcome: PersistedFileOutcome::Committed,
+                    symbols: vec![],
+                    run_id: "queued-run".into(),
+                    repo_id: "repo-1".into(),
+                    committed_at_unix_ms: 1001,
+                }],
+            )
+            .unwrap();
+
+        let manager = RunManager::new(RegistryPersistence::new(path));
+        let recovery = manager.startup_sweep().unwrap();
+
+        assert_eq!(
+            recovery.transitioned_run_ids,
+            vec!["queued-run".to_string()]
+        );
+        assert_eq!(recovery.interrupted_run_count(), 1);
+        assert_eq!(recovery.aborted_run_count(), 0);
+
+        let run = manager
+            .persistence()
+            .find_run("queued-run")
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.status, IndexRunStatus::Interrupted);
+        assert_eq!(
+            run.error_summary.as_deref(),
+            Some(STALE_QUEUED_INTERRUPTED_STARTUP_SWEEP_SUMMARY)
+        );
+    }
+
+    #[test]
+    fn test_startup_sweep_aborts_stale_queued_run_without_durable_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+
+        let persistence = RegistryPersistence::new(path.clone());
+        persistence
+            .save_run(&IndexRun {
+                run_id: "queued-run".to_string(),
+                repo_id: "repo-1".to_string(),
+                mode: IndexRunMode::Full,
+                status: IndexRunStatus::Queued,
+                requested_at_unix_ms: 1000,
+                started_at_unix_ms: None,
+                finished_at_unix_ms: None,
+                idempotency_key: None,
+                request_hash: None,
+                checkpoint_cursor: None,
+                error_summary: None,
+                not_yet_supported: None,
+                prior_run_id: None,
+                description: None,
+                recovery_state: None,
+            })
+            .unwrap();
+
+        let manager = RunManager::new(RegistryPersistence::new(path));
+        let recovery = manager.startup_sweep().unwrap();
+
+        assert_eq!(
+            recovery.transitioned_run_ids,
+            vec!["queued-run".to_string()]
+        );
+        assert_eq!(recovery.interrupted_run_count(), 0);
+        assert_eq!(recovery.aborted_run_count(), 1);
+        assert!(
+            recovery
+                .operator_guidance
+                .iter()
+                .any(|message| message.contains("do not resume"))
+        );
+
+        let run = manager
+            .persistence()
+            .find_run("queued-run")
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.status, IndexRunStatus::Aborted);
+        assert!(run.finished_at_unix_ms.is_some());
+        assert_eq!(
+            run.error_summary.as_deref(),
+            Some(STALE_QUEUED_ABORTED_STARTUP_SWEEP_SUMMARY)
+        );
+
+        let replacement = manager.start_run("repo-1", IndexRunMode::Full).unwrap();
+        assert_eq!(replacement.repo_id, "repo-1");
+        assert_eq!(replacement.status, IndexRunStatus::Queued);
+    }
+
+    #[test]
+    fn test_startup_sweep_ignores_terminal_runs_without_recovery_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+
+        let persistence = RegistryPersistence::new(path.clone());
         persistence
             .save_run(&IndexRun {
                 run_id: "succeeded-run".to_string(),
@@ -1050,12 +2881,99 @@ mod tests {
                 not_yet_supported: None,
                 prior_run_id: None,
                 description: None,
+                recovery_state: None,
             })
             .unwrap();
 
         let manager = RunManager::new(RegistryPersistence::new(path));
-        let transitioned = manager.startup_sweep().unwrap();
-        assert!(transitioned.is_empty());
+        let recovery = manager.startup_sweep().unwrap();
+
+        assert!(recovery.transitioned_run_ids.is_empty());
+        assert!(recovery.transitioned_runs.is_empty());
+        assert!(recovery.cleaned_temp_artifacts.is_empty());
+        assert!(recovery.blocking_findings.is_empty());
+    }
+
+    #[test]
+    fn test_startup_sweep_cleans_owned_temp_artifacts_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_path = dir
+            .path()
+            .join("control-plane")
+            .join("project-workspace-registry.json");
+        let blob_root = dir.path().join("blob-root");
+        let temp_dir = blob_root.join("temp");
+
+        std::fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let registry_temp = registry_path
+            .parent()
+            .unwrap()
+            .join(".project-workspace-registry.json.123.tmp");
+        let cas_temp = temp_dir.join(format!("{}.456.42.tmp", "a".repeat(64)));
+        let ignored = registry_path.parent().unwrap().join(".other.json.123.tmp");
+
+        std::fs::write(&registry_temp, b"stale-registry").unwrap();
+        std::fs::write(&cas_temp, b"stale-cas").unwrap();
+        std::fs::write(&ignored, b"keep-me").unwrap();
+
+        let manager =
+            RunManager::with_blob_root(RegistryPersistence::new(registry_path), blob_root);
+        let first = manager.startup_sweep().unwrap();
+
+        assert_eq!(first.cleaned_temp_artifacts.len(), 2);
+        assert!(!registry_temp.exists());
+        assert!(!cas_temp.exists());
+        assert!(ignored.exists());
+        assert!(
+            first
+                .operator_guidance
+                .iter()
+                .any(|message| message.contains("wait") || message.contains("repair"))
+        );
+
+        let second = manager.startup_sweep().unwrap();
+        assert!(second.transitioned_run_ids.is_empty());
+        assert!(second.cleaned_temp_artifacts.is_empty());
+        assert!(second.blocking_findings.is_empty());
+    }
+
+    #[test]
+    fn test_startup_sweep_reports_blocking_findings_for_malformed_temp_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_path = dir
+            .path()
+            .join("control-plane")
+            .join("project-workspace-registry.json");
+        let blob_root = dir.path().join("blob-root");
+        let temp_dir = blob_root.join("temp");
+
+        std::fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let registry_temp_dir = registry_path
+            .parent()
+            .unwrap()
+            .join(".project-workspace-registry.json.123.tmp");
+        let cas_temp_dir = temp_dir.join(format!("{}.456.42.tmp", "b".repeat(64)));
+
+        std::fs::create_dir_all(&registry_temp_dir).unwrap();
+        std::fs::create_dir_all(&cas_temp_dir).unwrap();
+
+        let manager =
+            RunManager::with_blob_root(RegistryPersistence::new(registry_path), blob_root);
+        let recovery = manager.startup_sweep().unwrap();
+
+        assert!(recovery.cleaned_temp_artifacts.is_empty());
+        assert_eq!(recovery.blocking_findings.len(), 2);
+        assert!(
+            recovery
+                .blocking_findings
+                .iter()
+                .all(|finding| finding.remediation.contains("repair")
+                    || finding.remediation.contains("wait"))
+        );
     }
 
     #[test]
@@ -1342,6 +3260,7 @@ mod tests {
             not_yet_supported: None,
             prior_run_id: None,
             description: None,
+            recovery_state: None,
         }
     }
 
@@ -1405,6 +3324,48 @@ mod tests {
         assert_eq!(classify_run_health(&run, None), RunHealth::Unhealthy);
     }
 
+    fn sample_file_processing_result(outcome: FileOutcome) -> FileProcessingResult {
+        FileProcessingResult {
+            relative_path: "src/lib.rs".to_string(),
+            language: LanguageId::Rust,
+            outcome,
+            symbols: vec![],
+            byte_len: 16,
+            content_hash: "abc123".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_succeeded_run_clears_invalidation_when_all_results_are_processed() {
+        let results = vec![sample_file_processing_result(FileOutcome::Processed)];
+        assert!(run_completion_clears_repository_invalidation(
+            &IndexRunStatus::Succeeded,
+            &results
+        ));
+    }
+
+    #[test]
+    fn test_succeeded_run_does_not_clear_invalidation_when_any_result_is_partial() {
+        let results = vec![sample_file_processing_result(FileOutcome::PartialParse {
+            warning: "parser recovered".to_string(),
+        })];
+        assert!(!run_completion_clears_repository_invalidation(
+            &IndexRunStatus::Succeeded,
+            &results
+        ));
+    }
+
+    #[test]
+    fn test_succeeded_run_does_not_clear_invalidation_when_any_result_failed() {
+        let results = vec![sample_file_processing_result(FileOutcome::Failed {
+            error: "boom".to_string(),
+        })];
+        assert!(!run_completion_clears_repository_invalidation(
+            &IndexRunStatus::Succeeded,
+            &results
+        ));
+    }
+
     #[test]
     fn test_action_required_for_interrupted_run() {
         let run = sample_run_with_status(IndexRunStatus::Interrupted);
@@ -1425,6 +3386,32 @@ mod tests {
         };
         let health = classify_run_health(&run, Some(&summary));
         assert!(action_required_message(&run, &health).is_none());
+    }
+
+    #[test]
+    fn test_action_required_for_resume_rejected_run_mentions_next_action() {
+        let mut run = sample_run_with_status(IndexRunStatus::Interrupted);
+        run.recovery_state = Some(RunRecoveryState {
+            state: RecoveryStateKind::ResumeRejected,
+            rejection_reason: Some(ResumeRejectReason::MissingCheckpoint),
+            next_action: Some(NextAction::Reindex),
+            detail: Some("run has no persisted checkpoint".to_string()),
+            updated_at_unix_ms: 1234,
+        });
+        let health = classify_run_health(&run, None);
+        let msg = action_required_message(&run, &health).unwrap();
+        assert!(msg.contains("Resume rejected"));
+        assert!(msg.contains("reindex"));
+    }
+
+    #[test]
+    fn test_action_required_for_startup_aborted_queued_run_mentions_fresh_index() {
+        let mut run = sample_run_with_status(IndexRunStatus::Aborted);
+        run.error_summary = Some(STALE_QUEUED_ABORTED_STARTUP_SWEEP_SUMMARY.to_string());
+        let health = classify_run_health(&run, None);
+        let msg = action_required_message(&run, &health).unwrap();
+        assert!(msg.contains("fresh index") || msg.contains("reindex"));
+        assert!(msg.contains("do not resume"));
     }
 
     #[test]
@@ -2089,7 +4076,7 @@ mod tests {
             quarantined_at_unix_ms: None,
             quarantine_reason: None,
         };
-        manager.persistence.save_repository(&repo).unwrap();
+        manager.persistence().save_repository(&repo).unwrap();
     }
 
     #[test]
@@ -2107,7 +4094,7 @@ mod tests {
         assert_eq!(result.action_required, "re-index or repair required");
 
         let repo = manager
-            .persistence
+            .control_plane
             .get_repository("repo-1")
             .unwrap()
             .unwrap();
@@ -2214,7 +4201,7 @@ mod tests {
             quarantined_at_unix_ms: None,
             quarantine_reason: None,
         };
-        manager.persistence.save_repository(&repo).unwrap();
+        manager.persistence().save_repository(&repo).unwrap();
 
         let result = manager.invalidate_repository("repo-1", None, None).unwrap();
         assert_eq!(result.previous_status, RepositoryStatus::Pending);
@@ -2331,7 +4318,7 @@ mod tests {
         assert!(second.invalidated_at_unix_ms > 0);
 
         let repo = manager
-            .persistence
+            .control_plane
             .get_repository("repo-1")
             .unwrap()
             .unwrap();
@@ -2362,7 +4349,7 @@ mod tests {
         assert_eq!(result.reason.as_deref(), Some("reason-B"));
 
         let repo = manager
-            .persistence
+            .control_plane
             .get_repository("repo-1")
             .unwrap()
             .unwrap();

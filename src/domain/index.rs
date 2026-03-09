@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::retrieval::NextAction;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum LanguageId {
@@ -157,6 +159,8 @@ pub struct IndexRun {
     pub prior_run_id: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_state: Option<RunRecoveryState>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -201,6 +205,65 @@ pub struct Checkpoint {
     pub files_processed: u64,
     pub symbols_written: u64,
     pub created_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiscoveryManifest {
+    pub run_id: String,
+    pub discovered_at_unix_ms: u64,
+    pub relative_paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryStateKind {
+    Resumed,
+    ResumeRejected,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeRejectReason {
+    RunNotInterrupted,
+    MissingCheckpoint,
+    EmptyCheckpointCursor,
+    ActiveRunConflict,
+    RepositoryInvalidated,
+    RepositoryFailed,
+    RepositoryDegraded,
+    RepositoryQuarantined,
+    MissingDiscoveryManifest,
+    CorruptDiscoveryManifest,
+    CheckpointCursorMissing,
+    MissingDurableOutputs,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunRecoveryState {
+    pub state: RecoveryStateKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection_reason: Option<ResumeRejectReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<NextAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub updated_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum ResumeRunOutcome {
+    Resumed {
+        run: IndexRun,
+        checkpoint: Checkpoint,
+        durable_files_skipped: u64,
+    },
+    Rejected {
+        run: IndexRun,
+        reason: ResumeRejectReason,
+        next_action: NextAction,
+        detail: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -821,6 +884,13 @@ mod tests {
             not_yet_supported: None,
             prior_run_id: None,
             description: None,
+            recovery_state: Some(RunRecoveryState {
+                state: RecoveryStateKind::ResumeRejected,
+                rejection_reason: Some(ResumeRejectReason::MissingCheckpoint),
+                next_action: Some(NextAction::Reindex),
+                detail: Some("missing checkpoint".to_string()),
+                updated_at_unix_ms: 1010,
+            }),
         };
         let json = serde_json::to_string(&run).unwrap();
         let deserialized: IndexRun = serde_json::from_str(&json).unwrap();
@@ -884,6 +954,13 @@ mod tests {
                 not_yet_supported: None,
                 prior_run_id: None,
                 description: None,
+                recovery_state: Some(RunRecoveryState {
+                    state: RecoveryStateKind::Resumed,
+                    rejection_reason: None,
+                    next_action: None,
+                    detail: None,
+                    updated_at_unix_ms: 1500,
+                }),
             },
             health: RunHealth::Healthy,
             is_active: false,
@@ -991,6 +1068,7 @@ mod tests {
             not_yet_supported: None,
             prior_run_id: Some("previous-run-id".to_string()),
             description: None,
+            recovery_state: None,
         };
         let json = serde_json::to_string(&run).unwrap();
         let deserialized: IndexRun = serde_json::from_str(&json).unwrap();
@@ -1020,6 +1098,62 @@ mod tests {
         assert_eq!(run.run_id, "old-run");
         assert_eq!(run.prior_run_id, None);
         assert_eq!(run.not_yet_supported, None);
+        assert_eq!(run.recovery_state, None);
+    }
+
+    #[test]
+    fn test_run_recovery_state_serde_roundtrip() {
+        let recovery = RunRecoveryState {
+            state: RecoveryStateKind::ResumeRejected,
+            rejection_reason: Some(ResumeRejectReason::MissingDurableOutputs),
+            next_action: Some(NextAction::Reindex),
+            detail: Some("missing durable file record for src/lib.rs".to_string()),
+            updated_at_unix_ms: 1234,
+        };
+        let json = serde_json::to_string(&recovery).unwrap();
+        let deserialized: RunRecoveryState = serde_json::from_str(&json).unwrap();
+        assert_eq!(recovery, deserialized);
+    }
+
+    #[test]
+    fn test_resume_run_outcome_serde_roundtrip() {
+        let run = IndexRun {
+            run_id: "run-1".to_string(),
+            repo_id: "repo-1".to_string(),
+            mode: IndexRunMode::Full,
+            status: IndexRunStatus::Running,
+            requested_at_unix_ms: 1000,
+            started_at_unix_ms: Some(1001),
+            finished_at_unix_ms: None,
+            idempotency_key: None,
+            request_hash: None,
+            checkpoint_cursor: Some("src/main.rs".to_string()),
+            error_summary: None,
+            not_yet_supported: None,
+            prior_run_id: None,
+            description: None,
+            recovery_state: Some(RunRecoveryState {
+                state: RecoveryStateKind::Resumed,
+                rejection_reason: None,
+                next_action: None,
+                detail: None,
+                updated_at_unix_ms: 1200,
+            }),
+        };
+        let outcome = ResumeRunOutcome::Resumed {
+            run,
+            checkpoint: Checkpoint {
+                run_id: "run-1".to_string(),
+                cursor: "src/main.rs".to_string(),
+                files_processed: 1,
+                symbols_written: 2,
+                created_at_unix_ms: 1100,
+            },
+            durable_files_skipped: 1,
+        };
+        let json = serde_json::to_string(&outcome).unwrap();
+        let deserialized: ResumeRunOutcome = serde_json::from_str(&json).unwrap();
+        assert_eq!(outcome, deserialized);
     }
 
     #[test]

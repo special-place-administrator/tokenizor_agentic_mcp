@@ -9,7 +9,7 @@ const DEFAULT_SPACETIMEDB_CLI: &str = "spacetimedb";
 const DEFAULT_SPACETIMEDB_ENDPOINT: &str = "http://127.0.0.1:3007";
 const DEFAULT_SPACETIMEDB_DATABASE: &str = "tokenizor";
 const DEFAULT_SPACETIMEDB_MODULE_PATH: &str = "spacetime/tokenizor";
-pub const SUPPORTED_SPACETIMEDB_SCHEMA_VERSION: u32 = 1;
+pub const SUPPORTED_SPACETIMEDB_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerConfig {
@@ -73,7 +73,7 @@ impl Default for ServerConfig {
                 root_dir: PathBuf::from(DEFAULT_BLOB_ROOT),
             },
             control_plane: ControlPlaneConfig {
-                backend: ControlPlaneBackend::SpacetimeDb,
+                backend: ControlPlaneBackend::LocalRegistry,
                 spacetimedb: SpacetimeDbConfig {
                     cli_path: DEFAULT_SPACETIMEDB_CLI.to_string(),
                     endpoint: DEFAULT_SPACETIMEDB_ENDPOINT.to_string(),
@@ -106,6 +106,7 @@ pub struct ControlPlaneConfig {
 #[serde(rename_all = "snake_case")]
 pub enum ControlPlaneBackend {
     InMemory,
+    LocalRegistry,
     SpacetimeDb,
 }
 
@@ -113,6 +114,7 @@ impl ControlPlaneBackend {
     pub fn parse(value: &str) -> Result<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "in_memory" | "in-memory" => Ok(Self::InMemory),
+            "local_registry" | "local-registry" | "registry" => Ok(Self::LocalRegistry),
             "spacetimedb" => Ok(Self::SpacetimeDb),
             other => Err(TokenizorError::Config(format!(
                 "unsupported control plane backend `{other}`"
@@ -123,6 +125,7 @@ impl ControlPlaneBackend {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::InMemory => "in_memory",
+            Self::LocalRegistry => "local_registry",
             Self::SpacetimeDb => "spacetimedb",
         }
     }

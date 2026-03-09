@@ -9,13 +9,14 @@ use std::sync::Arc;
 use crate::config::ServerConfig;
 use std::path::PathBuf;
 
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::domain::{
     ActiveWorkspaceContext, BatchRetrievalRequest, ComponentHealth, DeploymentReport,
     FileOutlineResponse, GetSymbolsResponse, HealthReport, IndexRun, IndexRunMode,
     InitializationReport, InvalidationResult, MigrationReport, RegistryView, RepoOutlineResponse,
-    ResultEnvelope, SearchResultItem, SymbolKind, SymbolSearchResponse, VerifiedSourceResponse,
+    ResultEnvelope, ResumeRunOutcome, SearchResultItem, SymbolKind, SymbolSearchResponse,
+    VerifiedSourceResponse,
 };
 use crate::error::{Result, TokenizorError};
 use crate::indexing::pipeline::PipelineProgress;
@@ -27,6 +28,7 @@ use self::deployment::DeploymentService;
 use self::health::HealthService;
 use self::init::InitializationService;
 pub use self::run_manager::RunManager;
+use self::run_manager::StartupRecoveryReport;
 
 #[derive(Clone)]
 pub struct ApplicationContext {
@@ -34,27 +36,46 @@ pub struct ApplicationContext {
     blob_store: Arc<dyn BlobStore>,
     control_plane: Arc<dyn ControlPlane>,
     run_manager: Arc<RunManager>,
+    startup_recovery: StartupRecoveryReport,
 }
 
 impl ApplicationContext {
     pub fn from_config(config: ServerConfig) -> Result<Self> {
         let blob_store: Arc<dyn BlobStore> =
             Arc::new(LocalCasBlobStore::new(config.blob_store.clone()));
-        let control_plane = build_control_plane(&config.control_plane)?;
-
         let registry_path = config
             .blob_store
             .root_dir
             .join("control-plane")
             .join("project-workspace-registry.json");
-        let persistence = RegistryPersistence::new(registry_path);
-        let run_manager = Arc::new(RunManager::new(persistence));
+        let registry = Arc::new(RegistryPersistence::new(registry_path.clone()));
+        let control_plane = build_control_plane(&config.control_plane, Arc::clone(&registry))?;
+        let run_manager = Arc::new(RunManager::with_services(
+            Arc::clone(&control_plane),
+            registry,
+            Some(registry_path),
+            Some(config.blob_store.root_dir.clone()),
+        ));
 
-        let transitioned = run_manager.startup_sweep()?;
-        if !transitioned.is_empty() {
-            info!(
-                count = transitioned.len(),
-                "startup sweep transitioned stale runs to Interrupted"
+        let startup_recovery = run_manager.startup_sweep()?;
+        info!(
+            transitioned_runs = startup_recovery.transitioned_run_ids.len(),
+            interrupted_runs = startup_recovery.interrupted_run_count(),
+            aborted_runs = startup_recovery.aborted_run_count(),
+            cleaned_temp_artifacts = startup_recovery.cleaned_temp_artifacts.len(),
+            blocking_findings = startup_recovery.blocking_findings.len(),
+            guidance = ?startup_recovery.operator_guidance,
+            "startup sweep completed"
+        );
+        if startup_recovery.has_blocking_findings() {
+            warn!(
+                summary = %startup_recovery
+                    .blocking_findings
+                    .iter()
+                    .map(|finding| format!("{}: {}", finding.name, finding.detail))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                "startup sweep detected blocking recovery findings"
             );
         }
 
@@ -63,6 +84,7 @@ impl ApplicationContext {
             blob_store,
             control_plane,
             run_manager,
+            startup_recovery,
         })
     }
 
@@ -75,21 +97,23 @@ impl ApplicationContext {
     }
 
     pub fn deployment_report(&self) -> Result<DeploymentReport> {
-        DeploymentService::new(
+        let base = DeploymentService::new(
             &self.config,
             self.blob_store.as_ref(),
             self.control_plane.as_ref(),
         )
-        .report()
+        .report()?;
+        Ok(self.merge_startup_recovery_checks(base))
     }
 
     pub fn bootstrap_report(&self) -> Result<DeploymentReport> {
-        DeploymentService::new(
+        let base = DeploymentService::new(
             &self.config,
             self.blob_store.as_ref(),
             self.control_plane.as_ref(),
         )
-        .bootstrap()
+        .bootstrap()?;
+        Ok(self.merge_startup_recovery_checks(base))
     }
 
     pub fn initialize_repository(
@@ -135,6 +159,11 @@ impl ApplicationContext {
         .migrate_registry(source_path, target_path)
     }
 
+    pub fn migrate_control_plane_mutable_state(&self) -> Result<DeploymentReport> {
+        self.control_plane.migrate_mutable_state_from_registry()?;
+        self.deployment_report()
+    }
+
     pub fn resolve_active_context(
         &self,
         target_path: Option<PathBuf>,
@@ -175,6 +204,11 @@ impl ApplicationContext {
             repo_root,
             self.blob_store.clone(),
         )
+    }
+
+    pub fn resume_index_run(&self, run_id: &str, repo_root: PathBuf) -> Result<ResumeRunOutcome> {
+        self.run_manager
+            .resume_run(run_id, repo_root, self.blob_store.clone())
     }
 
     pub fn invalidate_repository(
@@ -285,6 +319,12 @@ impl ApplicationContext {
 
         Ok(report)
     }
+
+    fn merge_startup_recovery_checks(&self, base: DeploymentReport) -> DeploymentReport {
+        let mut checks = base.checks;
+        checks.extend(self.startup_recovery.readiness_checks());
+        DeploymentReport::new(base.control_plane_backend, base.blob_root, checks)
+    }
 }
 
 #[cfg(test)]
@@ -295,11 +335,18 @@ mod tests {
 
     use crate::config::ServerConfig;
     use crate::domain::{
-        Checkpoint, ComponentHealth, HealthIssueCategory, IdempotencyRecord, IndexRun, Repository,
+        Checkpoint, ComponentHealth, DiscoveryManifest, FileRecord, HealthIssueCategory,
+        IdempotencyRecord, IndexRun, IndexRunStatus, Repository, RepositoryStatus,
     };
     use crate::error::{Result, TokenizorError};
-    use crate::storage::{BlobStore, ControlPlane, RegistryPersistence, StoredBlob};
+    use crate::storage::{
+        BlobStore, ControlPlane, InMemoryControlPlane, RegistryPersistence, StoredBlob,
+    };
 
+    use super::run_manager::{
+        StartupCleanupSurface, StartupRecoveredTempArtifact, StartupRecoveryFinding,
+        StartupRecoveryReport,
+    };
     use super::{ApplicationContext, RunManager};
 
     struct FakeBlobStore {
@@ -351,6 +398,7 @@ mod tests {
     }
 
     struct FakeControlPlane {
+        backing: InMemoryControlPlane,
         deployment_checks: Vec<ComponentHealth>,
         deployment_check_calls: AtomicUsize,
         health_check_calls: AtomicUsize,
@@ -359,6 +407,7 @@ mod tests {
     impl FakeControlPlane {
         fn new(deployment_checks: Vec<ComponentHealth>) -> Self {
             Self {
+                backing: InMemoryControlPlane::default(),
                 deployment_checks,
                 deployment_check_calls: AtomicUsize::new(0),
                 health_check_calls: AtomicUsize::new(0),
@@ -383,20 +432,124 @@ mod tests {
             Ok(self.deployment_checks.clone())
         }
 
-        fn upsert_repository(&self, _repository: Repository) -> Result<()> {
-            unreachable!("writes are not exercised by application tests")
+        fn find_run(&self, run_id: &str) -> Result<Option<IndexRun>> {
+            self.backing.find_run(run_id)
         }
 
-        fn create_index_run(&self, _run: IndexRun) -> Result<()> {
-            unreachable!("writes are not exercised by application tests")
+        fn find_runs_by_status(&self, status: &IndexRunStatus) -> Result<Vec<IndexRun>> {
+            self.backing.find_runs_by_status(status)
         }
 
-        fn write_checkpoint(&self, _checkpoint: Checkpoint) -> Result<()> {
-            unreachable!("writes are not exercised by application tests")
+        fn list_runs(&self) -> Result<Vec<IndexRun>> {
+            self.backing.list_runs()
         }
 
-        fn put_idempotency_record(&self, _record: IdempotencyRecord) -> Result<()> {
-            unreachable!("writes are not exercised by application tests")
+        fn get_runs_by_repo(&self, repo_id: &str) -> Result<Vec<IndexRun>> {
+            self.backing.get_runs_by_repo(repo_id)
+        }
+
+        fn get_latest_completed_run(&self, repo_id: &str) -> Result<Option<IndexRun>> {
+            self.backing.get_latest_completed_run(repo_id)
+        }
+
+        fn get_repository(&self, repo_id: &str) -> Result<Option<Repository>> {
+            self.backing.get_repository(repo_id)
+        }
+
+        fn get_file_records(&self, run_id: &str) -> Result<Vec<FileRecord>> {
+            self.backing.get_file_records(run_id)
+        }
+
+        fn get_latest_checkpoint(&self, run_id: &str) -> Result<Option<Checkpoint>> {
+            self.backing.get_latest_checkpoint(run_id)
+        }
+
+        fn find_idempotency_record(&self, key: &str) -> Result<Option<IdempotencyRecord>> {
+            self.backing.find_idempotency_record(key)
+        }
+
+        fn get_discovery_manifest(&self, run_id: &str) -> Result<Option<DiscoveryManifest>> {
+            self.backing.get_discovery_manifest(run_id)
+        }
+
+        fn save_run(&self, run: &IndexRun) -> Result<()> {
+            self.backing.save_run(run)
+        }
+
+        fn update_run_status(
+            &self,
+            run_id: &str,
+            status: IndexRunStatus,
+            error_summary: Option<String>,
+        ) -> Result<()> {
+            self.backing
+                .update_run_status(run_id, status, error_summary)
+        }
+
+        fn transition_to_running(&self, run_id: &str, started_at_unix_ms: u64) -> Result<()> {
+            self.backing
+                .transition_to_running(run_id, started_at_unix_ms)
+        }
+
+        fn update_run_status_with_finish(
+            &self,
+            run_id: &str,
+            status: IndexRunStatus,
+            error_summary: Option<String>,
+            finished_at_unix_ms: u64,
+            not_yet_supported: Option<std::collections::BTreeMap<crate::domain::LanguageId, u64>>,
+        ) -> Result<()> {
+            self.backing.update_run_status_with_finish(
+                run_id,
+                status,
+                error_summary,
+                finished_at_unix_ms,
+                not_yet_supported,
+            )
+        }
+
+        fn cancel_run_if_active(&self, run_id: &str, finished_at_unix_ms: u64) -> Result<bool> {
+            self.backing
+                .cancel_run_if_active(run_id, finished_at_unix_ms)
+        }
+
+        fn save_file_records(&self, run_id: &str, records: &[FileRecord]) -> Result<()> {
+            self.backing.save_file_records(run_id, records)
+        }
+
+        fn save_checkpoint(&self, checkpoint: &Checkpoint) -> Result<()> {
+            self.backing.save_checkpoint(checkpoint)
+        }
+
+        fn save_repository(&self, repository: &Repository) -> Result<()> {
+            self.backing.save_repository(repository)
+        }
+
+        fn update_repository_status(
+            &self,
+            repo_id: &str,
+            status: RepositoryStatus,
+            invalidated_at_unix_ms: Option<u64>,
+            invalidation_reason: Option<String>,
+            quarantined_at_unix_ms: Option<u64>,
+            quarantine_reason: Option<String>,
+        ) -> Result<()> {
+            self.backing.update_repository_status(
+                repo_id,
+                status,
+                invalidated_at_unix_ms,
+                invalidation_reason,
+                quarantined_at_unix_ms,
+                quarantine_reason,
+            )
+        }
+
+        fn save_idempotency_record(&self, record: &IdempotencyRecord) -> Result<()> {
+            self.backing.save_idempotency_record(record)
+        }
+
+        fn save_discovery_manifest(&self, manifest: &DiscoveryManifest) -> Result<()> {
+            self.backing.save_discovery_manifest(manifest)
         }
     }
 
@@ -428,6 +581,7 @@ mod tests {
             blob_store: blob_store.clone(),
             control_plane: control_plane.clone(),
             run_manager,
+            startup_recovery: StartupRecoveryReport::default(),
         };
 
         (application, blob_store, control_plane)
@@ -521,5 +675,68 @@ mod tests {
             1
         );
         assert_eq!(control_plane.health_check_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn deployment_report_includes_startup_recovery_warnings() {
+        let config = ServerConfig::default();
+        let (mut application, _blob_store, _control_plane) =
+            application_with_checks(config, vec![]);
+        application.startup_recovery = StartupRecoveryReport {
+            transitioned_run_ids: vec!["run-1".into()],
+            transitioned_runs: vec![crate::application::run_manager::StartupRecoveredRunTransition {
+                run_id: "run-1".into(),
+                repo_id: "repo-1".into(),
+                from_status: crate::domain::IndexRunStatus::Running,
+                to_status: crate::domain::IndexRunStatus::Interrupted,
+            }],
+            cleaned_temp_artifacts: vec![StartupRecoveredTempArtifact {
+                surface: StartupCleanupSurface::RegistryTemp,
+                path: PathBuf::from(
+                    ".tokenizor/control-plane/.project-workspace-registry.json.1.tmp",
+                ),
+            }],
+            blocking_findings: Vec::new(),
+            operator_guidance: vec![
+                "Inspect interrupted runs and choose the next safe action: reindex or repair before trusting prior results.".into(),
+            ],
+        };
+
+        let report = application.deployment_report().unwrap();
+
+        assert!(report.is_ready());
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.category == HealthIssueCategory::Recovery)
+        );
+    }
+
+    #[test]
+    fn ensure_runtime_ready_blocks_on_startup_recovery_errors() {
+        let config = ServerConfig::default();
+        let (mut application, _blob_store, _control_plane) =
+            application_with_checks(config, vec![]);
+        application.startup_recovery = StartupRecoveryReport {
+            transitioned_run_ids: Vec::new(),
+            transitioned_runs: Vec::new(),
+            cleaned_temp_artifacts: Vec::new(),
+            blocking_findings: vec![StartupRecoveryFinding {
+                name: "startup_recovery_registry_temp".into(),
+                detail: "registry temp artifact could not be cleaned safely".into(),
+                remediation: "Repair or migrate the registry state, or wait for the conflicting process to release the artifact, then restart Tokenizor.".into(),
+            }],
+            operator_guidance: vec![
+                "Repair or migrate the registry state, or wait for the conflicting process to release the artifact, then restart Tokenizor.".into(),
+            ],
+        };
+
+        let error = application
+            .ensure_runtime_ready()
+            .expect_err("runtime readiness should fail on startup recovery blockers");
+
+        assert!(error.to_string().contains("startup_recovery_registry_temp"));
+        assert!(error.to_string().contains("Repair or migrate"));
     }
 }

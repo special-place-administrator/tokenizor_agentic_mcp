@@ -24,11 +24,53 @@ impl LocalCasBlobStore {
         let root_dir = config.root_dir;
         Self {
             blobs_dir: root_dir.join("blobs").join("sha256"),
-            temp_dir: root_dir.join("temp"),
+            temp_dir: Self::temp_dir_from_root(&root_dir),
             quarantine_dir: root_dir.join("quarantine"),
             derived_dir: root_dir.join("derived"),
             root_dir,
         }
+    }
+
+    pub(crate) fn temp_dir_from_root(root_dir: &Path) -> PathBuf {
+        root_dir.join("temp")
+    }
+
+    pub(crate) fn is_owned_temp_blob_path(root_dir: &Path, candidate: &Path) -> bool {
+        let temp_dir = Self::temp_dir_from_root(root_dir);
+        if candidate.parent() != Some(temp_dir.as_path()) {
+            return false;
+        }
+
+        let Some(file_name) = candidate.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+
+        let mut parts = file_name.split('.');
+        let Some(blob_id) = parts.next() else {
+            return false;
+        };
+        let Some(timestamp) = parts.next() else {
+            return false;
+        };
+        let Some(pid) = parts.next() else {
+            return false;
+        };
+        let Some(extension) = parts.next() else {
+            return false;
+        };
+
+        parts.next().is_none()
+            && extension == "tmp"
+            && blob_id.len() == 64
+            && blob_id
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+            && !timestamp.is_empty()
+            && timestamp
+                .chars()
+                .all(|character| character.is_ascii_digit())
+            && !pid.is_empty()
+            && pid.chars().all(|character| character.is_ascii_digit())
     }
 
     fn create_layout(&self) -> Result<()> {
@@ -412,5 +454,31 @@ mod tests {
             .read_bytes(&stored.blob_id)
             .expect("empty blob read should succeed");
         assert!(round_trip.is_empty());
+    }
+
+    #[test]
+    fn owned_temp_blob_path_matches_only_tokenizor_temp_pattern() {
+        let root = PathBuf::from(".tokenizor");
+        let owned = root
+            .join("temp")
+            .join(format!("{}.1234567890.42.tmp", "a".repeat(64)));
+        let wrong_dir = root
+            .join("quarantine")
+            .join(format!("{}.1234567890.42.tmp", "a".repeat(64)));
+        let wrong_name = root.join("temp").join("not-a-tokenizor-temp.tmp");
+        let nested = root
+            .join("temp")
+            .join("nested")
+            .join(format!("{}.1234567890.42.tmp", "a".repeat(64)));
+
+        assert!(LocalCasBlobStore::is_owned_temp_blob_path(&root, &owned));
+        assert!(!LocalCasBlobStore::is_owned_temp_blob_path(
+            &root, &wrong_dir
+        ));
+        assert!(!LocalCasBlobStore::is_owned_temp_blob_path(
+            &root,
+            &wrong_name
+        ));
+        assert!(!LocalCasBlobStore::is_owned_temp_blob_path(&root, &nested));
     }
 }

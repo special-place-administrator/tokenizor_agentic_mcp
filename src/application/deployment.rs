@@ -57,15 +57,17 @@ impl<'a> DeploymentService<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::config::ServerConfig;
     use crate::domain::{
-        Checkpoint, ComponentHealth, HealthIssueCategory, IdempotencyRecord, IndexRun, Repository,
+        Checkpoint, ComponentHealth, DiscoveryManifest, FileRecord, HealthIssueCategory,
+        IdempotencyRecord, IndexRun, IndexRunStatus, Repository, RepositoryStatus,
     };
     use crate::error::Result;
-    use crate::storage::{BlobStore, ControlPlane, StoredBlob};
+    use crate::storage::{BlobStore, ControlPlane, InMemoryControlPlane, StoredBlob};
 
     use super::DeploymentService;
 
@@ -122,6 +124,7 @@ mod tests {
     }
 
     struct FakeControlPlane {
+        backing: InMemoryControlPlane,
         deployment_check_calls: AtomicUsize,
         write_calls: AtomicUsize,
     }
@@ -129,6 +132,7 @@ mod tests {
     impl Default for FakeControlPlane {
         fn default() -> Self {
             Self {
+                backing: InMemoryControlPlane::default(),
                 deployment_check_calls: AtomicUsize::new(0),
                 write_calls: AtomicUsize::new(0),
             }
@@ -153,24 +157,135 @@ mod tests {
             )])
         }
 
-        fn upsert_repository(&self, _repository: Repository) -> Result<()> {
-            self.write_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+        fn find_run(&self, run_id: &str) -> Result<Option<IndexRun>> {
+            self.backing.find_run(run_id)
         }
 
-        fn create_index_run(&self, _run: IndexRun) -> Result<()> {
-            self.write_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+        fn find_runs_by_status(&self, status: &IndexRunStatus) -> Result<Vec<IndexRun>> {
+            self.backing.find_runs_by_status(status)
         }
 
-        fn write_checkpoint(&self, _checkpoint: Checkpoint) -> Result<()> {
-            self.write_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+        fn list_runs(&self) -> Result<Vec<IndexRun>> {
+            self.backing.list_runs()
         }
 
-        fn put_idempotency_record(&self, _record: IdempotencyRecord) -> Result<()> {
+        fn get_runs_by_repo(&self, repo_id: &str) -> Result<Vec<IndexRun>> {
+            self.backing.get_runs_by_repo(repo_id)
+        }
+
+        fn get_latest_completed_run(&self, repo_id: &str) -> Result<Option<IndexRun>> {
+            self.backing.get_latest_completed_run(repo_id)
+        }
+
+        fn get_repository(&self, repo_id: &str) -> Result<Option<Repository>> {
+            self.backing.get_repository(repo_id)
+        }
+
+        fn get_file_records(&self, run_id: &str) -> Result<Vec<FileRecord>> {
+            self.backing.get_file_records(run_id)
+        }
+
+        fn get_latest_checkpoint(&self, run_id: &str) -> Result<Option<Checkpoint>> {
+            self.backing.get_latest_checkpoint(run_id)
+        }
+
+        fn find_idempotency_record(&self, key: &str) -> Result<Option<IdempotencyRecord>> {
+            self.backing.find_idempotency_record(key)
+        }
+
+        fn get_discovery_manifest(&self, run_id: &str) -> Result<Option<DiscoveryManifest>> {
+            self.backing.get_discovery_manifest(run_id)
+        }
+
+        fn save_run(&self, run: &IndexRun) -> Result<()> {
             self.write_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+            self.backing.save_run(run)
+        }
+
+        fn update_run_status(
+            &self,
+            run_id: &str,
+            status: IndexRunStatus,
+            error_summary: Option<String>,
+        ) -> Result<()> {
+            self.write_calls.fetch_add(1, Ordering::SeqCst);
+            self.backing
+                .update_run_status(run_id, status, error_summary)
+        }
+
+        fn transition_to_running(&self, run_id: &str, started_at_unix_ms: u64) -> Result<()> {
+            self.write_calls.fetch_add(1, Ordering::SeqCst);
+            self.backing
+                .transition_to_running(run_id, started_at_unix_ms)
+        }
+
+        fn update_run_status_with_finish(
+            &self,
+            run_id: &str,
+            status: IndexRunStatus,
+            error_summary: Option<String>,
+            finished_at_unix_ms: u64,
+            not_yet_supported: Option<BTreeMap<crate::domain::LanguageId, u64>>,
+        ) -> Result<()> {
+            self.write_calls.fetch_add(1, Ordering::SeqCst);
+            self.backing.update_run_status_with_finish(
+                run_id,
+                status,
+                error_summary,
+                finished_at_unix_ms,
+                not_yet_supported,
+            )
+        }
+
+        fn cancel_run_if_active(&self, run_id: &str, finished_at_unix_ms: u64) -> Result<bool> {
+            self.write_calls.fetch_add(1, Ordering::SeqCst);
+            self.backing
+                .cancel_run_if_active(run_id, finished_at_unix_ms)
+        }
+
+        fn save_file_records(&self, run_id: &str, records: &[FileRecord]) -> Result<()> {
+            self.write_calls.fetch_add(1, Ordering::SeqCst);
+            self.backing.save_file_records(run_id, records)
+        }
+
+        fn save_checkpoint(&self, checkpoint: &Checkpoint) -> Result<()> {
+            self.write_calls.fetch_add(1, Ordering::SeqCst);
+            self.backing.save_checkpoint(checkpoint)
+        }
+
+        fn save_repository(&self, repository: &Repository) -> Result<()> {
+            self.write_calls.fetch_add(1, Ordering::SeqCst);
+            self.backing.save_repository(repository)
+        }
+
+        fn update_repository_status(
+            &self,
+            repo_id: &str,
+            status: RepositoryStatus,
+            invalidated_at_unix_ms: Option<u64>,
+            invalidation_reason: Option<String>,
+            quarantined_at_unix_ms: Option<u64>,
+            quarantine_reason: Option<String>,
+        ) -> Result<()> {
+            self.write_calls.fetch_add(1, Ordering::SeqCst);
+            self.backing.update_repository_status(
+                repo_id,
+                status,
+                invalidated_at_unix_ms,
+                invalidation_reason,
+                quarantined_at_unix_ms,
+                quarantine_reason,
+            )
+        }
+
+        fn save_idempotency_record(&self, record: &IdempotencyRecord) -> Result<()> {
+            self.write_calls.fetch_add(1, Ordering::SeqCst);
+            self.backing.save_idempotency_record(record)
+        }
+
+        fn save_discovery_manifest(&self, manifest: &DiscoveryManifest) -> Result<()> {
+            self.write_calls.fetch_add(1, Ordering::SeqCst);
+            self.backing.save_discovery_manifest(manifest)
         }
     }
 

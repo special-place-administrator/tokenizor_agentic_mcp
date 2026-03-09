@@ -8,9 +8,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::domain::{
-    FileOutcome, FileProcessingResult, FileRecord, IndexRunStatus, LanguageId,
-    PersistedFileOutcome, RunPhase, SupportTier,
+    DiscoveryManifest, FileOutcome, FileProcessingResult, FileRecord, IndexRunStatus, LanguageId,
+    PersistedFileOutcome, RunPhase, SupportTier, unix_timestamp_ms,
 };
+use crate::error::{Result, TokenizorError};
 use crate::indexing::{commit, discovery};
 use crate::parsing;
 use crate::storage::BlobStore;
@@ -51,6 +52,16 @@ pub struct PipelineResult {
     pub error_summary: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct PipelineResumeState {
+    pub cursor: String,
+    pub total_files: u64,
+    pub files_processed: u64,
+    pub symbols_extracted: u64,
+    pub files_failed: u64,
+    pub manifest_paths: Vec<String>,
+}
+
 struct CheckpointState {
     completed_indices: Vec<bool>,
     sorted_paths: Vec<String>,
@@ -70,11 +81,26 @@ impl CheckpointTracker {
         }
     }
 
+    #[cfg(test)]
     fn initialize(&self, paths: Vec<String>) {
+        self.initialize_with_completed_prefix(paths, None);
+    }
+
+    fn initialize_with_completed_prefix(
+        &self,
+        paths: Vec<String>,
+        completed_through: Option<usize>,
+    ) {
         let mut state = self.state.lock().unwrap();
         let len = paths.len();
         state.sorted_paths = paths;
         state.completed_indices = vec![false; len];
+        if let Some(last_completed) = completed_through {
+            let capped = last_completed.min(len.saturating_sub(1));
+            for index in 0..=capped {
+                state.completed_indices[index] = true;
+            }
+        }
     }
 
     fn mark_complete(&self, index: usize) {
@@ -111,8 +137,12 @@ pub struct IndexingPipeline {
     cas: Option<Arc<dyn BlobStore>>,
     cancellation_token: CancellationToken,
     checkpoint_tracker: Arc<CheckpointTracker>,
+    discovery_manifest_callback:
+        Option<Box<dyn Fn(&DiscoveryManifest) -> Result<()> + Send + Sync>>,
+    durable_record_callback: Option<Box<dyn Fn(&FileRecord) -> Result<()> + Send + Sync>>,
     checkpoint_callback: Option<Box<dyn Fn() + Send + Sync>>,
     checkpoint_interval: u64,
+    resume_from: Option<PipelineResumeState>,
 }
 
 impl IndexingPipeline {
@@ -128,8 +158,11 @@ impl IndexingPipeline {
             cas: None,
             cancellation_token,
             checkpoint_tracker: Arc::new(CheckpointTracker::new()),
+            discovery_manifest_callback: None,
+            durable_record_callback: None,
             checkpoint_callback: None,
             checkpoint_interval: 100,
+            resume_from: None,
         }
     }
 
@@ -159,12 +192,69 @@ impl IndexingPipeline {
         self
     }
 
+    pub fn with_durable_record_callback(
+        mut self,
+        callback: Box<dyn Fn(&FileRecord) -> Result<()> + Send + Sync>,
+    ) -> Self {
+        self.durable_record_callback = Some(callback);
+        self
+    }
+
+    pub fn with_discovery_manifest_callback(
+        mut self,
+        callback: Box<dyn Fn(&DiscoveryManifest) -> Result<()> + Send + Sync>,
+    ) -> Self {
+        self.discovery_manifest_callback = Some(callback);
+        self
+    }
+
+    pub fn with_resume_state(mut self, resume_from: PipelineResumeState) -> Self {
+        self.progress
+            .total_files
+            .store(resume_from.total_files, Ordering::Relaxed);
+        self.progress
+            .files_processed
+            .store(resume_from.files_processed, Ordering::Relaxed);
+        self.progress
+            .symbols_extracted
+            .store(resume_from.symbols_extracted, Ordering::Relaxed);
+        self.progress
+            .files_failed
+            .store(resume_from.files_failed, Ordering::Relaxed);
+        self.resume_from = Some(resume_from);
+        self
+    }
+
     pub fn progress(&self) -> Arc<PipelineProgress> {
         self.progress.clone()
     }
 
     pub fn checkpoint_tracker(&self) -> Arc<CheckpointTracker> {
         self.checkpoint_tracker.clone()
+    }
+
+    pub fn prepare_indexable_files(
+        files: Vec<discovery::DiscoveredFile>,
+    ) -> (Vec<discovery::DiscoveredFile>, BTreeMap<LanguageId, u64>) {
+        let (mut indexable, not_yet_supported_files): (Vec<_>, Vec<_>) = files
+            .into_iter()
+            .partition(|f| f.language.support_tier() != SupportTier::Unsupported);
+
+        let mut not_yet_supported = BTreeMap::new();
+        for file in &not_yet_supported_files {
+            *not_yet_supported
+                .entry(file.language.clone())
+                .or_insert(0u64) += 1;
+        }
+
+        indexable.sort_by(|a, b| {
+            a.relative_path
+                .to_lowercase()
+                .cmp(&b.relative_path.to_lowercase())
+                .then_with(|| a.relative_path.cmp(&b.relative_path))
+        });
+
+        (indexable, not_yet_supported)
     }
 
     pub async fn execute(self) -> PipelineResult {
@@ -182,17 +272,39 @@ impl IndexingPipeline {
             };
         }
 
-        let files = match discovery::discover_files(&self.repo_root) {
-            Ok(files) => files,
-            Err(e) => {
-                error!(run_id = %self.run_id, error = %e, "file discovery failed");
-                return PipelineResult {
-                    status: IndexRunStatus::Failed,
-                    results: vec![],
-                    file_records: vec![],
-                    not_yet_supported: BTreeMap::new(),
-                    error_summary: Some(format!("discovery failed: {e}")),
-                };
+        let files = if let Some(resume) = &self.resume_from {
+            match manifest_files_for_resume(&self.repo_root, &resume.manifest_paths) {
+                Ok(files) => files,
+                Err(error) => {
+                    error!(
+                        run_id = %self.run_id,
+                        error = %error,
+                        "failed to materialize persisted discovery manifest"
+                    );
+                    return PipelineResult {
+                        status: IndexRunStatus::Failed,
+                        results: vec![],
+                        file_records: vec![],
+                        not_yet_supported: BTreeMap::new(),
+                        error_summary: Some(format!(
+                            "persisted discovery manifest could not be materialized: {error}"
+                        )),
+                    };
+                }
+            }
+        } else {
+            match discovery::discover_files(&self.repo_root) {
+                Ok(files) => files,
+                Err(e) => {
+                    error!(run_id = %self.run_id, error = %e, "file discovery failed");
+                    return PipelineResult {
+                        status: IndexRunStatus::Failed,
+                        results: vec![],
+                        file_records: vec![],
+                        not_yet_supported: BTreeMap::new(),
+                        error_summary: Some(format!("discovery failed: {e}")),
+                    };
+                }
             }
         };
 
@@ -200,14 +312,7 @@ impl IndexingPipeline {
     }
 
     async fn process_discovered(mut self, files: Vec<discovery::DiscoveredFile>) -> PipelineResult {
-        let (indexable, not_yet_supported_files): (Vec<_>, Vec<_>) = files
-            .into_iter()
-            .partition(|f| f.language.support_tier() != SupportTier::Unsupported);
-
-        let mut not_yet_supported = BTreeMap::new();
-        for f in &not_yet_supported_files {
-            *not_yet_supported.entry(f.language.clone()).or_insert(0u64) += 1;
-        }
+        let (indexable, not_yet_supported) = Self::prepare_indexable_files(files);
         if !not_yet_supported.is_empty() {
             let total_unsupported: u64 = not_yet_supported.values().sum();
             info!(
@@ -220,6 +325,29 @@ impl IndexingPipeline {
         }
 
         let total = indexable.len() as u64;
+        if self.resume_from.is_none() {
+            let manifest = DiscoveryManifest {
+                run_id: self.run_id.clone(),
+                discovered_at_unix_ms: unix_timestamp_ms(),
+                relative_paths: indexable
+                    .iter()
+                    .map(|file| file.relative_path.clone())
+                    .collect(),
+            };
+            if let Some(callback) = &self.discovery_manifest_callback {
+                if let Err(error) = callback(&manifest) {
+                    return PipelineResult {
+                        status: IndexRunStatus::Failed,
+                        results: vec![],
+                        file_records: vec![],
+                        not_yet_supported,
+                        error_summary: Some(format!(
+                            "failed to persist discovery manifest: {error}"
+                        )),
+                    };
+                }
+            }
+        }
         self.progress.total_files.store(total, Ordering::Relaxed);
         self.progress.set_phase(RunPhase::Processing);
         info!(run_id = %self.run_id, total_files = total, "discovery complete");
@@ -234,16 +362,40 @@ impl IndexingPipeline {
             };
         }
 
-        let mut files = indexable;
-        files.sort_by(|a, b| {
-            a.relative_path
-                .to_lowercase()
-                .cmp(&b.relative_path.to_lowercase())
-        });
-
-        // Initialize checkpoint tracker with sorted file paths
+        let files = indexable;
         let sorted_paths: Vec<String> = files.iter().map(|f| f.relative_path.clone()).collect();
-        self.checkpoint_tracker.initialize(sorted_paths);
+        let resume_boundary = self
+            .resume_from
+            .as_ref()
+            .and_then(|resume| sorted_paths.iter().position(|path| path == &resume.cursor));
+        if let Some(resume) = &self.resume_from {
+            if resume_boundary.is_none() {
+                return PipelineResult {
+                    status: IndexRunStatus::Failed,
+                    results: vec![],
+                    file_records: vec![],
+                    not_yet_supported,
+                    error_summary: Some(format!(
+                        "resume cursor `{}` not found in deterministic discovery order",
+                        resume.cursor
+                    )),
+                };
+            }
+        }
+        self.checkpoint_tracker
+            .initialize_with_completed_prefix(sorted_paths, resume_boundary);
+
+        if let Some(resume) = &self.resume_from {
+            self.progress
+                .files_processed
+                .store(resume.files_processed, Ordering::Relaxed);
+            self.progress
+                .symbols_extracted
+                .store(resume.symbols_extracted, Ordering::Relaxed);
+            self.progress
+                .files_failed
+                .store(resume.files_failed, Ordering::Relaxed);
+        }
 
         let semaphore = Arc::new(Semaphore::new(self.concurrency_cap));
         let progress = self.progress.clone();
@@ -252,13 +404,16 @@ impl IndexingPipeline {
         let threshold = self.circuit_breaker_threshold as u64;
         let cas = self.cas.clone();
         let checkpoint_tracker = self.checkpoint_tracker.clone();
+        let durable_record_callback: Option<Arc<dyn Fn(&FileRecord) -> Result<()> + Send + Sync>> =
+            self.durable_record_callback.take().map(Arc::from);
         let checkpoint_callback: Option<Arc<dyn Fn() + Send + Sync>> =
             self.checkpoint_callback.take().map(|cb| Arc::from(cb));
         let checkpoint_interval = self.checkpoint_interval;
+        let spawn_from_index = resume_boundary.map_or(0usize, |index| index.saturating_add(1));
 
-        let mut handles = Vec::with_capacity(files.len());
+        let mut handles = Vec::with_capacity(files.len().saturating_sub(spawn_from_index));
 
-        for (sorted_index, file) in files.into_iter().enumerate() {
+        for (sorted_index, file) in files.into_iter().enumerate().skip(spawn_from_index) {
             // M3: Stop spawning tasks once the circuit breaker has tripped
             if circuit_broken.load(Ordering::Relaxed) {
                 break;
@@ -278,6 +433,7 @@ impl IndexingPipeline {
             let repo_id = self.repo_id.clone();
             let cas = cas.clone();
             let tracker = checkpoint_tracker.clone();
+            let durable_record_callback = durable_record_callback.clone();
             let cb = checkpoint_callback.clone();
             let cb_interval = checkpoint_interval;
 
@@ -356,7 +512,23 @@ impl IndexingPipeline {
                     None
                 };
 
-                // Helper: record successful processing, track checkpoint, invoke callback
+                if let (Some(record), Some(persist_record)) =
+                    (file_record.as_ref(), durable_record_callback.as_ref())
+                {
+                    if let Err(err) = persist_record(record) {
+                        error!(
+                            run_id = %run_id,
+                            path = %record.relative_path,
+                            error = %err,
+                            "registry persistence failed for durable file record"
+                        );
+                        circuit_broken.store(true, Ordering::Relaxed);
+                        drop(permit);
+                        return Some((result, file_record));
+                    }
+                }
+
+                // Record successful processing only after registry durability succeeds.
                 let record_success =
                     |result: &FileProcessingResult, file_record: &Option<FileRecord>| {
                         let symbol_count = result.symbols.len() as u64;
@@ -523,6 +695,35 @@ impl IndexingPipeline {
             error_summary,
         }
     }
+}
+
+fn manifest_files_for_resume(
+    repo_root: &PathBuf,
+    manifest_paths: &[String],
+) -> Result<Vec<discovery::DiscoveredFile>> {
+    let mut files = Vec::with_capacity(manifest_paths.len());
+    for relative_path in manifest_paths {
+        let manifest_path = PathBuf::from(relative_path);
+        let extension = manifest_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .ok_or_else(|| {
+                TokenizorError::InvalidOperation(format!(
+                    "persisted discovery manifest path `{relative_path}` is missing a supported file extension"
+                ))
+            })?;
+        let language = LanguageId::from_extension(extension).ok_or_else(|| {
+            TokenizorError::InvalidOperation(format!(
+                "persisted discovery manifest path `{relative_path}` uses unsupported extension `{extension}`"
+            ))
+        })?;
+        files.push(discovery::DiscoveredFile {
+            relative_path: relative_path.clone(),
+            absolute_path: repo_root.join(relative_path),
+            language,
+        });
+    }
+    Ok(files)
 }
 
 #[cfg(test)]

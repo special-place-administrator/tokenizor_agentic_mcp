@@ -203,6 +203,38 @@ impl TokenizorServer {
     }
 
     #[tool(
+        description = "Attempt to resume an interrupted indexing run from its last durable checkpoint. Returns a structured outcome indicating whether the run resumed or why resume was rejected, including the next safe action. Non-blocking: on success it returns immediately with the managed run reference. Parameters: run_id (string, required), repo_root (string, required — absolute path to repository)."
+    )]
+    fn resume_index_run(
+        &self,
+        params: rmcp::model::JsonObject,
+    ) -> Result<CallToolResult, McpError> {
+        let run_id = params
+            .get("run_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_params("missing required parameter: run_id", None))?;
+
+        let repo_root = params
+            .get("repo_root")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                McpError::invalid_params("missing required parameter: repo_root", None)
+            })?;
+        let repo_root = std::path::PathBuf::from(repo_root);
+
+        let outcome = self
+            .application
+            .resume_index_run(run_id, repo_root)
+            .map_err(to_mcp_error)?;
+
+        let json = serde_json::to_string_pretty(&outcome).map_err(|e| {
+            McpError::internal_error(format!("failed to serialize resume run outcome: {e}"), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
         description = "Re-index a previously indexed repository. Creates a new indexing run with mode 'reindex', linking to the prior completed run for traceability. Prior state remains inspectable. Behaves idempotently on replay. Parameters: repo_id (string, required), repo_root (string, required — absolute path to repository), workspace_id (string, optional), reason (string, optional description of why re-indexing)."
     )]
     fn reindex_repository(

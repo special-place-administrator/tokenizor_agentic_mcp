@@ -10,6 +10,7 @@ use super::{IndexRunStatus, LanguageId, PersistedFileOutcome, SymbolKind};
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NextAction {
+    Resume,
     Reindex,
     Repair,
     Wait,
@@ -19,6 +20,7 @@ pub enum NextAction {
 impl fmt::Display for NextAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
+            Self::Resume => "resume",
             Self::Reindex => "reindex",
             Self::Repair => "repair",
             Self::Wait => "wait",

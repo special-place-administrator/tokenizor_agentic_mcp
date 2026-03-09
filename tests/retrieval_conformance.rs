@@ -672,6 +672,7 @@ fn test_verified_source_response_json_includes_all_fields() {
 #[test]
 fn test_next_action_variants_are_exhaustive() {
     let variants = vec![
+        NextAction::Resume,
         NextAction::Reindex,
         NextAction::Repair,
         NextAction::Wait,
@@ -682,10 +683,11 @@ fn test_next_action_variants_are_exhaustive() {
         let deserialized: NextAction = serde_json::from_str(&json).unwrap();
         assert_eq!(&deserialized, variant, "round-trip failed for {json}");
     }
-    assert_eq!(variants.len(), 4);
+    assert_eq!(variants.len(), 5);
     // Exhaustive match proves all variants are covered
     for variant in &variants {
         match variant {
+            NextAction::Resume => {}
             NextAction::Reindex => {}
             NextAction::Repair => {}
             NextAction::Wait => {}

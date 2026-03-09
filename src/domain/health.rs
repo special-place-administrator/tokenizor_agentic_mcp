@@ -33,6 +33,7 @@ pub enum HealthIssueCategory {
     Configuration,
     Compatibility,
     Storage,
+    Recovery,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

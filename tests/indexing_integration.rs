@@ -2,11 +2,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use tokenizor_agentic_mcp::ApplicationContext;
 use tokenizor_agentic_mcp::application::run_manager::RunManager;
-use tokenizor_agentic_mcp::config::BlobStoreConfig;
+use tokenizor_agentic_mcp::config::{BlobStoreConfig, ControlPlaneBackend, ServerConfig};
 use tokenizor_agentic_mcp::domain::{
-    ComponentHealth, FileRecord, IndexRunMode, IndexRunStatus, LanguageId, PersistedFileOutcome,
-    ProjectIdentityKind, Repository, RepositoryKind, RepositoryStatus, RunHealth,
+    Checkpoint, ComponentHealth, DiscoveryManifest, FileRecord, IndexRunMode, IndexRunStatus,
+    LanguageId, NextAction, PersistedFileOutcome, ProjectIdentityKind, RecoveryStateKind,
+    Repository, RepositoryKind, RepositoryStatus, ResumeRejectReason, ResumeRunOutcome, RunHealth,
 };
 use tokenizor_agentic_mcp::error::TokenizorError;
 use tokenizor_agentic_mcp::storage::registry_persistence::RegistryPersistence;
@@ -55,14 +57,60 @@ fn setup_test_env() -> (
     let dir = tempfile::tempdir().unwrap();
     let registry_path = dir.path().join("registry.json");
     let persistence = RegistryPersistence::new(registry_path);
-    let manager = Arc::new(RunManager::new(persistence));
 
     let cas_dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(RunManager::with_blob_root(
+        persistence,
+        cas_dir.path().to_path_buf(),
+    ));
     let cas: Arc<dyn BlobStore> = Arc::new(LocalCasBlobStore::new(BlobStoreConfig {
         root_dir: cas_dir.path().to_path_buf(),
     }));
 
     (dir, manager, cas_dir, cas)
+}
+
+fn sample_committed_record(
+    run_id: &str,
+    repo_id: &str,
+    relative_path: &str,
+    committed_at: u64,
+) -> FileRecord {
+    FileRecord {
+        relative_path: relative_path.to_string(),
+        language: LanguageId::Rust,
+        blob_id: format!("blob-{relative_path}"),
+        byte_len: 16,
+        content_hash: format!("hash-{relative_path}"),
+        outcome: PersistedFileOutcome::Committed,
+        symbols: vec![],
+        run_id: run_id.to_string(),
+        repo_id: repo_id.to_string(),
+        committed_at_unix_ms: committed_at,
+    }
+}
+
+fn sample_checkpoint(
+    run_id: &str,
+    cursor: &str,
+    files_processed: u64,
+    symbols_written: u64,
+) -> Checkpoint {
+    Checkpoint {
+        run_id: run_id.to_string(),
+        cursor: cursor.to_string(),
+        files_processed,
+        symbols_written,
+        created_at_unix_ms: 2_000,
+    }
+}
+
+fn sample_discovery_manifest(run_id: &str, relative_paths: &[&str]) -> DiscoveryManifest {
+    DiscoveryManifest {
+        run_id: run_id.to_string(),
+        discovered_at_unix_ms: 1_500,
+        relative_paths: relative_paths.iter().map(|path| path.to_string()).collect(),
+    }
 }
 
 #[tokio::test]
@@ -658,6 +706,372 @@ async fn test_inspect_interrupted_run_returns_unhealthy() {
     assert_eq!(report.health, RunHealth::Unhealthy);
     assert!(report.action_required.is_some());
     assert!(report.action_required.unwrap().contains("interrupted"));
+}
+
+#[tokio::test]
+async fn test_list_runs_after_startup_sweep_keeps_interrupted_runs_unhealthy() {
+    let (_dir, manager, _cas_dir, _cas) = setup_test_env();
+
+    let run = manager
+        .start_run("repo-list-interrupt", IndexRunMode::Full)
+        .unwrap();
+    manager
+        .persistence()
+        .update_run_status(&run.run_id, IndexRunStatus::Running, None)
+        .unwrap();
+    manager.startup_sweep().unwrap();
+
+    let reports = manager
+        .list_runs_with_health(Some("repo-list-interrupt"), None)
+        .unwrap();
+
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].run.status, IndexRunStatus::Interrupted);
+    assert_eq!(reports[0].health, RunHealth::Unhealthy);
+    assert!(
+        reports[0]
+            .action_required
+            .as_deref()
+            .is_some_and(|message| message.contains("interrupted"))
+    );
+}
+
+#[tokio::test]
+async fn test_startup_swept_interrupted_run_can_resume_from_durable_checkpoint() {
+    let (_dir, manager, _cas_dir, cas) = setup_test_env();
+    let repo_dir = tempfile::tempdir().unwrap();
+    fs::write(repo_dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+    fs::write(repo_dir.path().join("b.rs"), "fn b() {}\n").unwrap();
+    fs::write(repo_dir.path().join("c.rs"), "fn c() {}\n").unwrap();
+    seed_integration_repo(&manager, "repo-resume");
+
+    let run = manager
+        .start_run("repo-resume", IndexRunMode::Full)
+        .unwrap();
+    manager
+        .persistence()
+        .update_run_status(&run.run_id, IndexRunStatus::Running, None)
+        .unwrap();
+
+    let seeded_record = sample_committed_record(&run.run_id, "repo-resume", "a.rs", 1_111);
+    manager
+        .persistence()
+        .save_file_records(&run.run_id, std::slice::from_ref(&seeded_record))
+        .unwrap();
+    manager
+        .persistence()
+        .save_checkpoint(&sample_checkpoint(&run.run_id, "a.rs", 1, 0))
+        .unwrap();
+    manager
+        .persistence()
+        .save_discovery_manifest(&sample_discovery_manifest(
+            &run.run_id,
+            &["a.rs", "b.rs", "c.rs"],
+        ))
+        .unwrap();
+
+    manager.startup_sweep().unwrap();
+
+    let interrupted = manager.inspect_run(&run.run_id).unwrap();
+    assert_eq!(interrupted.run.status, IndexRunStatus::Interrupted);
+    assert_eq!(interrupted.health, RunHealth::Unhealthy);
+    assert!(
+        interrupted
+            .action_required
+            .as_deref()
+            .is_some_and(|message| message.contains("resume"))
+    );
+
+    let outcome = manager
+        .resume_run(&run.run_id, repo_dir.path().to_path_buf(), cas)
+        .unwrap();
+    match outcome {
+        ResumeRunOutcome::Resumed {
+            checkpoint,
+            durable_files_skipped,
+            ..
+        } => {
+            assert_eq!(checkpoint.cursor, "a.rs");
+            assert_eq!(durable_files_skipped, 1);
+        }
+        other => panic!("expected resumed outcome, got: {other:?}"),
+    }
+
+    let active_report = manager.inspect_run(&run.run_id).unwrap();
+    assert!(active_report.is_active);
+    let progress = active_report
+        .progress
+        .expect("resume should expose progress");
+    assert_eq!(progress.files_processed, 1);
+    assert_eq!(progress.total_files, 3);
+    assert!(
+        active_report
+            .action_required
+            .as_deref()
+            .is_some_and(|message| message.contains("wait"))
+    );
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let finished = manager.inspect_run(&run.run_id).unwrap();
+    assert_eq!(finished.run.status, IndexRunStatus::Succeeded);
+    assert_eq!(
+        finished
+            .run
+            .recovery_state
+            .as_ref()
+            .map(|state| state.state.clone()),
+        Some(RecoveryStateKind::Resumed)
+    );
+
+    let records = manager.persistence().get_file_records(&run.run_id).unwrap();
+    assert_eq!(records.len(), 3);
+    let first = records
+        .iter()
+        .find(|record| record.relative_path == "a.rs")
+        .expect("seeded record should remain present");
+    assert_eq!(first.committed_at_unix_ms, 1_111);
+}
+
+#[tokio::test]
+async fn test_resume_rejection_surfaces_explicit_reindex_guidance() {
+    let (_dir, manager, _cas_dir, cas) = setup_test_env();
+    let repo_dir = tempfile::tempdir().unwrap();
+    fs::write(repo_dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+    seed_integration_repo(&manager, "repo-resume-reject");
+
+    let run = manager
+        .start_run("repo-resume-reject", IndexRunMode::Full)
+        .unwrap();
+    manager
+        .persistence()
+        .update_run_status(
+            &run.run_id,
+            IndexRunStatus::Interrupted,
+            Some("startup sweep".into()),
+        )
+        .unwrap();
+
+    let outcome = manager
+        .resume_run(&run.run_id, repo_dir.path().to_path_buf(), cas)
+        .unwrap();
+    match outcome {
+        ResumeRunOutcome::Rejected {
+            reason,
+            next_action,
+            ..
+        } => {
+            assert_eq!(reason, ResumeRejectReason::MissingCheckpoint);
+            assert_eq!(next_action, NextAction::Reindex);
+        }
+        other => panic!("expected rejected outcome, got: {other:?}"),
+    }
+
+    let report = manager.inspect_run(&run.run_id).unwrap();
+    assert_eq!(report.run.status, IndexRunStatus::Interrupted);
+    assert!(
+        report
+            .action_required
+            .as_deref()
+            .is_some_and(|message| message.contains("Resume rejected"))
+    );
+    assert!(
+        report
+            .action_required
+            .as_deref()
+            .is_some_and(|message| message.contains("reindex"))
+    );
+}
+
+#[tokio::test]
+async fn test_repeated_resume_attempts_do_not_duplicate_file_records() {
+    let (_dir, manager, _cas_dir, cas) = setup_test_env();
+    let repo_dir = tempfile::tempdir().unwrap();
+    fs::write(repo_dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+    fs::write(repo_dir.path().join("b.rs"), "fn b() {}\n").unwrap();
+    seed_integration_repo(&manager, "repo-resume-repeat");
+
+    let run = manager
+        .start_run("repo-resume-repeat", IndexRunMode::Full)
+        .unwrap();
+    manager
+        .persistence()
+        .save_file_records(
+            &run.run_id,
+            &[sample_committed_record(
+                &run.run_id,
+                "repo-resume-repeat",
+                "a.rs",
+                9_999,
+            )],
+        )
+        .unwrap();
+    manager
+        .persistence()
+        .save_checkpoint(&sample_checkpoint(&run.run_id, "a.rs", 1, 0))
+        .unwrap();
+    manager
+        .persistence()
+        .save_discovery_manifest(&sample_discovery_manifest(&run.run_id, &["a.rs", "b.rs"]))
+        .unwrap();
+    manager
+        .persistence()
+        .update_run_status(
+            &run.run_id,
+            IndexRunStatus::Interrupted,
+            Some("startup sweep".into()),
+        )
+        .unwrap();
+
+    let first = manager
+        .resume_run(&run.run_id, repo_dir.path().to_path_buf(), cas.clone())
+        .unwrap();
+    assert!(matches!(first, ResumeRunOutcome::Resumed { .. }));
+
+    let second = manager
+        .resume_run(&run.run_id, repo_dir.path().to_path_buf(), cas)
+        .unwrap();
+    match second {
+        ResumeRunOutcome::Rejected {
+            reason,
+            next_action,
+            ..
+        } => {
+            assert_eq!(reason, ResumeRejectReason::ActiveRunConflict);
+            assert_eq!(next_action, NextAction::Wait);
+        }
+        other => panic!("expected active-run rejection, got: {other:?}"),
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let records = manager.persistence().get_file_records(&run.run_id).unwrap();
+    assert_eq!(records.len(), 2);
+    let first_record = records
+        .iter()
+        .find(|record| record.relative_path == "a.rs")
+        .expect("checkpoint record should still exist");
+    assert_eq!(first_record.committed_at_unix_ms, 9_999);
+}
+
+#[tokio::test]
+async fn test_resume_eligibility_latency_stays_under_one_second() {
+    let (_dir, manager, _cas_dir, cas) = setup_test_env();
+    let repo_dir = tempfile::tempdir().unwrap();
+    fs::write(repo_dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+    seed_integration_repo(&manager, "repo-resume-latency");
+
+    let run = manager
+        .start_run("repo-resume-latency", IndexRunMode::Full)
+        .unwrap();
+    manager
+        .persistence()
+        .update_run_status(
+            &run.run_id,
+            IndexRunStatus::Interrupted,
+            Some("startup sweep".into()),
+        )
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let outcome = manager
+        .resume_run(&run.run_id, repo_dir.path().to_path_buf(), cas)
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(matches!(
+        outcome,
+        ResumeRunOutcome::Rejected {
+            reason: ResumeRejectReason::MissingCheckpoint,
+            ..
+        }
+    ));
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "resume eligibility should remain fast, took {elapsed:?}"
+    );
+}
+
+#[test]
+fn test_application_context_from_config_transitions_running_runs_before_runtime_ready() {
+    let temp = tempfile::tempdir().unwrap();
+    let blob_root = temp.path().join(".tokenizor");
+    std::fs::create_dir_all(blob_root.join("blobs").join("sha256")).unwrap();
+    std::fs::create_dir_all(blob_root.join("temp")).unwrap();
+    std::fs::create_dir_all(blob_root.join("quarantine")).unwrap();
+    std::fs::create_dir_all(blob_root.join("derived")).unwrap();
+    let registry_path = blob_root
+        .join("control-plane")
+        .join("project-workspace-registry.json");
+    let persistence = RegistryPersistence::new(registry_path.clone());
+    persistence
+        .save_run(&tokenizor_agentic_mcp::domain::IndexRun {
+            run_id: "stale-run".into(),
+            repo_id: "repo-startup".into(),
+            mode: IndexRunMode::Full,
+            status: IndexRunStatus::Running,
+            requested_at_unix_ms: 1000,
+            started_at_unix_ms: Some(1001),
+            finished_at_unix_ms: None,
+            idempotency_key: None,
+            request_hash: None,
+            checkpoint_cursor: None,
+            error_summary: None,
+            not_yet_supported: None,
+            prior_run_id: None,
+            description: None,
+            recovery_state: None,
+        })
+        .unwrap();
+
+    let mut config = ServerConfig::default();
+    config.control_plane.backend = ControlPlaneBackend::InMemory;
+    config.blob_store.root_dir = blob_root;
+
+    let application = ApplicationContext::from_config(config).unwrap();
+    let report = application
+        .ensure_runtime_ready()
+        .expect("interrupted runs should warn, not block readiness");
+    let stored = application
+        .run_manager()
+        .persistence()
+        .find_run("stale-run")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(stored.status, IndexRunStatus::Interrupted);
+    assert!(report.is_ready());
+    assert!(report.checks.iter().any(
+        |check| check.category == tokenizor_agentic_mcp::domain::HealthIssueCategory::Recovery
+    ));
+}
+
+#[test]
+fn test_application_context_startup_reconciliation_blocks_readiness_on_blocking_finding() {
+    let temp = tempfile::tempdir().unwrap();
+    let blob_root = temp.path().join(".tokenizor");
+    let registry_path = blob_root
+        .join("control-plane")
+        .join("project-workspace-registry.json");
+    std::fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
+
+    let blocking_artifact = registry_path
+        .parent()
+        .unwrap()
+        .join(".project-workspace-registry.json.123.tmp");
+    std::fs::create_dir_all(&blocking_artifact).unwrap();
+
+    let mut config = ServerConfig::default();
+    config.control_plane.backend = ControlPlaneBackend::InMemory;
+    config.blob_store.root_dir = blob_root;
+
+    let application = ApplicationContext::from_config(config).unwrap();
+    let error = application
+        .ensure_runtime_ready()
+        .expect_err("readiness should fail when startup recovery finds a blocker");
+
+    assert!(error.to_string().contains("startup_recovery"));
+    assert!(error.to_string().contains("repair") || error.to_string().contains("migrate"));
 }
 
 #[tokio::test]
