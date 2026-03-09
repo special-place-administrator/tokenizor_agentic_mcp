@@ -1,0 +1,33 @@
+# Testing
+
+- The repo uses Rust's built-in test harness with `cargo test`.
+- Async tests are standard `#[tokio::test]` cases; this is the dominant pattern in `src/application/run_manager.rs`, `src/indexing/pipeline.rs`, and the files under `tests/`.
+- The only explicit dev-dependency in `Cargo.toml` is `tempfile`; temporary directories are the main fixture mechanism for repositories, registries, and CAS roots.
+- There is no dedicated property-test, snapshot-test, CLI-test, or benchmark framework in the manifest. Searches found no `proptest`, `criterion`, `insta`, or `assert_cmd` usage.
+- Unit tests are embedded directly next to implementation with `#[cfg(test)]`. Most core modules follow this pattern, including `src/error.rs`, `src/indexing/*.rs`, `src/storage/*.rs`, and `src/protocol/mcp.rs`.
+- High-level integration and contract tests live under `tests/`.
+- `tests/indexing_integration.rs` is the main end-to-end indexing suite. It covers run lifecycle, CAS persistence, partial failures, unsupported files, phase transitions, cancellation, checkpointing, resume, reindex, invalidation, and idempotency.
+- `tests/retrieval_integration.rs` covers read-path behavior after indexing: text search, symbol search, file outlines, repo outlines, `get_symbol`, `get_symbols`, gating, next-action payloads, and serialization fidelity.
+- `tests/retrieval_conformance.rs` is the contract suite. It checks enum exhaustiveness, JSON shape, required fields, and envelope behavior for retrieval-facing domain types.
+- `tests/tree_sitter_grammars.rs` is a grammar smoke test layer that verifies each supported tree-sitter grammar loads and parses.
+- `tests/epic4_hardening.rs` exercises MCP server handler paths directly and also contains an ad hoc performance benchmark for registry reads.
+- Binary behavior is tested indirectly in `src/main.rs` through helper-level tests such as `guard_and_serve` and `doctor_failure_message`; the compiled binary is not spawned as a subprocess.
+- Common integration helpers are reused instead of building giant fixtures.
+- `tests/indexing_integration.rs` defines `setup_test_env`, `sample_checkpoint`, and `sample_discovery_manifest`.
+- `tests/retrieval_integration.rs` defines `setup_test_env`, `setup_application_env`, `register_repo`, `wait_for_run_success`, `symbol_request`, and `code_slice_request`.
+- `tests/epic4_hardening.rs` reuses the same style with `setup_application_env`, `register_repo`, and `wait_for_run_success`.
+- Module-local helpers are common in unit tests too. Examples include `temp_registry` in `src/storage/registry_persistence.rs`, `temp_repo_with_files` in `src/indexing/pipeline.rs`, and `TestDir` in `src/storage/local_cas.rs`.
+- Test fixtures are filesystem-first, not mock-heavy. Most higher-level tests create real temp repos, write a few files, launch an actual run, and wait for terminal status.
+- Mocking is still used selectively at boundaries. `tests/indexing_integration.rs` defines `FailingBlobStore`, and `src/application/mod.rs` uses `FakeBlobStore` and `FakeControlPlane` in local tests.
+- Coverage is strongest around lifecycle and recovery.
+- `src/application/run_manager.rs` has dense unit coverage for startup sweep, idempotency, cancellation, checkpointing, reindexing, invalidation, and progress snapshots.
+- `src/storage/registry_persistence.rs` is heavily covered for atomic persistence, backward compatibility, integrity checks, file-record persistence, checkpoints, repo status transitions, and concurrent writes.
+- `src/storage/local_cas.rs` is covered for byte preservation, dedupe, health checks, blob ID stability, empty content handling, and temp-artifact ownership rules.
+- `src/protocol/mcp.rs` has extensive parameter-validation tests for MCP tool inputs and URI parsing.
+- Gaps still exist.
+- `src/config.rs` currently has no in-file tests, so env parsing and backend selection are under-tested compared with the rest of the core.
+- `src/observability.rs` currently has no dedicated tests for tracing initialization, repeated initialization, or environment-filter edge cases.
+- There is no dedicated fuzzing or property-based coverage for parser edge cases in `src/parsing/`.
+- Performance validation is present but informal. `tests/epic4_hardening.rs` benchmarks registry reads inside a test instead of using a dedicated benchmark harness.
+- When adding tests, prefer module-local unit tests for pure logic and `tests/` integration files for behaviors that cross `protocol`, `application`, `storage`, or `indexing` boundaries.
+- Follow the current fixture style: small temp repos, explicit repo registration, and deterministic helper functions rather than shared global state.

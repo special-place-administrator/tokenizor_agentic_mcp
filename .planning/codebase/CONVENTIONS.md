@@ -1,0 +1,29 @@
+# Conventions
+
+- The crate is split by responsibility under `src/protocol/`, `src/application/`, `src/domain/`, `src/storage/`, `src/indexing/`, `src/parsing/`, and `src/observability.rs`.
+- Keep `src/protocol/mcp.rs` thin: it parses MCP JSON, validates arguments, maps errors, and delegates into `ApplicationContext`.
+- Put orchestration and workflow decisions in `src/application/`; `src/application/mod.rs`, `src/application/run_manager.rs`, and `src/application/search.rs` are the main coordination points.
+- Keep `src/domain/` data-oriented. Domain files define enums, reports, statuses, and response envelopes such as `RepositoryStatus`, `IndexRunStatus`, `ComponentHealth`, and `HealthReport`.
+- Storage is trait-backed. `src/storage/control_plane.rs` selects the backend via `build_control_plane`, while CAS behavior lives behind `BlobStore` in `src/storage/local_cas.rs`.
+- Naming is standard Rust: modules and functions are `snake_case`, types and enums are `PascalCase`, and status enums are noun-based (`HealthStatus`, `ControlPlaneBackend`, `RepositoryStatus`).
+- Constructors are usually `new`; opt-in configuration follows `with_*` builder methods, especially in `src/indexing/pipeline.rs`.
+- Protocol parameter helpers follow a regular pattern: `parse_*`, `required_*`, and small typed params structs in `src/protocol/mcp.rs`.
+- Core code returns `crate::error::Result<T>` rather than panicking. `src/error.rs` is the central taxonomy for `InvalidArgument`, `NotFound`, `InvalidOperation`, `Integrity`, `ControlPlane`, `ConflictingReplay`, and request-gating failures.
+- When reporting filesystem failures, prefer `TokenizorError::io(path, error)` so the failing path is preserved.
+- `unwrap()` and `expect()` are mostly test-only; production paths generally propagate `Result` and log context with `tracing`.
+- Observability is structured, not ad hoc. `src/observability.rs` installs a `tracing_subscriber` on stderr, disables ANSI, and defaults the filter to `info` when the environment is unset.
+- Health and readiness are first-class APIs. `src/domain/health.rs` provides `ComponentHealth::ok`, `warning`, and `error`, and `src/main.rs` gates serving through `guard_and_serve`.
+- Readiness failures are supposed to carry remediation text. `DeploymentReport` and `StartupRecoveryReport` are used to explain what blocked startup and what the next safe action is.
+- The code favors deterministic state transitions over silent retries. `src/application/run_manager.rs` persists explicit run states (`Queued`, `Running`, `Succeeded`, `Interrupted`, `Cancelled`, `Aborted`) instead of hiding failure recovery.
+- Startup recovery is explicit. `RunManager::startup_sweep` in `src/application/run_manager.rs` inspects stale runs, transitions them to `Interrupted` or `Aborted`, and removes owned temp artifacts.
+- Retrieval is gated before execution. `check_request_gate` in `src/application/search.rs` blocks reads for invalidated, quarantined, failed, degraded, never-indexed, and actively mutating repositories.
+- Persistence follows a lock, load, verify, modify, save sequence in `RegistryPersistence::read_modify_write` in `src/storage/registry_persistence.rs`.
+- Registry integrity is checked before mutation. `RegistryPersistence::verify_integrity` rejects obviously corrupt state rather than attempting best-effort writes.
+- Registry writes are atomic by design. `src/storage/registry_persistence.rs` writes through temp files and `atomic_replace`, including a Windows-specific replacement path.
+- CAS writes are also atomic and byte exact. `LocalCasBlobStore::store_bytes` in `src/storage/local_cas.rs` hashes raw bytes, writes to a temp file, `sync_all`s, and renames into place.
+- Do not normalize source text before storage. The exact-byte rule is enforced by `src/storage/local_cas.rs` and validated by tests that preserve CRLF and NUL bytes.
+- Dedupe is content-addressed. A pre-existing blob is reused by SHA-256 rather than being rewritten.
+- Config is env-driven through `ServerConfig::from_env` in `src/config.rs`; backend selection is explicit via `ControlPlaneBackend`.
+- Application and protocol method names intentionally mirror each other. Examples: `search_text`, `search_symbols`, `get_file_outline`, `get_repo_outline`, `get_symbol`, and `get_symbols`.
+- Favor small, purpose-specific helper functions over deep nesting. The repo uses many narrow helpers in `src/application/search.rs`, `src/application/init.rs`, and `src/protocol/mcp.rs`.
+- When adding new mutating behavior, match the existing recovery model: persist enough state to resume or reject deterministically, and surface repair guidance instead of guessing.
