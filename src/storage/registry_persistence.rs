@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{
     AuthorityMode, Checkpoint, DiscoveryManifest, FileRecord, IdempotencyRecord, IndexRun,
-    IndexRunStatus, RegistryKind, Repository, Workspace,
+    IndexRunStatus, OperationalEvent, OperationalEventFilter, RegistryKind, RepairEvent, Repository,
+    Workspace,
 };
 use crate::error::{Result, TokenizorError};
 
@@ -37,6 +38,10 @@ pub(crate) struct RegistryData {
     pub checkpoints: Vec<Checkpoint>,
     #[serde(default)]
     pub discovery_manifests: BTreeMap<String, DiscoveryManifest>,
+    #[serde(default)]
+    pub repair_events: Vec<RepairEvent>,
+    #[serde(default)]
+    pub operational_events: Vec<OperationalEvent>,
 }
 
 pub struct RegistryPersistence {
@@ -353,6 +358,72 @@ impl RegistryPersistence {
     pub fn get_discovery_manifest(&self, run_id: &str) -> Result<Option<DiscoveryManifest>> {
         let data = self.load()?;
         Ok(data.discovery_manifests.get(run_id).cloned())
+    }
+
+    pub fn save_repair_event(&self, event: &RepairEvent) -> Result<()> {
+        self.save_operational_event(&event.to_operational_event())
+    }
+
+    pub fn get_repair_events(&self, repo_id: &str) -> Result<Vec<RepairEvent>> {
+        let filter = OperationalEventFilter {
+            category: Some("repair".to_string()),
+            ..Default::default()
+        };
+        let mut events: Vec<_> = self
+            .get_operational_events(repo_id, &filter)?
+            .iter()
+            .filter_map(|e| e.to_repair_event())
+            .collect();
+        // Backward compat: also read legacy repair_events from older registry files
+        let data = self.load()?;
+        for legacy in &data.repair_events {
+            if legacy.repo_id == repo_id {
+                events.push(legacy.clone());
+            }
+        }
+        events.sort_by(|a, b| b.timestamp_unix_ms.cmp(&a.timestamp_unix_ms));
+        events.dedup_by(|a, b| a.timestamp_unix_ms == b.timestamp_unix_ms && a.repo_id == b.repo_id && a.scope == b.scope);
+        Ok(events)
+    }
+
+    pub fn save_operational_event(&self, event: &OperationalEvent) -> Result<()> {
+        self.read_modify_write(|data| {
+            data.operational_events.push(event.clone());
+            Ok(())
+        })
+    }
+
+    pub fn get_operational_events(
+        &self,
+        repo_id: &str,
+        filter: &OperationalEventFilter,
+    ) -> Result<Vec<OperationalEvent>> {
+        let data = self.load()?;
+        let mut events: Vec<OperationalEvent> = data
+            .operational_events
+            .iter()
+            .filter(|e| e.repo_id == repo_id)
+            .filter(|e| {
+                if let Some(since) = filter.since_unix_ms {
+                    e.timestamp_unix_ms >= since
+                } else {
+                    true
+                }
+            })
+            .filter(|e| {
+                if let Some(ref cat) = filter.category {
+                    e.event_name().starts_with(cat.as_str())
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect();
+        events.sort_by(|a, b| b.timestamp_unix_ms.cmp(&a.timestamp_unix_ms));
+        if let Some(limit) = filter.limit {
+            events.truncate(limit);
+        }
+        Ok(events)
     }
 
     fn read_modify_write(
@@ -1166,6 +1237,7 @@ mod tests {
             cursor: cursor.to_string(),
             files_processed: 10,
             symbols_written: 50,
+            files_failed: 0,
             created_at_unix_ms: created_at,
         }
     }

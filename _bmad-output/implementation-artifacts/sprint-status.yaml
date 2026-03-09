@@ -111,10 +111,10 @@ development_status:
   epic-4: in-progress
   4-1-sweep-stale-leases-and-interrupted-state-on-startup: done
   4-2-resume-interrupted-indexing-from-durable-checkpoints: done
-  4-3-move-mutable-run-durability-to-the-spacetimedb-control-plane: in-progress
-  4-4-trigger-deterministic-repair-for-suspect-or-incomplete-state: backlog
-  4-5-inspect-repository-health-and-repair-required-conditions: backlog
-  4-6-preserve-operational-history-for-runs-repairs-and-integrity-events: backlog
+  4-3-move-mutable-run-durability-to-the-spacetimedb-control-plane: done
+  4-4-trigger-deterministic-repair-for-suspect-or-incomplete-state: done
+  4-5-inspect-repository-health-and-repair-required-conditions: done
+  4-6-preserve-operational-history-for-runs-repairs-and-integrity-events: in-progress
   4-7-classify-action-required-states-and-signal-the-next-safe-action: backlog
   epic-4-retrospective: optional
 

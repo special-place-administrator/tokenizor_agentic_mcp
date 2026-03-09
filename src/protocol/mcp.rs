@@ -397,6 +397,165 @@ impl TokenizorServer {
         })?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+
+    #[tool(
+        description = "Trigger deterministic repair for suspect, stale, quarantined, or incomplete indexed state. Parameters: repository_id (string, required), repo_root (string, required — absolute path to repository), scope (string, optional: repository|run|file, default: repository), run_id (string, required when scope is run or file), relative_path (string, required when scope is file)."
+    )]
+    fn repair_index(&self, params: rmcp::model::JsonObject) -> Result<CallToolResult, McpError> {
+        use crate::domain::RepairScope;
+
+        let repo_id = params
+            .get("repository_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                McpError::invalid_params("missing required parameter: repository_id", None)
+            })?;
+
+        let scope_str = params
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .unwrap_or("repository");
+
+        let scope = match scope_str {
+            "repository" => RepairScope::Repository,
+            "run" => {
+                let run_id = params
+                    .get("run_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        McpError::invalid_params(
+                            "missing required parameter: run_id (required when scope is run)",
+                            None,
+                        )
+                    })?;
+                RepairScope::Run {
+                    run_id: run_id.to_string(),
+                }
+            }
+            "file" => {
+                let run_id = params
+                    .get("run_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        McpError::invalid_params(
+                            "missing required parameter: run_id (required when scope is file)",
+                            None,
+                        )
+                    })?;
+                let relative_path = params
+                    .get("relative_path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        McpError::invalid_params(
+                            "missing required parameter: relative_path (required when scope is file)",
+                            None,
+                        )
+                    })?;
+                RepairScope::File {
+                    run_id: run_id.to_string(),
+                    relative_path: relative_path.to_string(),
+                }
+            }
+            other => {
+                return Err(McpError::invalid_params(
+                    format!("invalid scope '{other}'; expected repository, run, or file"),
+                    None,
+                ));
+            }
+        };
+
+        let repo_root = params
+            .get("repo_root")
+            .and_then(|v| v.as_str())
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| {
+                McpError::invalid_params("missing required parameter: repo_root", None)
+            })?;
+
+        let result = self
+            .application
+            .repair_repository(repo_id, scope, repo_root)
+            .map_err(to_mcp_error)?;
+
+        let json = serde_json::to_string_pretty(&result).map_err(|e| {
+            McpError::internal_error(format!("failed to serialize repair result: {e}"), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Inspect repository health and repair-required conditions. Reports explicit health status, action-required indicators, file-level health, run context, and recent repair history. Parameters: repository_id (string, required)."
+    )]
+    fn inspect_repository_health(
+        &self,
+        params: rmcp::model::JsonObject,
+    ) -> Result<CallToolResult, McpError> {
+        let repo_id = params
+            .get("repository_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                McpError::invalid_params("missing required parameter: repository_id", None)
+            })?;
+
+        let result = self
+            .application
+            .inspect_repository_health(repo_id)
+            .map_err(to_mcp_error)?;
+
+        let json = serde_json::to_string_pretty(&result).map_err(|e| {
+            McpError::internal_error(
+                format!("failed to serialize health inspection result: {e}"),
+                None,
+            )
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Retrieve operational history for a repository. Returns time-ordered events covering run transitions, checkpoints, repairs, integrity changes, and startup sweeps. Parameters: repository_id (string, required), category (string, optional — filter by event name prefix e.g. 'run', 'repair', 'integrity'), since_unix_ms (number, optional — only events at or after this timestamp), limit (number, optional — max events to return, capped at 200)."
+    )]
+    fn get_operational_history(
+        &self,
+        params: rmcp::model::JsonObject,
+    ) -> Result<CallToolResult, McpError> {
+        let repo_id = params
+            .get("repository_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                McpError::invalid_params("missing required parameter: repository_id", None)
+            })?;
+
+        let category = params.get("category").and_then(|v| v.as_str()).map(String::from);
+        let since_unix_ms = params
+            .get("since_unix_ms")
+            .and_then(|v| v.as_u64());
+        let limit = params
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|l| std::cmp::min(l as usize, 200));
+
+        let filter = crate::domain::OperationalEventFilter {
+            category,
+            since_unix_ms,
+            limit: Some(limit.unwrap_or(50)),
+        };
+
+        let events = self
+            .application
+            .get_operational_history(repo_id, &filter)
+            .map_err(to_mcp_error)?;
+
+        let json = serde_json::to_string_pretty(&events).map_err(|e| {
+            McpError::internal_error(
+                format!("failed to serialize operational history: {e}"),
+                None,
+            )
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
 }
 
 #[tool_handler]

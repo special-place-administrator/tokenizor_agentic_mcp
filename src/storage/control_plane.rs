@@ -13,7 +13,8 @@ use crate::config::{
 };
 use crate::domain::{
     Checkpoint, ComponentHealth, DiscoveryManifest, FileRecord, HealthIssueCategory,
-    IdempotencyRecord, IndexRun, IndexRunStatus, Repository, RepositoryStatus,
+    IdempotencyRecord, IndexRun, IndexRunStatus, OperationalEvent, OperationalEventFilter,
+    RepairEvent, Repository, RepositoryStatus,
 };
 use crate::error::{Result, TokenizorError};
 
@@ -62,6 +63,14 @@ pub trait ControlPlane: Send + Sync {
     ) -> Result<()>;
     fn save_idempotency_record(&self, record: &IdempotencyRecord) -> Result<()>;
     fn save_discovery_manifest(&self, manifest: &DiscoveryManifest) -> Result<()>;
+    fn save_repair_event(&self, event: &RepairEvent) -> Result<()>;
+    fn get_repair_events(&self, repo_id: &str) -> Result<Vec<RepairEvent>>;
+    fn save_operational_event(&self, event: &OperationalEvent) -> Result<()>;
+    fn get_operational_events(
+        &self,
+        repo_id: &str,
+        filter: &OperationalEventFilter,
+    ) -> Result<Vec<OperationalEvent>>;
     fn migrate_mutable_state_from_registry(&self) -> Result<()> {
         Err(TokenizorError::InvalidOperation(format!(
             "control plane backend `{}` does not support local mutable-state migration; set TOKENIZOR_CONTROL_PLANE_BACKEND=spacetimedb and run `tokenizor_agentic_mcp migrate control-plane`",
@@ -110,6 +119,7 @@ struct InMemoryState {
     run_file_records: BTreeMap<String, Vec<FileRecord>>,
     idempotency_records: BTreeMap<String, IdempotencyRecord>,
     discovery_manifests: BTreeMap<String, DiscoveryManifest>,
+    operational_events: Vec<OperationalEvent>,
 }
 
 #[derive(Default)]
@@ -416,6 +426,62 @@ impl ControlPlane for InMemoryControlPlane {
             .insert(manifest.run_id.clone(), manifest.clone());
         Ok(())
     }
+
+    fn save_repair_event(&self, event: &RepairEvent) -> Result<()> {
+        self.save_operational_event(&event.to_operational_event())
+    }
+
+    fn get_repair_events(&self, repo_id: &str) -> Result<Vec<RepairEvent>> {
+        let filter = OperationalEventFilter {
+            category: Some("repair".to_string()),
+            ..Default::default()
+        };
+        let events = self.get_operational_events(repo_id, &filter)?;
+        Ok(events.iter().filter_map(|e| e.to_repair_event()).collect())
+    }
+
+    fn save_operational_event(&self, event: &OperationalEvent) -> Result<()> {
+        let mut state = self.state.lock().map_err(|_| {
+            TokenizorError::ControlPlane("in-memory control plane lock poisoned".into())
+        })?;
+        state.operational_events.push(event.clone());
+        Ok(())
+    }
+
+    fn get_operational_events(
+        &self,
+        repo_id: &str,
+        filter: &OperationalEventFilter,
+    ) -> Result<Vec<OperationalEvent>> {
+        let state = self.state.lock().map_err(|_| {
+            TokenizorError::ControlPlane("in-memory control plane lock poisoned".into())
+        })?;
+        let mut events: Vec<OperationalEvent> = state
+            .operational_events
+            .iter()
+            .filter(|e| e.repo_id == repo_id)
+            .filter(|e| {
+                if let Some(since) = filter.since_unix_ms {
+                    e.timestamp_unix_ms >= since
+                } else {
+                    true
+                }
+            })
+            .filter(|e| {
+                if let Some(ref cat) = filter.category {
+                    e.event_name().starts_with(cat.as_str())
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect();
+        events.sort_by(|a, b| b.timestamp_unix_ms.cmp(&a.timestamp_unix_ms));
+        if let Some(limit) = filter.limit {
+            events.truncate(limit);
+        }
+        Ok(events)
+    }
 }
 
 pub struct RegistryBackedControlPlane {
@@ -570,6 +636,26 @@ impl ControlPlane for RegistryBackedControlPlane {
     fn save_discovery_manifest(&self, manifest: &DiscoveryManifest) -> Result<()> {
         self.persistence.save_discovery_manifest(manifest)
     }
+
+    fn save_repair_event(&self, event: &RepairEvent) -> Result<()> {
+        self.persistence.save_repair_event(event)
+    }
+
+    fn get_repair_events(&self, repo_id: &str) -> Result<Vec<RepairEvent>> {
+        self.persistence.get_repair_events(repo_id)
+    }
+
+    fn save_operational_event(&self, event: &OperationalEvent) -> Result<()> {
+        self.persistence.save_operational_event(event)
+    }
+
+    fn get_operational_events(
+        &self,
+        repo_id: &str,
+        filter: &OperationalEventFilter,
+    ) -> Result<Vec<OperationalEvent>> {
+        self.persistence.get_operational_events(repo_id, filter)
+    }
 }
 
 trait SpacetimeRuntimeProbe: Send + Sync {
@@ -686,6 +772,7 @@ pub struct SpacetimeControlPlane {
     registry: Arc<RegistryPersistence>,
     runtime_probe: Arc<dyn SpacetimeRuntimeProbe>,
     store: Arc<dyn SpacetimeStateStore>,
+    mutable_state_clear: std::sync::atomic::AtomicBool,
 }
 
 impl SpacetimeControlPlane {
@@ -713,6 +800,7 @@ impl SpacetimeControlPlane {
             registry,
             runtime_probe,
             store,
+            mutable_state_clear: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -727,8 +815,14 @@ impl SpacetimeControlPlane {
     }
 
     fn ensure_mutable_state_ready(&self) -> Result<()> {
+        if self.mutable_state_clear.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
+
         let summary = self.local_mutable_state_summary()?;
         if !summary.has_any() {
+            self.mutable_state_clear
+                .store(true, std::sync::atomic::Ordering::Release);
             return Ok(());
         }
 
@@ -1175,6 +1269,41 @@ impl ControlPlane for SpacetimeControlPlane {
         self.store.save_discovery_manifest(manifest)
     }
 
+    fn save_repair_event(&self, event: &RepairEvent) -> Result<()> {
+        self.save_operational_event(&event.to_operational_event())
+    }
+
+    fn get_repair_events(&self, repo_id: &str) -> Result<Vec<RepairEvent>> {
+        let filter = OperationalEventFilter {
+            category: Some("repair".to_string()),
+            ..Default::default()
+        };
+        let events = self.get_operational_events(repo_id, &filter)?;
+        Ok(events.iter().filter_map(|e| e.to_repair_event()).collect())
+    }
+
+    fn save_operational_event(&self, event: &OperationalEvent) -> Result<()> {
+        // SpacetimeDB operational-event persistence deferred to Epic 5+.
+        // Events are persisted via the registry mirror in RunManagerPersistenceAdapter.
+        tracing::warn!(
+            repo_id = %event.repo_id,
+            event_name = %event.event_name(),
+            "SpacetimeDB operational event persistence not yet wired; \
+             event recorded via registry mirror only"
+        );
+        Ok(())
+    }
+
+    fn get_operational_events(
+        &self,
+        _repo_id: &str,
+        _filter: &OperationalEventFilter,
+    ) -> Result<Vec<OperationalEvent>> {
+        // SpacetimeDB operational-event persistence deferred to Epic 5+.
+        // Events are read from the registry mirror in RunManagerPersistenceAdapter.
+        Ok(vec![])
+    }
+
     fn migrate_mutable_state_from_registry(&self) -> Result<()> {
         self.migrate_mutable_state_from_registry_inner()
     }
@@ -1561,6 +1690,7 @@ mod tests {
             cursor: cursor.to_string(),
             files_processed: 1,
             symbols_written: 2,
+            files_failed: 0,
             created_at_unix_ms: 1_700_000_000_300,
         }
     }

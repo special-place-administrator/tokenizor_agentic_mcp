@@ -8,12 +8,14 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::domain::{
-    Checkpoint, ComponentHealth, DiscoveryManifest, FileOutcome, FileOutcomeSummary,
-    FileProcessingResult, FileRecord, HealthIssueCategory, IdempotencyRecord, IdempotencyStatus,
-    IndexRun, IndexRunMode, IndexRunStatus, InvalidationResult, LanguageId, NextAction,
-    PersistedFileOutcome, RecoveryStateKind, RepositoryStatus, ResumeRejectReason,
-    ResumeRunOutcome, RunHealth, RunPhase, RunProgressSnapshot, RunRecoveryState, RunStatusReport,
-    unix_timestamp_ms,
+    Checkpoint, ComponentHealth, DiscoveryManifest, FileHealthSummary, FileOutcome,
+    FileOutcomeSummary, FileProcessingResult, FileRecord, HealthIssueCategory, IdempotencyRecord,
+    IdempotencyStatus, IndexRun, IndexRunMode, IndexRunStatus, InvalidationResult, LanguageId,
+    NextAction, OperationalEvent, OperationalEventFilter, OperationalEventKind,
+    PersistedFileOutcome, RecoveryStateKind, RepairEvent, RepairOutcome, RepairResult, RepairScope,
+    RepositoryHealthReport, RepositoryStatus, ResumeRejectReason, ResumeRunOutcome, RunHealth,
+    RunHealthSummary, RunPhase, RunProgressSnapshot, RunRecoveryState, RunStatusReport,
+    StatusContext, unix_timestamp_ms,
 };
 use crate::error::{Result, TokenizorError};
 use crate::indexing::pipeline::{IndexingPipeline, PipelineProgress, PipelineResumeState};
@@ -293,21 +295,33 @@ impl RunManagerPersistenceAdapter {
     }
 
     pub fn find_runs_by_status(&self, status: &IndexRunStatus) -> Result<Vec<IndexRun>> {
-        let runs = self.control_plane.find_runs_by_status(status)?;
-        if runs.is_empty() && self.uses_registry_mutable_state_fallback() {
-            self.registry.find_runs_by_status(status)
-        } else {
-            Ok(runs)
+        let mut runs = self.control_plane.find_runs_by_status(status)?;
+        if self.uses_registry_mutable_state_fallback() {
+            let registry_runs = self.registry.find_runs_by_status(status)?;
+            let known_ids: std::collections::HashSet<String> =
+                runs.iter().map(|r| r.run_id.clone()).collect();
+            runs.extend(
+                registry_runs
+                    .into_iter()
+                    .filter(|r| !known_ids.contains(&r.run_id)),
+            );
         }
+        Ok(runs)
     }
 
     pub fn list_runs(&self) -> Result<Vec<IndexRun>> {
-        let runs = self.control_plane.list_runs()?;
-        if runs.is_empty() && self.uses_registry_mutable_state_fallback() {
-            self.registry.list_runs()
-        } else {
-            Ok(runs)
+        let mut runs = self.control_plane.list_runs()?;
+        if self.uses_registry_mutable_state_fallback() {
+            let registry_runs = self.registry.list_runs()?;
+            let known_ids: std::collections::HashSet<String> =
+                runs.iter().map(|r| r.run_id.clone()).collect();
+            runs.extend(
+                registry_runs
+                    .into_iter()
+                    .filter(|r| !known_ids.contains(&r.run_id)),
+            );
         }
+        Ok(runs)
     }
 
     pub fn get_runs_by_repo(&self, repo_id: &str) -> Result<Vec<IndexRun>> {
@@ -375,7 +389,14 @@ impl RunManagerPersistenceAdapter {
         if self.mirrors_mutable_state_to_registry() {
             self.registry.save_run(run)?;
         }
-        self.control_plane.save_run(run)
+        match self.control_plane.save_run(run) {
+            Ok(()) | Err(TokenizorError::NotFound(_))
+                if self.mirrors_mutable_state_to_registry() =>
+            {
+                Ok(())
+            }
+            other => other,
+        }
     }
 
     pub fn update_run_status(
@@ -475,14 +496,28 @@ impl RunManagerPersistenceAdapter {
         if self.mirrors_mutable_state_to_registry() {
             self.registry.save_file_records(run_id, records)?;
         }
-        self.control_plane.save_file_records(run_id, records)
+        match self.control_plane.save_file_records(run_id, records) {
+            Ok(()) | Err(TokenizorError::NotFound(_))
+                if self.mirrors_mutable_state_to_registry() =>
+            {
+                Ok(())
+            }
+            other => other,
+        }
     }
 
     pub fn save_checkpoint(&self, checkpoint: &Checkpoint) -> Result<()> {
         if self.mirrors_mutable_state_to_registry() {
             self.registry.save_checkpoint(checkpoint)?;
         }
-        self.control_plane.save_checkpoint(checkpoint)
+        match self.control_plane.save_checkpoint(checkpoint) {
+            Ok(()) | Err(TokenizorError::NotFound(_))
+                if self.mirrors_mutable_state_to_registry() =>
+            {
+                Ok(())
+            }
+            other => other,
+        }
     }
 
     pub fn save_repository(&self, repository: &crate::domain::Repository) -> Result<()> {
@@ -530,14 +565,76 @@ impl RunManagerPersistenceAdapter {
         if self.mirrors_mutable_state_to_registry() {
             self.registry.save_idempotency_record(record)?;
         }
-        self.control_plane.save_idempotency_record(record)
+        match self.control_plane.save_idempotency_record(record) {
+            Ok(()) | Err(TokenizorError::NotFound(_))
+                if self.mirrors_mutable_state_to_registry() =>
+            {
+                Ok(())
+            }
+            other => other,
+        }
     }
 
     pub fn save_discovery_manifest(&self, manifest: &DiscoveryManifest) -> Result<()> {
         if self.mirrors_mutable_state_to_registry() {
             self.registry.save_discovery_manifest(manifest)?;
         }
-        self.control_plane.save_discovery_manifest(manifest)
+        match self.control_plane.save_discovery_manifest(manifest) {
+            Ok(()) | Err(TokenizorError::NotFound(_))
+                if self.mirrors_mutable_state_to_registry() =>
+            {
+                Ok(())
+            }
+            other => other,
+        }
+    }
+
+    pub fn save_repair_event(&self, event: &RepairEvent) -> Result<()> {
+        if self.mirrors_mutable_state_to_registry() {
+            self.registry.save_repair_event(event)?;
+        }
+        match self.control_plane.save_repair_event(event) {
+            Ok(()) | Err(TokenizorError::NotFound(_))
+                if self.mirrors_mutable_state_to_registry() =>
+            {
+                Ok(())
+            }
+            other => other,
+        }
+    }
+
+    pub fn get_repair_events(&self, repo_id: &str) -> Result<Vec<RepairEvent>> {
+        if self.uses_registry_mutable_state_fallback() {
+            self.registry.get_repair_events(repo_id)
+        } else {
+            self.control_plane.get_repair_events(repo_id)
+        }
+    }
+
+    pub fn save_operational_event(&self, event: &OperationalEvent) -> Result<()> {
+        if self.mirrors_mutable_state_to_registry() {
+            self.registry.save_operational_event(event)?;
+        }
+        match self.control_plane.save_operational_event(event) {
+            Ok(()) | Err(TokenizorError::NotFound(_))
+                if self.mirrors_mutable_state_to_registry() =>
+            {
+                Ok(())
+            }
+            other => other,
+        }
+    }
+
+    pub fn get_operational_events(
+        &self,
+        repo_id: &str,
+        filter: &OperationalEventFilter,
+    ) -> Result<Vec<OperationalEvent>> {
+        if self.uses_registry_mutable_state_fallback() {
+            self.registry.get_operational_events(repo_id, filter)
+        } else {
+            self.control_plane.get_operational_events(repo_id, filter)
+        }
     }
 }
 
@@ -689,6 +786,26 @@ impl ControlPlane for RunManagerPersistenceAdapter {
 
     fn save_discovery_manifest(&self, manifest: &DiscoveryManifest) -> Result<()> {
         RunManagerPersistenceAdapter::save_discovery_manifest(self, manifest)
+    }
+
+    fn save_repair_event(&self, event: &RepairEvent) -> Result<()> {
+        RunManagerPersistenceAdapter::save_repair_event(self, event)
+    }
+
+    fn get_repair_events(&self, repo_id: &str) -> Result<Vec<RepairEvent>> {
+        RunManagerPersistenceAdapter::get_repair_events(self, repo_id)
+    }
+
+    fn save_operational_event(&self, event: &OperationalEvent) -> Result<()> {
+        RunManagerPersistenceAdapter::save_operational_event(self, event)
+    }
+
+    fn get_operational_events(
+        &self,
+        repo_id: &str,
+        filter: &OperationalEventFilter,
+    ) -> Result<Vec<OperationalEvent>> {
+        RunManagerPersistenceAdapter::get_operational_events(self, repo_id, filter)
     }
 }
 
@@ -845,6 +962,34 @@ impl RunManager {
             );
         }
 
+        let transition_count = report.transitioned_runs.len();
+        if transition_count > 0 {
+            let actions: Vec<String> = report
+                .transitioned_runs
+                .iter()
+                .map(|t| format!("{}:{:?}->{:?}", t.run_id, t.from_status, t.to_status))
+                .collect();
+            // Emit per distinct repo_id
+            let mut seen_repos = std::collections::HashSet::new();
+            for t in &report.transitioned_runs {
+                if seen_repos.insert(t.repo_id.clone()) {
+                    if let Err(e) = self
+                        .control_plane
+                        .save_operational_event(&OperationalEvent {
+                            repo_id: t.repo_id.clone(),
+                            kind: OperationalEventKind::StartupSweepCompleted {
+                                stale_runs_found: transition_count,
+                                actions_taken: actions.clone(),
+                            },
+                            timestamp_unix_ms: unix_timestamp_ms(),
+                        })
+                    {
+                        warn!(repo_id = %t.repo_id, error = %e, "failed to record startup sweep event");
+                    }
+                }
+            }
+        }
+
         Ok(report)
     }
 
@@ -896,6 +1041,16 @@ impl RunManager {
 
         match update_result {
             Ok(()) => {
+                if let Err(e) = self.control_plane.save_operational_event(&OperationalEvent {
+                    repo_id: run.repo_id.clone(),
+                    kind: OperationalEventKind::RunInterrupted {
+                        run_id: run.run_id.clone(),
+                        reason: error_summary.to_string(),
+                    },
+                    timestamp_unix_ms: unix_timestamp_ms(),
+                }) {
+                    warn!(run_id = %run.run_id, error = %e, "failed to record run interrupted event");
+                }
                 info!(
                     run_id = %run.run_id,
                     repo_id = %run.repo_id,
@@ -978,6 +1133,16 @@ impl RunManager {
         };
 
         self.control_plane.save_run(&run)?;
+
+        self.control_plane
+            .save_operational_event(&OperationalEvent {
+                repo_id: repo_id.to_string(),
+                kind: OperationalEventKind::RunStarted {
+                    run_id: run.run_id.clone(),
+                    mode: run.mode.clone(),
+                },
+                timestamp_unix_ms: requested_at,
+            })?;
 
         info!(
             run_id = %run.run_id,
@@ -1341,6 +1506,17 @@ impl RunManager {
             None,
         )?;
 
+        self.control_plane
+            .save_operational_event(&OperationalEvent {
+                repo_id: repo_id.to_string(),
+                kind: OperationalEventKind::RepositoryStatusChanged {
+                    previous: previous_status.clone(),
+                    current: RepositoryStatus::Invalidated,
+                    trigger: reason.unwrap_or("invalidation requested").to_string(),
+                },
+                timestamp_unix_ms: now,
+            })?;
+
         // Save idempotency record
         let record = IdempotencyRecord {
             operation: "invalidate".to_string(),
@@ -1511,6 +1687,17 @@ impl RunManager {
                 );
             }
         };
+        if manifest.run_id != run.run_id {
+            return self.resume_rejected(
+                &run,
+                ResumeRejectReason::CorruptDiscoveryManifest,
+                NextAction::Reindex,
+                format!(
+                    "persisted discovery manifest run_id `{}` does not match resume target `{}`",
+                    manifest.run_id, run.run_id
+                ),
+            );
+        }
         let manifest_paths = match validate_discovery_manifest(&manifest) {
             Ok(paths) => paths,
             Err(detail) => {
@@ -1578,6 +1765,17 @@ impl RunManager {
             None,
         )?;
 
+        // Record RunStarted event for the resume transition to Running
+        self.control_plane
+            .save_operational_event(&OperationalEvent {
+                repo_id: resumed_run.repo_id.clone(),
+                kind: OperationalEventKind::RunStarted {
+                    run_id: resumed_run.run_id.clone(),
+                    mode: resumed_run.mode.clone(),
+                },
+                timestamp_unix_ms: unix_timestamp_ms(),
+            })?;
+
         self.spawn_pipeline_for_run_with_resume(
             &resumed_run,
             repo_root,
@@ -1587,7 +1785,7 @@ impl RunManager {
                 total_files: manifest_paths.len() as u64,
                 files_processed: checkpoint.files_processed,
                 symbols_extracted: checkpoint.symbols_written,
-                files_failed: 0,
+                files_failed: checkpoint.files_failed,
                 manifest_paths: manifest_paths.clone(),
             }),
         );
@@ -1683,6 +1881,7 @@ impl RunManager {
             let should_clear_invalidation =
                 run_completion_clears_repository_invalidation(&result.status, &result.results);
             let final_error_summary = result.error_summary;
+            let files_processed_count = result.results.len();
 
             // Check if the run was already cancelled (or otherwise made terminal)
             // by cancel_run() before we update status — prevents overwriting Cancelled
@@ -1702,6 +1901,7 @@ impl RunManager {
                 } else {
                     Some(result.not_yet_supported)
                 };
+                let error_summary_clone = final_error_summary.clone();
                 if let Err(e) = manager.control_plane.update_run_status_with_finish(
                     &run_id,
                     result.status.clone(),
@@ -1710,6 +1910,23 @@ impl RunManager {
                     not_yet_supported,
                 ) {
                     error!(run_id = %run_id, error = %e, "failed to update final run status");
+                }
+
+                if let Err(e) =
+                    manager
+                        .control_plane
+                        .save_operational_event(&OperationalEvent {
+                            repo_id: repo_id_owned.clone(),
+                            kind: OperationalEventKind::RunCompleted {
+                                run_id: run_id.clone(),
+                                status: result.status.clone(),
+                                files_processed: files_processed_count,
+                                error_summary: error_summary_clone,
+                            },
+                            timestamp_unix_ms: finished_at,
+                        })
+                {
+                    warn!(run_id = %run_id, error = %e, "failed to record run completion event");
                 }
 
                 // Only fully healthy succeeded runs should clear repository invalidation.
@@ -1726,6 +1943,17 @@ impl RunManager {
                             ) {
                                 warn!(repo_id = %repo_id_owned, error = %e, "failed to clear invalidation after successful run");
                             } else {
+                                if let Err(e) = manager.control_plane.save_operational_event(&OperationalEvent {
+                                    repo_id: repo_id_owned.clone(),
+                                    kind: OperationalEventKind::RepositoryStatusChanged {
+                                        previous: RepositoryStatus::Invalidated,
+                                        current: RepositoryStatus::Ready,
+                                        trigger: "successful reindex cleared invalidation".to_string(),
+                                    },
+                                    timestamp_unix_ms: unix_timestamp_ms(),
+                                }) {
+                                    warn!(repo_id = %repo_id_owned, error = %e, "failed to record status change event");
+                                }
                                 info!(repo_id = %repo_id_owned, "cleared invalidation after successful run");
                             }
                         }
@@ -1795,15 +2023,25 @@ impl RunManager {
             return self.inspect_run(run_id);
         }
 
-        // Signal cancellation token and remove from active_runs
+        // Signal cancellation token, capture progress, and remove from active_runs
         // Drop Mutex guard before calling persistence methods
-        {
+        let files_processed_at_cancel = {
             let mut active_runs = self.active_runs.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(active_run) = active_runs.remove(&run.repo_id) {
                 active_run.cancellation_token.cancel();
                 debug!(run_id = %run_id, repo_id = %run.repo_id, "cancellation token signaled");
+                active_run
+                    .progress
+                    .as_ref()
+                    .map(|p| {
+                        p.files_processed
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                    })
+                    .unwrap_or(0)
+            } else {
+                0
             }
-        }
+        };
 
         // Atomic, race-safe persistence update
         let changed = self
@@ -1811,6 +2049,16 @@ impl RunManager {
             .cancel_run_if_active(run_id, unix_timestamp_ms())?;
 
         if changed {
+            self.control_plane.save_operational_event(&OperationalEvent {
+                repo_id: run.repo_id.clone(),
+                kind: OperationalEventKind::RunCompleted {
+                    run_id: run_id.to_string(),
+                    status: IndexRunStatus::Cancelled,
+                    files_processed: files_processed_at_cancel as usize,
+                    error_summary: Some("cancelled by user".to_string()),
+                },
+                timestamp_unix_ms: unix_timestamp_ms(),
+            })?;
             info!(run_id = %run_id, "run cancelled");
         } else {
             debug!(run_id = %run_id, "cancel_run: run became terminal before persistence update");
@@ -1852,10 +2100,13 @@ impl RunManager {
             let symbols_extracted = progress
                 .symbols_extracted
                 .load(std::sync::atomic::Ordering::Relaxed);
+            let files_failed = progress
+                .files_failed
+                .load(std::sync::atomic::Ordering::Relaxed);
 
             let cursor = active.checkpoint_cursor_fn.as_ref().and_then(|f| f());
 
-            ((files_processed, symbols_extracted), cursor)
+            ((files_processed, symbols_extracted, files_failed), cursor)
         };
         // Mutex guard dropped here
 
@@ -1870,10 +2121,22 @@ impl RunManager {
             cursor,
             files_processed: progress.0,
             symbols_written: progress.1,
+            files_failed: progress.2,
             created_at_unix_ms: unix_timestamp_ms(),
         };
 
         self.control_plane.save_checkpoint(&checkpoint)?;
+
+        self.control_plane
+            .save_operational_event(&OperationalEvent {
+                repo_id: run.repo_id.clone(),
+                kind: OperationalEventKind::CheckpointCreated {
+                    run_id: run_id.to_string(),
+                    cursor: checkpoint.cursor.clone(),
+                    files_committed: checkpoint.files_processed as usize, // u64→usize safe for file counts
+                },
+                timestamp_unix_ms: checkpoint.created_at_unix_ms,
+            })?;
 
         info!(
             run_id = %run_id,
@@ -1985,6 +2248,563 @@ impl RunManager {
             file_outcome_summary,
             action_required,
         })
+    }
+
+
+    pub fn repair_repository(
+        self: &Arc<Self>,
+        repo_id: &str,
+        scope: RepairScope,
+        repo_root: PathBuf,
+        blob_store: Arc<dyn BlobStore>,
+    ) -> Result<RepairResult> {
+        let repo = self
+            .control_plane
+            .get_repository(repo_id)?
+            .ok_or_else(|| TokenizorError::NotFound(format!("repository not found: {repo_id}")))?;
+
+        let previous_status = repo.status.clone();
+
+        if matches!(previous_status, RepositoryStatus::Ready | RepositoryStatus::Pending) {
+            let result = RepairResult {
+                repo_id: repo_id.to_string(),
+                scope: scope.clone(),
+                previous_status: previous_status.clone(),
+                outcome: RepairOutcome::AlreadyHealthy,
+                next_action: None,
+                detail: "repository is already in a healthy state".to_string(),
+                recorded_at_unix_ms: unix_timestamp_ms(),
+            };
+            self.record_repair_event(&result)?;
+            return Ok(result);
+        }
+
+        let outcome = match &scope {
+            RepairScope::Repository => {
+                self.repair_repository_state(repo_id, &previous_status, &repo_root, blob_store)?
+            }
+            RepairScope::Run { run_id } => {
+                self.repair_run_state(run_id, repo_root.clone(), blob_store.clone())?
+            }
+            RepairScope::File {
+                run_id,
+                relative_path,
+            } => self.repair_file_state(run_id, relative_path, &repo_root, repo_id)?,
+        };
+
+        let next_action = match &outcome {
+            RepairOutcome::RequiresReindex => Some(NextAction::Reindex),
+            RepairOutcome::InProgress { .. } => Some(NextAction::Wait),
+            RepairOutcome::CannotRestore { .. } => Some(NextAction::Repair),
+            _ => None,
+        };
+
+        let detail = match &outcome {
+            RepairOutcome::Restored => "repair successfully restored trusted state".to_string(),
+            RepairOutcome::AlreadyHealthy => "no repair needed".to_string(),
+            RepairOutcome::CannotRestore { reason } => {
+                format!("repair cannot restore trust: {reason}")
+            }
+            RepairOutcome::RequiresReindex => {
+                "repair requires a full reindex to restore trust".to_string()
+            }
+            RepairOutcome::InProgress { run_id } => format!("repair spawned run {run_id}"),
+        };
+
+        let result = RepairResult {
+            repo_id: repo_id.to_string(),
+            scope,
+            previous_status,
+            outcome,
+            next_action,
+            detail,
+            recorded_at_unix_ms: unix_timestamp_ms(),
+        };
+
+        self.record_repair_event(&result)?;
+        Ok(result)
+    }
+
+    fn record_repair_event(&self, result: &RepairResult) -> Result<()> {
+        let event = RepairEvent {
+            repo_id: result.repo_id.clone(),
+            scope: result.scope.clone(),
+            previous_status: result.previous_status.clone(),
+            outcome: result.outcome.clone(),
+            detail: result.detail.clone(),
+            timestamp_unix_ms: result.recorded_at_unix_ms,
+        };
+        self.control_plane.save_repair_event(&event)
+    }
+
+    fn repair_repository_state(
+        self: &Arc<Self>,
+        repo_id: &str,
+        status: &RepositoryStatus,
+        repo_root: &Path,
+        blob_store: Arc<dyn BlobStore>,
+    ) -> Result<RepairOutcome> {
+        match status {
+            RepositoryStatus::Degraded => {
+                let latest_run = self.control_plane.get_latest_completed_run(repo_id)?;
+                if let Some(run) = latest_run {
+                    let records = self.control_plane.get_file_records(&run.run_id)?;
+                    let failed_count = records
+                        .iter()
+                        .filter(|r| matches!(r.outcome, PersistedFileOutcome::Failed { .. }))
+                        .count();
+                    if failed_count == 0 {
+                        self.control_plane.update_repository_status(
+                            repo_id,
+                            RepositoryStatus::Ready,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )?;
+                        self.control_plane
+                            .save_operational_event(&OperationalEvent {
+                                repo_id: repo_id.to_string(),
+                                kind: OperationalEventKind::RepositoryStatusChanged {
+                                    previous: RepositoryStatus::Degraded,
+                                    current: RepositoryStatus::Ready,
+                                    trigger: "repair: no failed files found".to_string(),
+                                },
+                                timestamp_unix_ms: unix_timestamp_ms(),
+                            })?;
+                        return Ok(RepairOutcome::Restored);
+                    }
+                }
+                match self.reindex_repository(
+                    repo_id,
+                    None,
+                    Some("repair: degraded repository with failed files"),
+                    repo_root.to_path_buf(),
+                    blob_store,
+                ) {
+                    Ok(run) => Ok(RepairOutcome::InProgress {
+                        run_id: run.run_id,
+                    }),
+                    Err(e) => Ok(RepairOutcome::CannotRestore {
+                        reason: format!("reindex failed to start: {e}"),
+                    }),
+                }
+            }
+            RepositoryStatus::Quarantined => {
+                let latest_run = self.control_plane.get_latest_completed_run(repo_id)?;
+                if let Some(run) = latest_run {
+                    let records = self.control_plane.get_file_records(&run.run_id)?;
+                    let quarantined: Vec<_> = records
+                        .iter()
+                        .filter(|r| {
+                            matches!(r.outcome, PersistedFileOutcome::Quarantined { .. })
+                        })
+                        .collect();
+                    if quarantined.is_empty() {
+                        self.control_plane.update_repository_status(
+                            repo_id,
+                            RepositoryStatus::Ready,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )?;
+                        self.control_plane
+                            .save_operational_event(&OperationalEvent {
+                                repo_id: repo_id.to_string(),
+                                kind: OperationalEventKind::RepositoryStatusChanged {
+                                    previous: RepositoryStatus::Quarantined,
+                                    current: RepositoryStatus::Ready,
+                                    trigger: "repair: no quarantined files found".to_string(),
+                                },
+                                timestamp_unix_ms: unix_timestamp_ms(),
+                            })?;
+                        return Ok(RepairOutcome::Restored);
+                    }
+
+                    let mut verified_indices = Vec::new();
+                    let mut failed_paths = Vec::new();
+                    for (i, record) in quarantined.iter().enumerate() {
+                        if verify_file_against_source(record, repo_root) {
+                            verified_indices.push(i);
+                        } else {
+                            failed_paths.push(record.relative_path.clone());
+                        }
+                    }
+
+                    if failed_paths.is_empty() {
+                        let updated_records: Vec<FileRecord> = quarantined
+                            .iter()
+                            .map(|r| {
+                                let mut updated = (*r).clone();
+                                updated.outcome = PersistedFileOutcome::Committed;
+                                updated
+                            })
+                            .collect();
+                        self.control_plane
+                            .save_file_records(&run.run_id, &updated_records)?;
+                        self.control_plane.update_repository_status(
+                            repo_id,
+                            RepositoryStatus::Ready,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )?;
+                        self.control_plane
+                            .save_operational_event(&OperationalEvent {
+                                repo_id: repo_id.to_string(),
+                                kind: OperationalEventKind::RepositoryStatusChanged {
+                                    previous: RepositoryStatus::Quarantined,
+                                    current: RepositoryStatus::Ready,
+                                    trigger: "repair: all quarantined files re-verified"
+                                        .to_string(),
+                                },
+                                timestamp_unix_ms: unix_timestamp_ms(),
+                            })?;
+                        return Ok(RepairOutcome::Restored);
+                    }
+
+                    if !verified_indices.is_empty() {
+                        let verified_records: Vec<FileRecord> = verified_indices
+                            .iter()
+                            .map(|&i| {
+                                let mut updated = quarantined[i].clone();
+                                updated.outcome = PersistedFileOutcome::Committed;
+                                updated
+                            })
+                            .collect();
+                        self.control_plane
+                            .save_file_records(&run.run_id, &verified_records)?;
+                        self.control_plane.update_repository_status(
+                            repo_id,
+                            RepositoryStatus::Degraded,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )?;
+                        self.control_plane
+                            .save_operational_event(&OperationalEvent {
+                                repo_id: repo_id.to_string(),
+                                kind: OperationalEventKind::RepositoryStatusChanged {
+                                    previous: RepositoryStatus::Quarantined,
+                                    current: RepositoryStatus::Degraded,
+                                    trigger: "repair: partial re-verification".to_string(),
+                                },
+                                timestamp_unix_ms: unix_timestamp_ms(),
+                            })?;
+                    }
+
+                    Ok(RepairOutcome::CannotRestore {
+                        reason: format!(
+                            "{} of {} quarantined files could not be re-verified: {}",
+                            failed_paths.len(),
+                            quarantined.len(),
+                            failed_paths.join(", ")
+                        ),
+                    })
+                } else {
+                    Ok(RepairOutcome::CannotRestore {
+                        reason: "no completed run found for quarantined repository".to_string(),
+                    })
+                }
+            }
+            RepositoryStatus::Failed | RepositoryStatus::Invalidated => {
+                match self.reindex_repository(
+                    repo_id,
+                    None,
+                    Some("repair: restoring from failed/invalidated state"),
+                    repo_root.to_path_buf(),
+                    blob_store,
+                ) {
+                    Ok(run) => Ok(RepairOutcome::InProgress {
+                        run_id: run.run_id,
+                    }),
+                    Err(e) => Ok(RepairOutcome::CannotRestore {
+                        reason: format!("reindex failed to start: {e}"),
+                    }),
+                }
+            }
+            _ => Ok(RepairOutcome::AlreadyHealthy),
+        }
+    }
+
+    fn repair_run_state(
+        self: &Arc<Self>,
+        run_id: &str,
+        repo_root: PathBuf,
+        blob_store: Arc<dyn BlobStore>,
+    ) -> Result<RepairOutcome> {
+        let run = self
+            .control_plane
+            .find_run(run_id)?
+            .ok_or_else(|| TokenizorError::NotFound(format!("run not found: {run_id}")))?;
+
+        match run.status {
+            IndexRunStatus::Interrupted => {
+                match self.resume_run(run_id, repo_root, blob_store) {
+                    Ok(ResumeRunOutcome::Resumed { run, .. }) => {
+                        Ok(RepairOutcome::InProgress {
+                            run_id: run.run_id,
+                        })
+                    }
+                    Ok(ResumeRunOutcome::Rejected {
+                        reason, detail, ..
+                    }) => {
+                        match reason {
+                            ResumeRejectReason::MissingCheckpoint
+                            | ResumeRejectReason::EmptyCheckpointCursor
+                            | ResumeRejectReason::MissingDiscoveryManifest
+                            | ResumeRejectReason::CorruptDiscoveryManifest
+                            | ResumeRejectReason::MissingDurableOutputs
+                            | ResumeRejectReason::CheckpointCursorMissing => {
+                                Ok(RepairOutcome::RequiresReindex)
+                            }
+                            _ => Ok(RepairOutcome::CannotRestore {
+                                reason: detail,
+                            }),
+                        }
+                    }
+                    Err(e) => Ok(RepairOutcome::CannotRestore {
+                        reason: format!("resume failed: {e}"),
+                    }),
+                }
+            }
+            IndexRunStatus::Failed => Ok(RepairOutcome::RequiresReindex),
+            IndexRunStatus::Cancelled
+            | IndexRunStatus::Aborted
+            | IndexRunStatus::Succeeded => Ok(RepairOutcome::AlreadyHealthy),
+            IndexRunStatus::Queued | IndexRunStatus::Running => Ok(RepairOutcome::CannotRestore {
+                reason: "run is still active; wait for completion or cancel first".to_string(),
+            }),
+        }
+    }
+
+    fn repair_file_state(
+        &self,
+        run_id: &str,
+        relative_path: &str,
+        repo_root: &Path,
+        repo_id: &str,
+    ) -> Result<RepairOutcome> {
+        let records = self.control_plane.get_file_records(run_id)?;
+        let record = records
+            .iter()
+            .find(|r| r.relative_path == relative_path)
+            .ok_or_else(|| {
+                TokenizorError::NotFound(format!(
+                    "file '{relative_path}' not found in run '{run_id}'"
+                ))
+            })?;
+
+        match &record.outcome {
+            PersistedFileOutcome::Quarantined { .. } => {
+                if verify_file_against_source(record, repo_root) {
+                    let mut updated = record.clone();
+                    updated.outcome = PersistedFileOutcome::Committed;
+                    self.control_plane
+                        .save_file_records(run_id, &[updated])?;
+                    let all_records = self.control_plane.get_file_records(run_id)?;
+                    let has_quarantined = all_records.iter().any(|r| {
+                        matches!(r.outcome, PersistedFileOutcome::Quarantined { .. })
+                    });
+                    let has_failed = all_records.iter().any(|r| {
+                        matches!(r.outcome, PersistedFileOutcome::Failed { .. })
+                    });
+                    if !has_quarantined && !has_failed {
+                        self.control_plane.update_repository_status(
+                            repo_id,
+                            RepositoryStatus::Ready,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )?;
+                    }
+                    Ok(RepairOutcome::Restored)
+                } else {
+                    Ok(RepairOutcome::CannotRestore {
+                        reason: "source file has diverged from indexed state; reindex required"
+                            .to_string(),
+                    })
+                }
+            }
+            PersistedFileOutcome::Failed { .. } => Ok(RepairOutcome::RequiresReindex),
+            PersistedFileOutcome::Committed | PersistedFileOutcome::EmptySymbols => {
+                Ok(RepairOutcome::AlreadyHealthy)
+            }
+        }
+    }
+
+    // --- Repository health inspection (Story 4.5) ---
+
+    pub fn inspect_repository_health(&self, repo_id: &str) -> Result<RepositoryHealthReport> {
+        let repo = self
+            .control_plane
+            .get_repository(repo_id)?
+            .ok_or_else(|| TokenizorError::NotFound(format!("repository not found: {repo_id}")))?;
+
+        let latest_run = self.control_plane.get_latest_completed_run(repo_id)?;
+        let active_run_id = self.get_active_run_id(repo_id);
+        let repair_events = self.control_plane.get_repair_events(repo_id)?;
+        let recent_repairs: Vec<RepairEvent> = repair_events.into_iter().rev().take(10).collect();
+
+        let (action_required, next_action, status_detail) = Self::classify_repository_health(
+            &repo.status,
+            latest_run.is_some(),
+            active_run_id.is_some(),
+            &repo.invalidation_reason,
+            &repo.quarantine_reason,
+        );
+
+        let file_health = if let Some(ref run) = latest_run {
+            let records = self.control_plane.get_file_records(&run.run_id)?;
+            Some(Self::compute_file_health_summary(&records))
+        } else {
+            None
+        };
+
+        let run_summary = latest_run.map(|run| RunHealthSummary {
+            run_id: run.run_id,
+            status: run.status,
+            mode: run.mode,
+            started_at_unix_ms: run.started_at_unix_ms.unwrap_or(run.requested_at_unix_ms),
+            completed_at_unix_ms: run.finished_at_unix_ms,
+        });
+
+        let invalidation_context = if repo.status == RepositoryStatus::Invalidated {
+            repo.invalidation_reason.map(|reason| StatusContext {
+                reason,
+                occurred_at_unix_ms: repo.invalidated_at_unix_ms.unwrap_or(0),
+            })
+        } else {
+            None
+        };
+
+        let quarantine_context = if repo.status == RepositoryStatus::Quarantined {
+            repo.quarantine_reason.map(|reason| StatusContext {
+                reason,
+                occurred_at_unix_ms: repo.quarantined_at_unix_ms.unwrap_or(0),
+            })
+        } else {
+            None
+        };
+
+        Ok(RepositoryHealthReport {
+            repo_id: repo_id.to_string(),
+            status: repo.status,
+            action_required,
+            next_action,
+            status_detail,
+            file_health,
+            latest_run: run_summary,
+            active_run_id,
+            recent_repairs,
+            invalidation_context,
+            quarantine_context,
+            checked_at_unix_ms: unix_timestamp_ms(),
+        })
+    }
+
+    // --- Operational history (Story 4.6) ---
+
+    pub fn get_operational_history(
+        &self,
+        repo_id: &str,
+        filter: &OperationalEventFilter,
+    ) -> Result<Vec<OperationalEvent>> {
+        // Validate repo exists
+        self.control_plane
+            .get_repository(repo_id)?
+            .ok_or_else(|| TokenizorError::NotFound(format!("repository not found: {repo_id}")))?;
+        self.control_plane
+            .get_operational_events(repo_id, filter)
+    }
+
+    fn classify_repository_health(
+        status: &RepositoryStatus,
+        has_completed_run: bool,
+        has_active_run: bool,
+        invalidation_reason: &Option<String>,
+        quarantine_reason: &Option<String>,
+    ) -> (bool, Option<NextAction>, String) {
+        match status {
+            RepositoryStatus::Ready => (
+                false,
+                None,
+                "Repository is healthy. Retrieval is safe.".to_string(),
+            ),
+            RepositoryStatus::Pending if !has_completed_run && !has_active_run => (
+                true,
+                Some(NextAction::Reindex),
+                "Repository has never been indexed. Run indexing to enable retrieval.".to_string(),
+            ),
+            RepositoryStatus::Pending if has_active_run => (
+                false,
+                Some(NextAction::Wait),
+                "Initial indexing is in progress.".to_string(),
+            ),
+            RepositoryStatus::Pending => (
+                false,
+                None,
+                "Repository is pending.".to_string(),
+            ),
+            RepositoryStatus::Degraded => (
+                true,
+                Some(NextAction::Repair),
+                "Repository has degraded indexed state. Some files failed or are missing. Trigger repair to assess and restore.".to_string(),
+            ),
+            RepositoryStatus::Failed => (
+                true,
+                Some(NextAction::Repair),
+                "Repository indexing failed. Trigger repair to attempt recovery or reindex.".to_string(),
+            ),
+            RepositoryStatus::Invalidated => {
+                let reason = invalidation_reason
+                    .as_deref()
+                    .unwrap_or("unknown reason");
+                (
+                    true,
+                    Some(NextAction::Reindex),
+                    format!("Repository has been invalidated: {reason}. Reindex required to restore trusted state."),
+                )
+            }
+            RepositoryStatus::Quarantined => {
+                let reason = quarantine_reason
+                    .as_deref()
+                    .unwrap_or("unknown reason");
+                (
+                    true,
+                    Some(NextAction::Repair),
+                    format!("Repository has quarantined files: {reason}. Trigger repair to re-verify or reindex affected files."),
+                )
+            }
+        }
+    }
+
+    fn compute_file_health_summary(records: &[FileRecord]) -> FileHealthSummary {
+        let mut committed = 0usize;
+        let mut quarantined = 0usize;
+        let mut failed = 0usize;
+        let mut empty_symbols = 0usize;
+
+        for record in records {
+            match &record.outcome {
+                PersistedFileOutcome::Committed => committed += 1,
+                PersistedFileOutcome::EmptySymbols => empty_symbols += 1,
+                PersistedFileOutcome::Failed { .. } => failed += 1,
+                PersistedFileOutcome::Quarantined { .. } => quarantined += 1,
+            }
+        }
+
+        FileHealthSummary {
+            total_files: committed + quarantined + failed + empty_symbols,
+            committed,
+            quarantined,
+            failed,
+            empty_symbols,
+        }
     }
 }
 
@@ -2309,6 +3129,17 @@ fn sweep_owned_temp_artifacts(
     }
 }
 
+fn verify_file_against_source(file_record: &FileRecord, repo_root: &Path) -> bool {
+    let source_path = repo_root.join(&file_record.relative_path);
+    match fs::read(&source_path) {
+        Ok(bytes) => {
+            let current_hash = digest_hex(&bytes);
+            current_hash == file_record.content_hash
+        }
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2458,6 +3289,26 @@ mod tests {
         fn save_discovery_manifest(&self, manifest: &DiscoveryManifest) -> Result<()> {
             self.backing.save_discovery_manifest(manifest)
         }
+
+        fn save_repair_event(&self, event: &RepairEvent) -> Result<()> {
+            self.backing.save_repair_event(event)
+        }
+
+        fn get_repair_events(&self, repo_id: &str) -> Result<Vec<RepairEvent>> {
+            self.backing.get_repair_events(repo_id)
+        }
+
+        fn save_operational_event(&self, event: &OperationalEvent) -> Result<()> {
+            self.backing.save_operational_event(event)
+        }
+
+        fn get_operational_events(
+            &self,
+            repo_id: &str,
+            filter: &OperationalEventFilter,
+        ) -> Result<Vec<OperationalEvent>> {
+            self.backing.get_operational_events(repo_id, filter)
+        }
     }
 
     fn temp_run_manager() -> (tempfile::TempDir, RunManager) {
@@ -2512,6 +3363,7 @@ mod tests {
             cursor: file_record.relative_path.clone(),
             files_processed: 1,
             symbols_written: 0,
+            files_failed: 0,
             created_at_unix_ms: 1003,
         };
         let idempotency = IdempotencyRecord {
@@ -2707,6 +3559,7 @@ mod tests {
                 cursor: "src/lib.rs".to_string(),
                 files_processed: 1,
                 symbols_written: 3,
+                files_failed: 0,
                 created_at_unix_ms: 1001,
             })
             .unwrap();
@@ -4355,5 +5208,964 @@ mod tests {
             .unwrap();
         assert_eq!(repo.status, RepositoryStatus::Invalidated);
         assert_eq!(repo.invalidation_reason.as_deref(), Some("reason-B"));
+    }
+
+    fn seed_repo_with_status(manager: &RunManager, repo_id: &str, status: RepositoryStatus) {
+        let repo = crate::domain::Repository {
+            repo_id: repo_id.to_string(),
+            kind: crate::domain::RepositoryKind::Git,
+            root_uri: format!("/tmp/{repo_id}"),
+            project_identity: format!("identity-{repo_id}"),
+            project_identity_kind: crate::domain::ProjectIdentityKind::GitCommonDir,
+            default_branch: None,
+            last_known_revision: None,
+            status,
+            invalidated_at_unix_ms: None,
+            invalidation_reason: None,
+            quarantined_at_unix_ms: None,
+            quarantine_reason: None,
+        };
+        manager.persistence().save_repository(&repo).unwrap();
+    }
+
+    #[test]
+    fn test_repair_ready_repository_returns_already_healthy() {
+        let (_dir, manager, _cas_dir, cas) = temp_reindex_env();
+        seed_repo_with_status(&manager, "repo-1", RepositoryStatus::Ready);
+
+        let result = manager
+            .repair_repository(
+                "repo-1",
+                RepairScope::Repository,
+                PathBuf::from("/tmp/repo-1"),
+                cas,
+            )
+            .unwrap();
+
+        assert_eq!(result.outcome, RepairOutcome::AlreadyHealthy);
+        assert_eq!(result.previous_status, RepositoryStatus::Ready);
+        assert!(result.next_action.is_none());
+    }
+
+    #[test]
+    fn test_repair_pending_repository_returns_already_healthy() {
+        let (_dir, manager, _cas_dir, cas) = temp_reindex_env();
+        seed_repo_with_status(&manager, "repo-1", RepositoryStatus::Pending);
+
+        let result = manager
+            .repair_repository(
+                "repo-1",
+                RepairScope::Repository,
+                PathBuf::from("/tmp/repo-1"),
+                cas,
+            )
+            .unwrap();
+
+        assert_eq!(result.outcome, RepairOutcome::AlreadyHealthy);
+    }
+
+    #[test]
+    fn test_repair_degraded_no_failed_files_marks_ready() {
+        let (_dir, manager, _cas_dir, cas) = temp_reindex_env();
+        seed_repo_with_status(&manager, "repo-1", RepositoryStatus::Degraded);
+
+        let run = IndexRun {
+            run_id: "run-d1".to_string(),
+            repo_id: "repo-1".to_string(),
+            mode: IndexRunMode::Full,
+            status: IndexRunStatus::Succeeded,
+            requested_at_unix_ms: 1000,
+            started_at_unix_ms: Some(1001),
+            finished_at_unix_ms: Some(1002),
+            idempotency_key: None,
+            request_hash: None,
+            checkpoint_cursor: None,
+            error_summary: None,
+            not_yet_supported: None,
+            prior_run_id: None,
+            description: None,
+            recovery_state: None,
+        };
+        manager.persistence().save_run(&run).unwrap();
+
+        let record = FileRecord {
+            relative_path: "src/lib.rs".to_string(),
+            language: LanguageId::Rust,
+            blob_id: "blob-1".to_string(),
+            byte_len: 10,
+            content_hash: "aabb".to_string(),
+            outcome: PersistedFileOutcome::Committed,
+            symbols: Vec::new(),
+            run_id: "run-d1".to_string(),
+            repo_id: "repo-1".to_string(),
+            committed_at_unix_ms: 1002,
+        };
+        manager
+            .persistence()
+            .save_file_records("run-d1", &[record])
+            .unwrap();
+
+        let result = manager
+            .repair_repository(
+                "repo-1",
+                RepairScope::Repository,
+                PathBuf::from("/tmp/repo-1"),
+                cas,
+            )
+            .unwrap();
+
+        assert_eq!(result.outcome, RepairOutcome::Restored);
+        let repo = manager
+            .control_plane
+            .get_repository("repo-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(repo.status, RepositoryStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn test_repair_failed_repository_delegates_to_reindex() {
+        let (dir, manager, _cas_dir, cas) = temp_reindex_env();
+        seed_repo_with_status(&manager, "repo-1", RepositoryStatus::Failed);
+
+        let result = manager
+            .repair_repository(
+                "repo-1",
+                RepairScope::Repository,
+                dir.path().to_path_buf(),
+                cas,
+            )
+            .unwrap();
+
+        match &result.outcome {
+            RepairOutcome::InProgress { run_id } => {
+                assert!(!run_id.is_empty());
+            }
+            RepairOutcome::CannotRestore { .. } => {
+                // acceptable if reindex fails to start in test env
+            }
+            other => panic!("expected InProgress or CannotRestore, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_repair_records_event() {
+        let (_dir, manager, _cas_dir, cas) = temp_reindex_env();
+        seed_repo_with_status(&manager, "repo-1", RepositoryStatus::Ready);
+
+        manager
+            .repair_repository(
+                "repo-1",
+                RepairScope::Repository,
+                PathBuf::from("/tmp/repo-1"),
+                cas,
+            )
+            .unwrap();
+
+        let events = manager
+            .control_plane
+            .get_repair_events("repo-1")
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].repo_id, "repo-1");
+        assert_eq!(events[0].outcome, RepairOutcome::AlreadyHealthy);
+    }
+
+    #[tokio::test]
+    async fn test_repair_never_silently_marks_healthy_on_failed_files() {
+        let (dir, manager, _cas_dir, cas) = temp_reindex_env();
+        seed_repo_with_status(&manager, "repo-1", RepositoryStatus::Degraded);
+
+        let run = IndexRun {
+            run_id: "run-f1".to_string(),
+            repo_id: "repo-1".to_string(),
+            mode: IndexRunMode::Full,
+            status: IndexRunStatus::Succeeded,
+            requested_at_unix_ms: 1000,
+            started_at_unix_ms: Some(1001),
+            finished_at_unix_ms: Some(1002),
+            idempotency_key: None,
+            request_hash: None,
+            checkpoint_cursor: None,
+            error_summary: None,
+            not_yet_supported: None,
+            prior_run_id: None,
+            description: None,
+            recovery_state: None,
+        };
+        manager.persistence().save_run(&run).unwrap();
+
+        let record = FileRecord {
+            relative_path: "src/broken.rs".to_string(),
+            language: LanguageId::Rust,
+            blob_id: "blob-broken".to_string(),
+            byte_len: 10,
+            content_hash: "ffff".to_string(),
+            outcome: PersistedFileOutcome::Failed {
+                error: "parse error".to_string(),
+            },
+            symbols: Vec::new(),
+            run_id: "run-f1".to_string(),
+            repo_id: "repo-1".to_string(),
+            committed_at_unix_ms: 1002,
+        };
+        manager
+            .persistence()
+            .save_file_records("run-f1", &[record])
+            .unwrap();
+
+        let result = manager
+            .repair_repository(
+                "repo-1",
+                RepairScope::Repository,
+                dir.path().to_path_buf(),
+                cas,
+            )
+            .unwrap();
+
+        // Must NOT silently restore to Ready when failed files exist
+        assert_ne!(result.outcome, RepairOutcome::Restored);
+        assert_ne!(result.outcome, RepairOutcome::AlreadyHealthy);
+    }
+
+    #[test]
+    fn test_repair_run_scope_succeeded_returns_healthy() {
+        let (_dir, manager, _cas_dir, cas) = temp_reindex_env();
+        seed_repo_with_status(&manager, "repo-1", RepositoryStatus::Degraded);
+
+        let run = IndexRun {
+            run_id: "run-ok".to_string(),
+            repo_id: "repo-1".to_string(),
+            mode: IndexRunMode::Full,
+            status: IndexRunStatus::Succeeded,
+            requested_at_unix_ms: 1000,
+            started_at_unix_ms: Some(1001),
+            finished_at_unix_ms: Some(1002),
+            idempotency_key: None,
+            request_hash: None,
+            checkpoint_cursor: None,
+            error_summary: None,
+            not_yet_supported: None,
+            prior_run_id: None,
+            description: None,
+            recovery_state: None,
+        };
+        manager.persistence().save_run(&run).unwrap();
+
+        let result = manager
+            .repair_repository(
+                "repo-1",
+                RepairScope::Run {
+                    run_id: "run-ok".to_string(),
+                },
+                PathBuf::from("/tmp/repo-1"),
+                cas,
+            )
+            .unwrap();
+
+        assert_eq!(result.outcome, RepairOutcome::AlreadyHealthy);
+    }
+
+    #[test]
+    fn test_repair_quarantined_all_verified_marks_ready() {
+        let (_dir, manager, _cas_dir, cas) = temp_reindex_env();
+        seed_repo_with_status(&manager, "repo-q1", RepositoryStatus::Quarantined);
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let file_content = b"fn quarantined() {}";
+        let file_hash = digest_hex(file_content);
+        std::fs::create_dir_all(repo_dir.path().join("src")).unwrap();
+        std::fs::write(repo_dir.path().join("src/q.rs"), file_content).unwrap();
+
+        let run = IndexRun {
+            run_id: "run-q1".to_string(),
+            repo_id: "repo-q1".to_string(),
+            mode: IndexRunMode::Full,
+            status: IndexRunStatus::Succeeded,
+            requested_at_unix_ms: 1000,
+            started_at_unix_ms: Some(1001),
+            finished_at_unix_ms: Some(1002),
+            idempotency_key: None,
+            request_hash: None,
+            checkpoint_cursor: None,
+            error_summary: None,
+            not_yet_supported: None,
+            prior_run_id: None,
+            description: None,
+            recovery_state: None,
+        };
+        manager.persistence().save_run(&run).unwrap();
+
+        let record = FileRecord {
+            relative_path: "src/q.rs".to_string(),
+            language: LanguageId::Rust,
+            blob_id: "blob-q1".to_string(),
+            byte_len: file_content.len() as u64,
+            content_hash: file_hash,
+            outcome: PersistedFileOutcome::Quarantined {
+                reason: "test".to_string(),
+            },
+            symbols: Vec::new(),
+            run_id: "run-q1".to_string(),
+            repo_id: "repo-q1".to_string(),
+            committed_at_unix_ms: 1002,
+        };
+        manager
+            .persistence()
+            .save_file_records("run-q1", &[record])
+            .unwrap();
+
+        let result = manager
+            .repair_repository(
+                "repo-q1",
+                RepairScope::Repository,
+                repo_dir.path().to_path_buf(),
+                cas,
+            )
+            .unwrap();
+
+        assert_eq!(result.outcome, RepairOutcome::Restored);
+        let repo = manager
+            .control_plane
+            .get_repository("repo-q1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(repo.status, RepositoryStatus::Ready);
+    }
+
+    #[test]
+    fn test_repair_quarantined_partial_failure_reports_cannot_restore() {
+        let (_dir, manager, _cas_dir, cas) = temp_reindex_env();
+        seed_repo_with_status(&manager, "repo-q2", RepositoryStatus::Quarantined);
+
+        let repo_dir = tempfile::tempdir().unwrap();
+
+        // File A: matching content
+        let file_a_content = b"fn file_a() {}";
+        let file_a_hash = digest_hex(file_a_content);
+        std::fs::create_dir_all(repo_dir.path().join("src")).unwrap();
+        std::fs::write(repo_dir.path().join("src/a.rs"), file_a_content).unwrap();
+
+        // File B: mismatched content (don't write file at all so hash won't match)
+
+        let run = IndexRun {
+            run_id: "run-q2".to_string(),
+            repo_id: "repo-q2".to_string(),
+            mode: IndexRunMode::Full,
+            status: IndexRunStatus::Succeeded,
+            requested_at_unix_ms: 1000,
+            started_at_unix_ms: Some(1001),
+            finished_at_unix_ms: Some(1002),
+            idempotency_key: None,
+            request_hash: None,
+            checkpoint_cursor: None,
+            error_summary: None,
+            not_yet_supported: None,
+            prior_run_id: None,
+            description: None,
+            recovery_state: None,
+        };
+        manager.persistence().save_run(&run).unwrap();
+
+        let record_a = FileRecord {
+            relative_path: "src/a.rs".to_string(),
+            language: LanguageId::Rust,
+            blob_id: "blob-a".to_string(),
+            byte_len: file_a_content.len() as u64,
+            content_hash: file_a_hash,
+            outcome: PersistedFileOutcome::Quarantined {
+                reason: "test".to_string(),
+            },
+            symbols: Vec::new(),
+            run_id: "run-q2".to_string(),
+            repo_id: "repo-q2".to_string(),
+            committed_at_unix_ms: 1002,
+        };
+        let record_b = FileRecord {
+            relative_path: "src/b.rs".to_string(),
+            language: LanguageId::Rust,
+            blob_id: "blob-b".to_string(),
+            byte_len: 10,
+            content_hash: "nonexistent-hash".to_string(),
+            outcome: PersistedFileOutcome::Quarantined {
+                reason: "test".to_string(),
+            },
+            symbols: Vec::new(),
+            run_id: "run-q2".to_string(),
+            repo_id: "repo-q2".to_string(),
+            committed_at_unix_ms: 1002,
+        };
+        manager
+            .persistence()
+            .save_file_records("run-q2", &[record_a, record_b])
+            .unwrap();
+
+        let result = manager
+            .repair_repository(
+                "repo-q2",
+                RepairScope::Repository,
+                repo_dir.path().to_path_buf(),
+                cas,
+            )
+            .unwrap();
+
+        assert!(
+            matches!(result.outcome, RepairOutcome::CannotRestore { .. }),
+            "expected CannotRestore, got {:?}",
+            result.outcome
+        );
+        let repo = manager
+            .control_plane
+            .get_repository("repo-q2")
+            .unwrap()
+            .unwrap();
+        assert_eq!(repo.status, RepositoryStatus::Degraded);
+    }
+
+    #[tokio::test]
+    async fn test_repair_invalidated_repository_delegates_to_reindex() {
+        let (dir, manager, _cas_dir, cas) = temp_reindex_env();
+        seed_repo_with_status(&manager, "repo-inv", RepositoryStatus::Invalidated);
+
+        let result = manager
+            .repair_repository(
+                "repo-inv",
+                RepairScope::Repository,
+                dir.path().to_path_buf(),
+                cas,
+            )
+            .unwrap();
+
+        match &result.outcome {
+            RepairOutcome::InProgress { run_id } => {
+                assert!(!run_id.is_empty());
+            }
+            RepairOutcome::CannotRestore { .. } => {
+                // acceptable if reindex fails to start in test env
+            }
+            other => panic!("expected InProgress or CannotRestore, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_repair_interrupted_run_delegates_to_resume() {
+        let (_dir, manager, _cas_dir, cas) = temp_reindex_env();
+        seed_repo_with_status(&manager, "repo-int", RepositoryStatus::Degraded);
+
+        let run = IndexRun {
+            run_id: "run-int".to_string(),
+            repo_id: "repo-int".to_string(),
+            mode: IndexRunMode::Full,
+            status: IndexRunStatus::Interrupted,
+            requested_at_unix_ms: 1000,
+            started_at_unix_ms: Some(1001),
+            finished_at_unix_ms: Some(1002),
+            idempotency_key: None,
+            request_hash: None,
+            checkpoint_cursor: None,
+            error_summary: None,
+            not_yet_supported: None,
+            prior_run_id: None,
+            description: None,
+            recovery_state: None,
+        };
+        manager.persistence().save_run(&run).unwrap();
+
+        let result = manager
+            .repair_repository(
+                "repo-int",
+                RepairScope::Run {
+                    run_id: "run-int".to_string(),
+                },
+                PathBuf::from("/tmp/repo-int"),
+                cas,
+            )
+            .unwrap();
+
+        assert!(
+            matches!(
+                result.outcome,
+                RepairOutcome::RequiresReindex | RepairOutcome::CannotRestore { .. }
+            ),
+            "expected RequiresReindex or CannotRestore, got {:?}",
+            result.outcome
+        );
+    }
+
+    #[test]
+    fn test_repair_failed_run_returns_requires_reindex() {
+        let (_dir, manager, _cas_dir, cas) = temp_reindex_env();
+        seed_repo_with_status(&manager, "repo-fr", RepositoryStatus::Degraded);
+
+        let run = IndexRun {
+            run_id: "run-fr".to_string(),
+            repo_id: "repo-fr".to_string(),
+            mode: IndexRunMode::Full,
+            status: IndexRunStatus::Failed,
+            requested_at_unix_ms: 1000,
+            started_at_unix_ms: Some(1001),
+            finished_at_unix_ms: Some(1002),
+            idempotency_key: None,
+            request_hash: None,
+            checkpoint_cursor: None,
+            error_summary: Some("test failure".to_string()),
+            not_yet_supported: None,
+            prior_run_id: None,
+            description: None,
+            recovery_state: None,
+        };
+        manager.persistence().save_run(&run).unwrap();
+
+        let result = manager
+            .repair_repository(
+                "repo-fr",
+                RepairScope::Run {
+                    run_id: "run-fr".to_string(),
+                },
+                PathBuf::from("/tmp/repo-fr"),
+                cas,
+            )
+            .unwrap();
+
+        assert_eq!(result.outcome, RepairOutcome::RequiresReindex);
+    }
+
+    #[test]
+    fn test_repair_quarantined_file_unquarantined_on_verify() {
+        let (_dir, manager, _cas_dir, cas) = temp_reindex_env();
+        seed_repo_with_status(&manager, "repo-qf1", RepositoryStatus::Quarantined);
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let file_content = b"fn verified() {}";
+        let file_hash = digest_hex(file_content);
+        std::fs::create_dir_all(repo_dir.path().join("src")).unwrap();
+        std::fs::write(repo_dir.path().join("src/v.rs"), file_content).unwrap();
+
+        let run = IndexRun {
+            run_id: "run-qf1".to_string(),
+            repo_id: "repo-qf1".to_string(),
+            mode: IndexRunMode::Full,
+            status: IndexRunStatus::Succeeded,
+            requested_at_unix_ms: 1000,
+            started_at_unix_ms: Some(1001),
+            finished_at_unix_ms: Some(1002),
+            idempotency_key: None,
+            request_hash: None,
+            checkpoint_cursor: None,
+            error_summary: None,
+            not_yet_supported: None,
+            prior_run_id: None,
+            description: None,
+            recovery_state: None,
+        };
+        manager.persistence().save_run(&run).unwrap();
+
+        let record = FileRecord {
+            relative_path: "src/v.rs".to_string(),
+            language: LanguageId::Rust,
+            blob_id: "blob-qf1".to_string(),
+            byte_len: file_content.len() as u64,
+            content_hash: file_hash,
+            outcome: PersistedFileOutcome::Quarantined {
+                reason: "test".to_string(),
+            },
+            symbols: Vec::new(),
+            run_id: "run-qf1".to_string(),
+            repo_id: "repo-qf1".to_string(),
+            committed_at_unix_ms: 1002,
+        };
+        manager
+            .persistence()
+            .save_file_records("run-qf1", &[record])
+            .unwrap();
+
+        let result = manager
+            .repair_repository(
+                "repo-qf1",
+                RepairScope::File {
+                    run_id: "run-qf1".to_string(),
+                    relative_path: "src/v.rs".to_string(),
+                },
+                repo_dir.path().to_path_buf(),
+                cas,
+            )
+            .unwrap();
+
+        assert_eq!(result.outcome, RepairOutcome::Restored);
+
+        // Verify the file record outcome was updated to Committed
+        let records = manager
+            .persistence()
+            .get_file_records("run-qf1")
+            .unwrap();
+        let updated = records
+            .iter()
+            .find(|r| r.relative_path == "src/v.rs")
+            .unwrap();
+        assert_eq!(updated.outcome, PersistedFileOutcome::Committed);
+    }
+
+    #[test]
+    fn test_repair_quarantined_file_cannot_restore_on_source_drift() {
+        let (_dir, manager, _cas_dir, cas) = temp_reindex_env();
+        seed_repo_with_status(&manager, "repo-qf2", RepositoryStatus::Quarantined);
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        // Write DIFFERENT content than what the hash says
+        std::fs::create_dir_all(repo_dir.path().join("src")).unwrap();
+        std::fs::write(repo_dir.path().join("src/d.rs"), b"fn drifted() {}").unwrap();
+
+        let run = IndexRun {
+            run_id: "run-qf2".to_string(),
+            repo_id: "repo-qf2".to_string(),
+            mode: IndexRunMode::Full,
+            status: IndexRunStatus::Succeeded,
+            requested_at_unix_ms: 1000,
+            started_at_unix_ms: Some(1001),
+            finished_at_unix_ms: Some(1002),
+            idempotency_key: None,
+            request_hash: None,
+            checkpoint_cursor: None,
+            error_summary: None,
+            not_yet_supported: None,
+            prior_run_id: None,
+            description: None,
+            recovery_state: None,
+        };
+        manager.persistence().save_run(&run).unwrap();
+
+        let record = FileRecord {
+            relative_path: "src/d.rs".to_string(),
+            language: LanguageId::Rust,
+            blob_id: "blob-qf2".to_string(),
+            byte_len: 10,
+            content_hash: "aabbccdd".to_string(),
+            outcome: PersistedFileOutcome::Quarantined {
+                reason: "test".to_string(),
+            },
+            symbols: Vec::new(),
+            run_id: "run-qf2".to_string(),
+            repo_id: "repo-qf2".to_string(),
+            committed_at_unix_ms: 1002,
+        };
+        manager
+            .persistence()
+            .save_file_records("run-qf2", &[record])
+            .unwrap();
+
+        let result = manager
+            .repair_repository(
+                "repo-qf2",
+                RepairScope::File {
+                    run_id: "run-qf2".to_string(),
+                    relative_path: "src/d.rs".to_string(),
+                },
+                repo_dir.path().to_path_buf(),
+                cas,
+            )
+            .unwrap();
+
+        assert!(
+            matches!(result.outcome, RepairOutcome::CannotRestore { .. }),
+            "expected CannotRestore, got {:?}",
+            result.outcome
+        );
+    }
+
+    // --- Health inspection unit tests (Story 4.5) ---
+
+    fn seed_repo_with_full_state(
+        manager: &RunManager,
+        repo_id: &str,
+        status: RepositoryStatus,
+        invalidation_reason: Option<String>,
+        invalidated_at_unix_ms: Option<u64>,
+        quarantine_reason: Option<String>,
+        quarantined_at_unix_ms: Option<u64>,
+    ) {
+        let repo = crate::domain::Repository {
+            repo_id: repo_id.to_string(),
+            kind: crate::domain::RepositoryKind::Git,
+            root_uri: format!("/tmp/{repo_id}"),
+            project_identity: format!("identity-{repo_id}"),
+            project_identity_kind: crate::domain::ProjectIdentityKind::GitCommonDir,
+            default_branch: None,
+            last_known_revision: None,
+            status,
+            invalidated_at_unix_ms,
+            invalidation_reason,
+            quarantined_at_unix_ms,
+            quarantine_reason,
+        };
+        manager.persistence().save_repository(&repo).unwrap();
+    }
+
+    fn seed_completed_run(manager: &RunManager, repo_id: &str, run_id: &str) {
+        let run = IndexRun {
+            run_id: run_id.to_string(),
+            repo_id: repo_id.to_string(),
+            mode: IndexRunMode::Full,
+            status: IndexRunStatus::Succeeded,
+            requested_at_unix_ms: 1000,
+            started_at_unix_ms: Some(1001),
+            finished_at_unix_ms: Some(2000),
+            idempotency_key: None,
+            request_hash: None,
+            checkpoint_cursor: None,
+            error_summary: None,
+            not_yet_supported: None,
+            prior_run_id: None,
+            description: None,
+            recovery_state: None,
+        };
+        manager.persistence().save_run(&run).unwrap();
+    }
+
+    fn seed_file_records(
+        manager: &RunManager,
+        run_id: &str,
+        repo_id: &str,
+        records: Vec<(String, PersistedFileOutcome)>,
+    ) {
+        let file_records: Vec<FileRecord> = records
+            .into_iter()
+            .map(|(path, outcome)| FileRecord {
+                relative_path: path,
+                language: LanguageId::Rust,
+                blob_id: format!("blob-{run_id}"),
+                byte_len: 100,
+                content_hash: "hash".to_string(),
+                outcome,
+                symbols: Vec::new(),
+                run_id: run_id.to_string(),
+                repo_id: repo_id.to_string(),
+                committed_at_unix_ms: 2000,
+            })
+            .collect();
+        manager
+            .persistence()
+            .save_file_records(run_id, &file_records)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_inspect_health_ready_reports_healthy() {
+        let (_dir, manager) = temp_run_manager();
+        seed_repo_with_status(&manager, "repo-h1", RepositoryStatus::Ready);
+        seed_completed_run(&manager, "repo-h1", "run-h1");
+
+        let report = manager.inspect_repository_health("repo-h1").unwrap();
+
+        assert_eq!(report.status, RepositoryStatus::Ready);
+        assert!(!report.action_required);
+        assert!(report.next_action.is_none());
+        assert!(report.status_detail.starts_with("Repository is healthy"));
+    }
+
+    #[test]
+    fn test_inspect_health_pending_no_runs_reports_never_indexed() {
+        let (_dir, manager) = temp_run_manager();
+        seed_repo_with_status(&manager, "repo-h2", RepositoryStatus::Pending);
+
+        let report = manager.inspect_repository_health("repo-h2").unwrap();
+
+        assert_eq!(report.status, RepositoryStatus::Pending);
+        assert!(report.action_required);
+        assert_eq!(report.next_action, Some(NextAction::Reindex));
+        assert!(report.status_detail.contains("never been indexed"));
+    }
+
+    #[test]
+    fn test_inspect_health_pending_active_run_reports_processing() {
+        // Test the Pending + active_run classification branch directly,
+        // since injecting a live active run requires full pipeline setup.
+        let (action_required, next_action, status_detail) =
+            RunManager::classify_repository_health(
+                &RepositoryStatus::Pending,
+                false, // no completed run
+                true,  // has active run
+                &None,
+                &None,
+            );
+
+        assert!(!action_required);
+        assert_eq!(next_action, Some(NextAction::Wait));
+        assert!(status_detail.contains("in progress"));
+    }
+
+    #[test]
+    fn test_inspect_health_degraded_reports_repair_needed() {
+        let (_dir, manager) = temp_run_manager();
+        seed_repo_with_status(&manager, "repo-h4", RepositoryStatus::Degraded);
+
+        let report = manager.inspect_repository_health("repo-h4").unwrap();
+
+        assert_eq!(report.status, RepositoryStatus::Degraded);
+        assert!(report.action_required);
+        assert_eq!(report.next_action, Some(NextAction::Repair));
+        assert!(report.status_detail.contains("degraded"));
+    }
+
+    #[test]
+    fn test_inspect_health_failed_reports_repair_needed() {
+        let (_dir, manager) = temp_run_manager();
+        seed_repo_with_status(&manager, "repo-h5", RepositoryStatus::Failed);
+
+        let report = manager.inspect_repository_health("repo-h5").unwrap();
+
+        assert_eq!(report.status, RepositoryStatus::Failed);
+        assert!(report.action_required);
+        assert_eq!(report.next_action, Some(NextAction::Repair));
+        assert!(report.status_detail.contains("failed"));
+    }
+
+    #[test]
+    fn test_inspect_health_invalidated_reports_reindex_needed() {
+        let (_dir, manager) = temp_run_manager();
+        seed_repo_with_full_state(
+            &manager,
+            "repo-h6",
+            RepositoryStatus::Invalidated,
+            Some("stale data after branch switch".to_string()),
+            Some(5000),
+            None,
+            None,
+        );
+
+        let report = manager.inspect_repository_health("repo-h6").unwrap();
+
+        assert_eq!(report.status, RepositoryStatus::Invalidated);
+        assert!(report.action_required);
+        assert_eq!(report.next_action, Some(NextAction::Reindex));
+        assert!(report.status_detail.contains("invalidated"));
+        assert!(report.status_detail.contains("stale data after branch switch"));
+        let ctx = report.invalidation_context.unwrap();
+        assert_eq!(ctx.reason, "stale data after branch switch");
+        assert_eq!(ctx.occurred_at_unix_ms, 5000);
+    }
+
+    #[test]
+    fn test_inspect_health_quarantined_reports_repair_needed() {
+        let (_dir, manager) = temp_run_manager();
+        seed_repo_with_full_state(
+            &manager,
+            "repo-h7",
+            RepositoryStatus::Quarantined,
+            None,
+            None,
+            Some("quarantine policy triggered".to_string()),
+            Some(6000),
+        );
+
+        let report = manager.inspect_repository_health("repo-h7").unwrap();
+
+        assert_eq!(report.status, RepositoryStatus::Quarantined);
+        assert!(report.action_required);
+        assert_eq!(report.next_action, Some(NextAction::Repair));
+        assert!(report.status_detail.contains("quarantined"));
+        assert!(report
+            .status_detail
+            .contains("quarantine policy triggered"));
+        let ctx = report.quarantine_context.unwrap();
+        assert_eq!(ctx.reason, "quarantine policy triggered");
+        assert_eq!(ctx.occurred_at_unix_ms, 6000);
+    }
+
+    #[test]
+    fn test_inspect_health_includes_file_health_summary() {
+        let (_dir, manager) = temp_run_manager();
+        seed_repo_with_status(&manager, "repo-h8", RepositoryStatus::Ready);
+        seed_completed_run(&manager, "repo-h8", "run-h8");
+        seed_file_records(
+            &manager,
+            "run-h8",
+            "repo-h8",
+            vec![
+                ("src/a.rs".to_string(), PersistedFileOutcome::Committed),
+                ("src/b.rs".to_string(), PersistedFileOutcome::Committed),
+                ("src/c.rs".to_string(), PersistedFileOutcome::EmptySymbols),
+                (
+                    "src/d.rs".to_string(),
+                    PersistedFileOutcome::Failed {
+                        error: "parse error".to_string(),
+                    },
+                ),
+                (
+                    "src/e.rs".to_string(),
+                    PersistedFileOutcome::Quarantined {
+                        reason: "suspect".to_string(),
+                    },
+                ),
+            ],
+        );
+
+        let report = manager.inspect_repository_health("repo-h8").unwrap();
+
+        let file_health = report.file_health.unwrap();
+        assert_eq!(file_health.total_files, 5);
+        assert_eq!(file_health.committed, 2);
+        assert_eq!(file_health.empty_symbols, 1);
+        assert_eq!(file_health.failed, 1);
+        assert_eq!(file_health.quarantined, 1);
+    }
+
+    #[test]
+    fn test_inspect_health_includes_latest_run_summary() {
+        let (_dir, manager) = temp_run_manager();
+        seed_repo_with_status(&manager, "repo-h9", RepositoryStatus::Ready);
+        seed_completed_run(&manager, "repo-h9", "run-h9");
+
+        let report = manager.inspect_repository_health("repo-h9").unwrap();
+
+        let run_summary = report.latest_run.unwrap();
+        assert_eq!(run_summary.run_id, "run-h9");
+        assert_eq!(run_summary.status, IndexRunStatus::Succeeded);
+        assert_eq!(run_summary.mode, IndexRunMode::Full);
+        assert_eq!(run_summary.started_at_unix_ms, 1001);
+        assert_eq!(run_summary.completed_at_unix_ms, Some(2000));
+    }
+
+    #[test]
+    fn test_inspect_health_includes_recent_repairs() {
+        let (_dir, manager) = temp_run_manager();
+        seed_repo_with_status(&manager, "repo-h10", RepositoryStatus::Ready);
+
+        let event = RepairEvent {
+            repo_id: "repo-h10".to_string(),
+            scope: RepairScope::Repository,
+            previous_status: RepositoryStatus::Degraded,
+            outcome: RepairOutcome::Restored,
+            detail: "repaired degraded state".to_string(),
+            timestamp_unix_ms: 3000,
+        };
+        manager.persistence().save_repair_event(&event).unwrap();
+
+        let report = manager.inspect_repository_health("repo-h10").unwrap();
+
+        assert_eq!(report.recent_repairs.len(), 1);
+        assert_eq!(report.recent_repairs[0].detail, "repaired degraded state");
+    }
+
+    #[test]
+    fn test_inspect_health_not_found_returns_error() {
+        let (_dir, manager) = temp_run_manager();
+
+        let result = manager.inspect_repository_health("nonexistent-repo");
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("not found"));
+    }
+
+    #[test]
+    fn test_inspect_health_explicit_healthy_never_silent() {
+        let (_dir, manager) = temp_run_manager();
+        seed_repo_with_status(&manager, "repo-h12", RepositoryStatus::Ready);
+
+        let report = manager.inspect_repository_health("repo-h12").unwrap();
+
+        assert!(!report.status_detail.is_empty());
+        assert!(report.status_detail.starts_with("Repository is healthy"));
+        assert!(!report.action_required);
     }
 }
