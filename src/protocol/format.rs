@@ -214,7 +214,7 @@ pub fn repo_outline(index: &LiveIndex, project_name: &str) -> String {
 /// Generate a health report for the index.
 ///
 /// Format:
-/// ```
+/// ```text
 /// Status: {Ready|Empty|Degraded}
 /// Files:  {N} indexed ({P} parsed, {PP} partial, {F} failed)
 /// Symbols: {S}
