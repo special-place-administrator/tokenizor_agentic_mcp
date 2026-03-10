@@ -106,3 +106,11 @@ None - no external service configuration required.
 ## Next Phase Readiness
 - Phase 5 complete: sidecar operational, CLI dispatch working, all HOOK-01/02/03/10 requirements proven by integration tests
 - Phase 6 (Hook stdin JSON parsing) can build on the hook infrastructure — replace TOKENIZOR_HOOK_FILE_PATH env var shim with real stdin JSON parsing from Claude Code hook events
+
+## Self-Check: PASSED
+- FOUND: src/main.rs
+- FOUND: tests/sidecar_integration.rs
+- FOUND: tests/init_integration.rs
+- FOUND: .planning/phases/05-http-sidecar-hook-infrastructure/05-03-SUMMARY.md
+- FOUND: d9e4d83 (Task 1 commit)
+- FOUND: 32c6d00 (Task 2 commit)
