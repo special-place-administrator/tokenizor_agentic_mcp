@@ -1,10 +1,26 @@
 use std::sync::{Arc, Mutex};
 
-use tokenizor_agentic_mcp::{discovery, live_index, observability, protocol, watcher};
+use clap::Parser;
+use tokenizor_agentic_mcp::{cli, discovery, live_index, observability, protocol, sidecar, watcher};
 use rmcp::{serve_server, transport};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    let cli = cli::Cli::parse();
+    match cli.command {
+        Some(cli::Commands::Init) => cli::init::run_init(),
+        Some(cli::Commands::Hook { subcommand }) => cli::hook::run_hook(&subcommand),
+        None => run_mcp_server(),
+    }
+}
+
+fn run_mcp_server() -> anyhow::Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async { run_mcp_server_async().await })
+}
+
+async fn run_mcp_server_async() -> anyhow::Result<()> {
     observability::init_tracing()?;
 
     // INFR-02: Auto-index on startup (configurable via TOKENIZOR_AUTO_INDEX)
@@ -64,12 +80,24 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("file watcher started");
     }
 
-    // Create MCP server and serve on stdio transport
+    // Spawn HTTP sidecar after watcher, before MCP serve.
+    // The sidecar shares the same Arc<LiveIndex> so mutations are immediately visible.
+    let bind_host = std::env::var("TOKENIZOR_SIDECAR_BIND")
+        .unwrap_or_else(|_| "127.0.0.1".to_string());
+    let sidecar_handle = sidecar::spawn_sidecar(Arc::clone(&index), &bind_host).await?;
+    tracing::info!(port = sidecar_handle.port, "HTTP sidecar started");
+
+    // Create MCP server and serve on stdio transport.
     let server = protocol::TokenizorServer::new(index, project_name, watcher_info, watcher_root);
     tracing::info!("starting MCP server on stdio transport");
     let service = serve_server(server, transport::stdio()).await?;
     service.waiting().await?;
 
     tracing::info!("MCP server shut down cleanly");
+
+    // Shutdown the sidecar now that the MCP server has exited.
+    let _ = sidecar_handle.shutdown_tx.send(());
+    tracing::info!("sidecar shutdown signal sent");
+
     Ok(())
 }
