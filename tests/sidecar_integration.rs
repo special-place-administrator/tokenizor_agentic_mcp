@@ -282,7 +282,7 @@ async fn test_hook_binary_latency() {
     // SessionStart calls /repo-map — no file path env var needed.
     let start = Instant::now();
     // run_hook writes JSON to stdout — acceptable in test context.
-    run_hook(&HookSubcommand::SessionStart).expect("run_hook must succeed");
+    run_hook(Some(&HookSubcommand::SessionStart)).expect("run_hook must succeed");
     let elapsed = start.elapsed();
 
     assert!(

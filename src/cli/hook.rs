@@ -149,7 +149,7 @@ fn resolve_subcommand_from_input(input: &HookInput) -> Option<HookSubcommand> {
 }
 
 /// Returns the `hookEventName` string for a given subcommand.
-pub(crate) fn event_name_for(subcommand: &HookSubcommand) -> &'static str {
+pub fn event_name_for(subcommand: &HookSubcommand) -> &'static str {
     match subcommand {
         HookSubcommand::SessionStart => "SessionStart",
         _ => "PostToolUse",
@@ -213,7 +213,7 @@ pub(crate) fn endpoint_for(subcommand: Option<&HookSubcommand>, input: &HookInpu
 }
 
 /// Returns the fail-open JSON: empty `additionalContext`.
-pub(crate) fn fail_open_json(event_name: &str) -> String {
+pub fn fail_open_json(event_name: &str) -> String {
     format!(
         r#"{{"hookSpecificOutput":{{"hookEventName":"{event_name}","additionalContext":""}}}}"#
     )
@@ -223,7 +223,7 @@ pub(crate) fn fail_open_json(event_name: &str) -> String {
 ///
 /// The `context` string is JSON-escaped (backslash + quote safe) so it can be
 /// embedded as a JSON string value.
-pub(crate) fn success_json(event_name: &str, context: &str) -> String {
+pub fn success_json(event_name: &str, context: &str) -> String {
     let escaped = json_escape(context);
     format!(
         r#"{{"hookSpecificOutput":{{"hookEventName":"{event_name}","additionalContext":"{escaped}"}}}}"#
