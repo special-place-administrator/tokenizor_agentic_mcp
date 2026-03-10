@@ -60,8 +60,8 @@ Requirements for the v2 rewrite release. Each maps to roadmap phases.
 
 ### Hook Integration
 
-- [ ] **HOOK-01**: HTTP sidecar (axum) on localhost:0, port written to .tokenizor/sidecar.port
-- [ ] **HOOK-02**: Sidecar shares Arc<LiveIndex> with MCP tools — zero data duplication
+- [x] **HOOK-01**: HTTP sidecar (axum) on localhost:0, port written to .tokenizor/sidecar.port
+- [x] **HOOK-02**: Sidecar shares Arc<LiveIndex> with MCP tools — zero data duplication
 - [ ] **HOOK-03**: Hook response latency <100ms total (Python spawn + HTTP + query)
 - [ ] **HOOK-04**: PostToolUse(Read) — inject symbol outline + key references for indexed files
 - [ ] **HOOK-05**: PostToolUse(Edit) — trigger re-index + inject impact analysis (callers to review)
@@ -166,8 +166,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TOOL-11 | Phase 4 | Complete |
 | TOOL-12 | Phase 2 | Complete |
 | TOOL-13 | Phase 2 | Complete |
-| HOOK-01 | Phase 5 | Pending |
-| HOOK-02 | Phase 5 | Pending |
+| HOOK-01 | Phase 5 | Complete |
+| HOOK-02 | Phase 5 | Complete |
 | HOOK-03 | Phase 5 | Pending |
 | HOOK-04 | Phase 6 | Pending |
 | HOOK-05 | Phase 6 | Pending |

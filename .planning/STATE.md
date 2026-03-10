@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: completed
-stopped_at: Phase 5 context gathered
-last_updated: "2026-03-10T19:53:30.358Z"
+stopped_at: Completed 05-http-sidecar-hook-infrastructure/05-01-PLAN.md
+last_updated: "2026-03-10T20:35:20.268Z"
 last_activity: "2026-03-10 — Phase 03 Plan 03 complete: watcher wired into MCP server, 8 integration tests prove all FRSH/RELY-03 reqs"
 progress:
   total_phases: 7
   completed_phases: 4
-  total_plans: 12
-  completed_plans: 12
+  total_plans: 15
+  completed_plans: 14
   percent: 30
 ---
 
@@ -62,6 +62,8 @@ Progress: [███░░░░░░░] 30%
 | Phase 04-cross-reference-extraction P01 | 13 | 2 tasks | 10 files |
 | Phase 04-cross-reference-extraction P02 | 6 | 2 tasks | 2 files |
 | Phase 04-cross-reference-extraction P03 | 7 | 2 tasks | 3 files |
+| Phase 05-http-sidecar-hook-infrastructure P01 | 7 | 2 tasks | 8 files |
+| Phase 05-http-sidecar-hook-infrastructure P02 | 6 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -116,6 +118,10 @@ Recent decisions affecting current work:
 - [Phase 04-cross-reference-extraction]: Annotation inline on reference line: is_ref_line check in context loop appends annotation string with padding
 - [Phase 04-cross-reference-extraction]: XREF-08 test uses reload not update_file: maybe_reindex is pub(crate); public reload API used in integration tests
 - [Phase 04-cross-reference-extraction]: format_ref_section extracted as private helper: eliminates cap-at-20 duplication across Callers/Callees/Type usages sections
+- [Phase 05-01]: Port file contains ONLY ASCII digits with no trailing newline — hook binary reads raw bytes
+- [Phase 05-01]: CWD_LOCK Mutex in tests prevents parallel cwd-manipulation failures — process cwd is global state
+- [Phase 05-01]: spawn_sidecar reads TOKENIZOR_SIDECAR_BIND env var — bind host configurable without recompile
+- [Phase 05-01]: cleanup_files called inside spawned task after axum::serve completes — guarantees cleanup even on error exit
 
 ### Pending Todos
 
@@ -129,6 +135,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T19:53:30.355Z
-Stopped at: Phase 5 context gathered
-Resume file: .planning/phases/05-http-sidecar-hook-infrastructure/05-CONTEXT.md
+Last session: 2026-03-10T20:34:37.037Z
+Stopped at: Completed 05-http-sidecar-hook-infrastructure/05-01-PLAN.md
+Resume file: None
