@@ -12,11 +12,12 @@ use crate::domain::{
     FileOutcomeSummary, FileProcessingResult, FileRecord, HealthIssueCategory, IdempotencyRecord,
     IdempotencyStatus, IndexRun, IndexRunMode, IndexRunStatus, IntegrityEventKind,
     InvalidationResult, LanguageId, NextAction, OperationalEvent, OperationalEventFilter,
-    OperationalEventKind, PersistedFileOutcome, RecoveryStateKind, RepairEvent, RepairOutcome,
-    RepairResult, RepairScope, RepositoryHealthReport, RepositoryStatus, ResumeRejectReason,
-    ResumeRunOutcome, RunHealth, RunHealthSummary, RunPhase, RunProgressSnapshot,
-    RunRecoveryState, RunStatusReport, StatusContext, classify_repository_action,
-    classify_run_action, unix_timestamp_ms, STALE_QUEUED_ABORTED_SUMMARY,
+    OperationalEventKind, PersistedFileOutcome, ProjectIdentityKind, RecoveryStateKind,
+    RepairEvent, RepairOutcome, RepairResult, RepairScope, Repository, RepositoryHealthReport,
+    RepositoryKind, RepositoryStatus, ResumeRejectReason, ResumeRunOutcome, RunHealth,
+    RunHealthSummary, RunPhase, RunProgressSnapshot, RunRecoveryState, RunStatusReport,
+    StatusContext, classify_repository_action, classify_run_action, unix_timestamp_ms,
+    STALE_QUEUED_ABORTED_SUMMARY,
 };
 use crate::error::{Result, TokenizorError};
 use crate::indexing::pipeline::{IndexingPipeline, PipelineProgress, PipelineResumeState};
@@ -1550,6 +1551,44 @@ impl RunManager {
         repo_root: PathBuf,
         blob_store: Arc<dyn BlobStore>,
     ) -> Result<(IndexRun, Arc<PipelineProgress>)> {
+        // Ensure a repository entry exists in the control plane so retrieval
+        // tools can find it. This is idempotent — if the repo already exists,
+        // save_repository overwrites with the same data.
+        if self.control_plane.get_repository(repo_id)?.is_none() {
+            let is_git = repo_root.join(".git").exists();
+            let (project_identity, project_identity_kind) = if is_git {
+                (
+                    repo_root.join(".git").to_string_lossy().to_string(),
+                    ProjectIdentityKind::GitCommonDir,
+                )
+            } else {
+                (
+                    repo_root.to_string_lossy().to_string(),
+                    ProjectIdentityKind::LocalRootPath,
+                )
+            };
+            let repo = Repository {
+                repo_id: repo_id.to_string(),
+                kind: if is_git {
+                    RepositoryKind::Git
+                } else {
+                    RepositoryKind::Local
+                },
+                root_uri: repo_root.to_string_lossy().to_string(),
+                project_identity,
+                project_identity_kind,
+                default_branch: None,
+                last_known_revision: None,
+                status: RepositoryStatus::Ready,
+                invalidated_at_unix_ms: None,
+                invalidation_reason: None,
+                quarantined_at_unix_ms: None,
+                quarantine_reason: None,
+            };
+            self.control_plane.save_repository(&repo)?;
+            info!(repo_id = %repo_id, root = %repo_root.display(), "auto-registered repository in control plane");
+        }
+
         let run = self.start_run(repo_id, mode)?;
         let progress = self.spawn_pipeline_for_run(&run, repo_root, blob_store);
         Ok((run, progress))
@@ -2855,10 +2894,13 @@ fn run_completion_clears_repository_invalidation(
     status: &IndexRunStatus,
     results: &[FileProcessingResult],
 ) -> bool {
+    // A successful reindex clears invalidation even when some files have
+    // partial parses — those are normal tree-sitter behaviour, not a sign
+    // of untrusted state.  Only hard failures block the clear.
     *status == IndexRunStatus::Succeeded
-        && results
+        && !results
             .iter()
-            .all(|result| matches!(result.outcome, FileOutcome::Processed))
+            .any(|result| matches!(result.outcome, FileOutcome::Failed { .. }))
 }
 
 fn build_file_outcome_summary(records: &[FileRecord]) -> FileOutcomeSummary {
@@ -4131,11 +4173,11 @@ mod tests {
     }
 
     #[test]
-    fn test_succeeded_run_does_not_clear_invalidation_when_any_result_is_partial() {
+    fn test_succeeded_run_clears_invalidation_when_some_results_are_partial() {
         let results = vec![sample_file_processing_result(FileOutcome::PartialParse {
             warning: "parser recovered".to_string(),
         })];
-        assert!(!run_completion_clears_repository_invalidation(
+        assert!(run_completion_clears_repository_invalidation(
             &IndexRunStatus::Succeeded,
             &results
         ));
