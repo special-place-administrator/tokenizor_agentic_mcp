@@ -31,7 +31,12 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. A file with malformed syntax produces a logged warning and keeps its previous symbol set — the server does not crash or corrupt other files
   3. If more than 20% of files fail parsing, the server aborts further indexing and reports the circuit breaker trigger rather than serving partial data silently
   4. The running MCP binary produces zero non-JSON bytes on stdout — piping its output through `jq` succeeds
-**Plans**: TBD
+**Plans:** 3 plans
+
+Plans:
+- [ ] 01-01-PLAN.md — Tear down v1 modules, strip domain types, establish v2 module skeleton
+- [ ] 01-02-PLAN.md — Implement LiveIndex store, discovery, circuit breaker, and query methods
+- [ ] 01-03-PLAN.md — Wire main.rs, create integration tests, validate stdout purity gate
 
 ### Phase 2: MCP Tools v1 Parity
 **Goal**: A shippable MCP server where all core retrieval tools query the LiveIndex and return compact, human-readable responses
@@ -109,7 +114,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. LiveIndex Foundation | 0/? | Not started | - |
+| 1. LiveIndex Foundation | 0/3 | Planning complete | - |
 | 2. MCP Tools v1 Parity | 0/? | Not started | - |
 | 3. File Watcher + Freshness | 0/? | Not started | - |
 | 4. Cross-Reference Extraction | 0/? | Not started | - |
