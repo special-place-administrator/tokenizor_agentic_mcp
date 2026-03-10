@@ -2,6 +2,9 @@
 ///
 /// These tests prove that discovery → parsing → LiveIndex work together end-to-end,
 /// and that the binary produces zero stdout bytes (RELY-04 CI gate).
+///
+/// Phase 2 tests cover: LIDX-05 (performance), INFR-02 (auto-index behavior),
+/// INFR-05 (no v1 tools), tool format verification end-to-end, and RELY-04.
 use std::fs;
 use std::path::Path;
 use tempfile::tempdir;
@@ -271,6 +274,8 @@ fn test_stdout_purity() {
     let output = std::process::Command::new(&binary_path)
         .current_dir(dir.path())
         .env("RUST_LOG", "error") // suppress stderr noise in test output
+        .env("TOKENIZOR_AUTO_INDEX", "false") // start with empty index for speed
+        .stdin(std::process::Stdio::null()) // EOF on stdin → MCP server exits cleanly
         .output()
         .unwrap_or_else(|e| panic!("failed to run binary at {:?}: {e}", binary_path));
 
@@ -326,5 +331,381 @@ fn test_custom_threshold_trips_at_low_threshold() {
     assert!(
         cb.should_abort(),
         "20% failure rate should trip a 10% threshold circuit breaker"
+    );
+}
+
+// ============================================================================
+// Phase 2 Integration Tests
+// ============================================================================
+
+// --------------------------------------------------------------------------
+// Test LIDX-05: Performance — load completes in <500ms for 70 files
+//
+// Creates 70 valid Rust files in a tempdir and times LiveIndex::load.
+// --------------------------------------------------------------------------
+
+#[test]
+fn test_load_perf_70_files() {
+    let dir = tempdir().unwrap();
+
+    for i in 0..70 {
+        let content = format!(
+            "fn func_{i}() {{}}\nfn helper_{i}(x: u32) -> u32 {{ x + {i} }}\nstruct Struct_{i} {{}}\n"
+        );
+        write_file(dir.path(), &format!("file_{i:03}.rs"), &content);
+    }
+
+    let start = std::time::Instant::now();
+    let shared = LiveIndex::load(dir.path()).unwrap();
+    let elapsed = start.elapsed();
+
+    let index = shared.read().unwrap();
+    assert_eq!(index.file_count(), 70, "should have indexed 70 files");
+    assert!(
+        elapsed.as_millis() < 500,
+        "LIDX-05: 70-file load must complete in <500ms, took {}ms",
+        elapsed.as_millis()
+    );
+}
+
+// --------------------------------------------------------------------------
+// Test LIDX-05: Performance — load completes in <3s for 1000 files
+//
+// Marked #[ignore] to keep CI fast; run with: cargo test -- --ignored
+// --------------------------------------------------------------------------
+
+#[test]
+#[ignore]
+fn test_load_perf_1000_files() {
+    let dir = tempdir().unwrap();
+
+    for i in 0..1000 {
+        let content = format!(
+            "fn func_{i}() {{}}\nfn helper_{i}(x: u32) -> u32 {{ x + {i} }}\n"
+        );
+        write_file(dir.path(), &format!("file_{i:04}.rs"), &content);
+    }
+
+    let start = std::time::Instant::now();
+    let shared = LiveIndex::load(dir.path()).unwrap();
+    let elapsed = start.elapsed();
+
+    let index = shared.read().unwrap();
+    assert_eq!(index.file_count(), 1000, "should have indexed 1000 files");
+    assert!(
+        elapsed.as_secs() < 3,
+        "LIDX-05: 1000-file load must complete in <3s, took {}ms",
+        elapsed.as_millis()
+    );
+}
+
+// --------------------------------------------------------------------------
+// Test INFR-02: Auto-index loads when .git is present
+//
+// Tests the LiveIndex::load decision path directly (not the full binary).
+// --------------------------------------------------------------------------
+
+#[test]
+fn test_auto_index_loads_when_git_present() {
+    let dir = tempdir().unwrap();
+
+    // Create a .git directory (signals this is a git project root)
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    write_file(dir.path(), "main.rs", "fn main() {}");
+    write_file(dir.path(), "lib.rs", "fn helper() {}");
+
+    let shared = LiveIndex::load(dir.path()).unwrap();
+    let index = shared.read().unwrap();
+
+    assert!(
+        index.file_count() > 0,
+        "auto-index (INFR-02): should have indexed files when .git present"
+    );
+    assert_eq!(
+        index.index_state(),
+        IndexState::Ready,
+        "auto-index (INFR-02): index should be Ready after loading"
+    );
+}
+
+// --------------------------------------------------------------------------
+// Test INFR-02: Empty index when auto-index is skipped
+//
+// LiveIndex::empty() is what main.rs calls when TOKENIZOR_AUTO_INDEX=false.
+// --------------------------------------------------------------------------
+
+#[test]
+fn test_empty_index_when_no_auto_index() {
+    let empty = LiveIndex::empty();
+    let index = empty.read().unwrap();
+
+    assert_eq!(
+        index.file_count(),
+        0,
+        "empty index should have 0 files"
+    );
+    assert_eq!(
+        index.index_state(),
+        IndexState::Empty,
+        "empty index state should be Empty (INFR-02)"
+    );
+}
+
+// --------------------------------------------------------------------------
+// Test INFR-05: No v1 tool function definitions in protocol source
+//
+// Compile-time verification — the old v1 tool names must not appear as
+// function definitions in protocol/tools.rs. Checks for `fn {name}` patterns
+// to avoid false positives from test assertion strings.
+// --------------------------------------------------------------------------
+
+#[test]
+fn test_no_v1_tools_in_codebase() {
+    let v1_tools = [
+        "cancel_index_run",
+        "checkpoint_now",
+        "resume_index_run",
+        "get_index_run",
+        "list_index_runs",
+        "invalidate_indexed_state",
+        "repair_index",
+        "inspect_repository_health",
+        "get_operational_history",
+        "reindex_repository",
+    ];
+    let tools_source = include_str!("../src/protocol/tools.rs");
+    for tool in &v1_tools {
+        // Check for `fn {name}` patterns — actual function definitions, not test strings
+        let fn_pattern = format!("fn {tool}");
+        assert!(
+            !tools_source.contains(&fn_pattern),
+            "v1 tool function '{}' must not be defined in protocol/tools.rs (INFR-05)",
+            tool
+        );
+    }
+}
+
+// --------------------------------------------------------------------------
+// Test TOOL-03: file_outline format end-to-end with real tempdir
+//
+// Creates a Rust file with a fn and a struct, loads into LiveIndex,
+// then calls format::file_outline and verifies the output structure.
+// --------------------------------------------------------------------------
+
+#[test]
+fn test_file_outline_format_end_to_end() {
+    use tokenizor_agentic_mcp::protocol::format;
+
+    let dir = tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "shapes.rs",
+        "struct Circle { radius: f64 }\nfn area(c: &Circle) -> f64 { 3.14 * c.radius * c.radius }",
+    );
+
+    let shared = LiveIndex::load(dir.path()).unwrap();
+    let index = shared.read().unwrap();
+
+    let result = format::file_outline(&index, "shapes.rs");
+
+    // Header must show path and symbol count
+    assert!(
+        result.starts_with("shapes.rs"),
+        "outline should start with file path, got: {result}"
+    );
+    assert!(
+        result.contains("symbols"),
+        "outline header should contain symbol count, got: {result}"
+    );
+    // Body must list the symbols we defined
+    assert!(
+        result.contains("Circle") || result.contains("area"),
+        "outline should list extracted symbols, got: {result}"
+    );
+}
+
+// --------------------------------------------------------------------------
+// Test TOOL-01: get_symbol returns source body + footer
+//
+// Verifies format::symbol_detail extracts real source text from the index.
+// --------------------------------------------------------------------------
+
+#[test]
+fn test_get_symbol_returns_source_body() {
+    use tokenizor_agentic_mcp::protocol::format;
+
+    let dir = tempdir().unwrap();
+    write_file(dir.path(), "math.rs", "fn add(a: u32, b: u32) -> u32 { a + b }");
+
+    let shared = LiveIndex::load(dir.path()).unwrap();
+    let index = shared.read().unwrap();
+
+    let result = format::symbol_detail(&index, "math.rs", "add", None);
+
+    // Should return source body
+    assert!(
+        result.contains("fn add") || result.contains("add"),
+        "symbol detail should contain function source, got: {result}"
+    );
+    // Footer format: [fn, lines X-Y, N bytes]
+    assert!(
+        result.contains("bytes]"),
+        "symbol detail should contain footer with byte count, got: {result}"
+    );
+}
+
+// --------------------------------------------------------------------------
+// Test TOOL-06: search_text returns ripgrep-style output
+//
+// Verifies format::search_text_result finds text and formats correctly.
+// --------------------------------------------------------------------------
+
+#[test]
+fn test_search_text_finds_content() {
+    use tokenizor_agentic_mcp::protocol::format;
+
+    let dir = tempdir().unwrap();
+    write_file(dir.path(), "config.rs", "const MAX_RETRIES: u32 = 3;\nconst TIMEOUT: u32 = 30;");
+    write_file(dir.path(), "server.rs", "const PORT: u32 = 8080;\nconst MAX_CONN: u32 = 100;");
+
+    let shared = LiveIndex::load(dir.path()).unwrap();
+    let index = shared.read().unwrap();
+
+    let result = format::search_text_result(&index, "const");
+
+    // Summary header: "N matches in M files"
+    assert!(
+        result.contains("matches in"),
+        "search_text should show summary header, got: {result}"
+    );
+    assert!(
+        result.contains("2 files") || result.contains("in 2"),
+        "search_text should report 2 files matched, got: {result}"
+    );
+    // Results grouped by file with line numbers
+    assert!(
+        result.contains("config.rs") || result.contains("server.rs"),
+        "search_text should show file names, got: {result}"
+    );
+}
+
+// --------------------------------------------------------------------------
+// Test TOOL-07: health report format
+//
+// Verifies format::health_report shows Status: Ready and file counts.
+// --------------------------------------------------------------------------
+
+#[test]
+fn test_health_report_format() {
+    use tokenizor_agentic_mcp::protocol::format;
+
+    let dir = tempdir().unwrap();
+    write_file(dir.path(), "a.rs", "fn alpha() {}");
+    write_file(dir.path(), "b.rs", "fn beta() {}");
+
+    let shared = LiveIndex::load(dir.path()).unwrap();
+    let index = shared.read().unwrap();
+
+    let result = format::health_report(&index);
+
+    assert!(
+        result.contains("Status: Ready"),
+        "health_report should show 'Status: Ready' for loaded index, got: {result}"
+    );
+    assert!(
+        result.contains("Files:"),
+        "health_report should show file counts, got: {result}"
+    );
+    assert!(
+        result.contains("2 indexed"),
+        "health_report should show 2 indexed files, got: {result}"
+    );
+}
+
+// --------------------------------------------------------------------------
+// Test TOOL-08: index_folder reload replaces index contents
+//
+// Loads from dir A, verifies files A. Then reloads from dir B.
+// Verifies index now has B's files and not A's.
+// --------------------------------------------------------------------------
+
+#[test]
+fn test_index_folder_reload() {
+    let dir_a = tempdir().unwrap();
+    write_file(dir_a.path(), "alpha.rs", "fn alpha_func() {}");
+    write_file(dir_a.path(), "beta.rs", "fn beta_func() {}");
+
+    let dir_b = tempdir().unwrap();
+    write_file(dir_b.path(), "gamma.rs", "fn gamma_func() {}");
+    write_file(dir_b.path(), "delta.rs", "fn delta_func() {}");
+    write_file(dir_b.path(), "epsilon.rs", "fn epsilon_func() {}");
+
+    // Load dir A
+    let shared = LiveIndex::load(dir_a.path()).unwrap();
+    {
+        let index = shared.read().unwrap();
+        assert_eq!(index.file_count(), 2, "dir A should have 2 files");
+        assert!(index.get_file("alpha.rs").is_some(), "alpha.rs should be in index");
+    }
+
+    // Reload with dir B
+    {
+        let mut index = shared.write().unwrap();
+        index.reload(dir_b.path()).unwrap();
+    }
+
+    // Verify index now contains B's files, not A's
+    {
+        let index = shared.read().unwrap();
+        assert_eq!(index.file_count(), 3, "dir B should have 3 files after reload");
+        assert!(
+            index.get_file("gamma.rs").is_some(),
+            "gamma.rs should be in index after reload"
+        );
+        assert!(
+            index.get_file("alpha.rs").is_none(),
+            "alpha.rs should NOT be in index after reload to dir B"
+        );
+    }
+}
+
+// --------------------------------------------------------------------------
+// Test TOOL-13: get_file_content with line range
+//
+// Verifies format::file_content slices correctly with start_line/end_line.
+// --------------------------------------------------------------------------
+
+#[test]
+fn test_get_file_content_with_line_range() {
+    use tokenizor_agentic_mcp::protocol::format;
+
+    let dir = tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "lines.rs",
+        "line one\nline two\nline three\nline four\nline five",
+    );
+
+    let shared = LiveIndex::load(dir.path()).unwrap();
+    let index = shared.read().unwrap();
+
+    // Request lines 2-3 (1-indexed)
+    let result = format::file_content(&index, "lines.rs", Some(2), Some(3));
+
+    assert!(
+        !result.contains("line one"),
+        "line 1 should not be in range 2-3, got: {result}"
+    );
+    assert!(
+        result.contains("line two"),
+        "line 2 should be in range 2-3, got: {result}"
+    );
+    assert!(
+        result.contains("line three"),
+        "line 3 should be in range 2-3, got: {result}"
+    );
+    assert!(
+        !result.contains("line four"),
+        "line 4 should not be in range 2-3, got: {result}"
     );
 }
