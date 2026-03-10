@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 use tokenizor_agentic_mcp::{cli, discovery, live_index, observability, protocol, sidecar, watcher};
+use tokenizor_agentic_mcp::live_index::persist;
 use rmcp::{serve_server, transport};
 
 fn main() -> anyhow::Result<()> {
@@ -32,9 +33,32 @@ async fn run_mcp_server_async() -> anyhow::Result<()> {
         let root = discovery::find_git_root();
         tracing::info!(root = %root.display(), "auto-indexing from project root");
 
-        let index = live_index::LiveIndex::load(&root)?;
-        let guard = index.read().expect("lock poisoned");
+        // Try loading from persisted snapshot first (fast path: no re-parsing).
+        let index = if let Some(snapshot) = persist::load_snapshot(&root) {
+            let file_count = snapshot.files.len();
+            // Extract mtime map before consuming snapshot
+            let snapshot_mtimes: std::collections::HashMap<String, i64> = snapshot.files.iter()
+                .map(|(k, v)| (k.clone(), v.mtime_secs))
+                .collect();
 
+            tracing::info!(files = file_count, "loaded serialized index from .tokenizor/index.bin");
+            let live = persist::snapshot_to_live_index(snapshot);
+            let shared: live_index::SharedIndex = std::sync::Arc::new(std::sync::RwLock::new(live));
+
+            // Spawn background verification to reconcile against current disk state.
+            let bg_index = shared.clone();
+            let bg_root = root.clone();
+            tokio::spawn(async move {
+                persist::background_verify(bg_index, bg_root, snapshot_mtimes).await;
+            });
+
+            shared
+        } else {
+            // Fall back to full re-index (existing behavior).
+            live_index::LiveIndex::load(&root)?
+        };
+
+        let guard = index.read().expect("lock poisoned");
         match guard.index_state() {
             live_index::IndexState::Ready => {
                 let stats = guard.health_stats();
@@ -92,12 +116,29 @@ async fn run_mcp_server_async() -> anyhow::Result<()> {
     let token_stats = Some(sidecar_handle.token_stats);
 
     // Create MCP server and serve on stdio transport.
-    let server = protocol::TokenizorServer::new(index, project_name, watcher_info, watcher_root, token_stats);
+    let server = protocol::TokenizorServer::new(Arc::clone(&index), project_name, watcher_info, watcher_root.clone(), token_stats);
     tracing::info!("starting MCP server on stdio transport");
     let service = serve_server(server, transport::stdio()).await?;
-    service.waiting().await?;
+
+    // Wait for either MCP server shutdown (stdin EOF) or Ctrl+C/SIGTERM.
+    tokio::select! {
+        result = service.waiting() => { result?; }
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("Ctrl+C received, shutting down");
+        }
+    }
 
     tracing::info!("MCP server shut down cleanly");
+
+    // Serialize index to disk on clean shutdown.
+    // Only serialize when auto-index is enabled (i.e., we have a real project root).
+    if let Some(ref root) = watcher_root {
+        let guard = index.read().expect("lock not poisoned");
+        match persist::serialize_index(&guard, root) {
+            Ok(()) => tracing::info!("index serialized to .tokenizor/index.bin"),
+            Err(e) => tracing::warn!("failed to serialize index on shutdown: {e}"),
+        }
+    }
 
     // Shutdown the sidecar now that the MCP server has exited.
     let _ = sidecar_handle.shutdown_tx.send(());

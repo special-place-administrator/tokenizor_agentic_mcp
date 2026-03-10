@@ -9,6 +9,7 @@ use std::fs;
 use std::path::Path;
 use tempfile::tempdir;
 use tokenizor_agentic_mcp::live_index::{IndexState, LiveIndex, ParseStatus};
+use tokenizor_agentic_mcp::live_index::persist;
 
 // --------------------------------------------------------------------------
 // Helpers
@@ -708,4 +709,120 @@ fn test_get_file_content_with_line_range() {
         !result.contains("line four"),
         "line 4 should not be in range 2-3, got: {result}"
     );
+}
+
+// ============================================================================
+// Phase 7 Plan 03: Persistence Integration Tests
+// ============================================================================
+
+// --------------------------------------------------------------------------
+// Test: Persist round-trip preserves files and symbols
+//
+// Creates a LiveIndex with files, serializes to temp dir, loads snapshot,
+// converts back to LiveIndex, verifies files and symbols match.
+// --------------------------------------------------------------------------
+
+#[test]
+fn test_persist_round_trip() {
+    let dir = tempdir().unwrap();
+
+    // Create source files
+    write_file(dir.path(), "main.rs", "fn main() {}\nfn helper() {}");
+    write_file(dir.path(), "lib.rs", "fn util(): void {}");
+
+    // Build a real LiveIndex
+    let shared = LiveIndex::load(dir.path()).unwrap();
+
+    // Serialize it
+    {
+        let guard = shared.read().unwrap();
+        persist::serialize_index(&guard, dir.path()).expect("serialize should succeed");
+    }
+
+    // Load snapshot
+    let snapshot = persist::load_snapshot(dir.path())
+        .expect("snapshot should be loadable after serialize");
+
+    assert_eq!(snapshot.version, 1, "snapshot version should be 1");
+    assert_eq!(snapshot.files.len(), 2, "snapshot should contain 2 files");
+    assert!(snapshot.files.contains_key("main.rs"), "main.rs should be in snapshot");
+    assert!(snapshot.files.contains_key("lib.rs"), "lib.rs should be in snapshot");
+
+    // Convert snapshot back to LiveIndex and wrap in Arc<RwLock>
+    use std::sync::{Arc, RwLock};
+    let loaded_index = persist::snapshot_to_live_index(snapshot);
+    let shared_loaded = Arc::new(RwLock::new(loaded_index));
+    let loaded = shared_loaded.read().unwrap();
+
+    // Verify file count matches
+    assert_eq!(loaded.file_count(), 2, "loaded index should have 2 files");
+
+    // Verify files are accessible by path
+    assert!(loaded.get_file("main.rs").is_some(), "main.rs should be in loaded index");
+    assert!(loaded.get_file("lib.rs").is_some(), "lib.rs should be in loaded index");
+
+    // Verify symbols were preserved
+    let symbols = loaded.symbols_for_file("main.rs");
+    let symbol_names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+    assert!(
+        symbol_names.contains(&"main") || symbol_names.contains(&"helper"),
+        "symbols should be preserved: {symbol_names:?}"
+    );
+
+    // Verify content bytes preserved
+    let original_content = fs::read(dir.path().join("main.rs")).unwrap();
+    let main_file = loaded.get_file("main.rs").unwrap();
+    assert_eq!(
+        main_file.content,
+        original_content,
+        "content bytes should be preserved through round-trip"
+    );
+}
+
+// --------------------------------------------------------------------------
+// Test: Corrupt index.bin falls back gracefully (returns None, no panic)
+// --------------------------------------------------------------------------
+
+#[test]
+fn test_persist_corrupt_fallback() {
+    let dir = tempdir().unwrap();
+
+    // Write garbage bytes where index.bin should be
+    fs::create_dir_all(dir.path().join(".tokenizor")).unwrap();
+    fs::write(dir.path().join(".tokenizor").join("index.bin"), b"not valid postcard data").unwrap();
+
+    // Must return None without panicking
+    let result = persist::load_snapshot(dir.path());
+    assert!(result.is_none(), "corrupt index.bin must return None, not panic");
+
+    // Verify we can still load a real index after corrupt fallback
+    write_file(dir.path(), "a.rs", "fn alpha() {}");
+    let shared = LiveIndex::load(dir.path()).unwrap();
+    let index = shared.read().unwrap();
+    assert_eq!(index.file_count(), 1, "full re-index should work after corrupt fallback");
+}
+
+// --------------------------------------------------------------------------
+// Test: Version mismatch in index.bin triggers fallback (returns None)
+// --------------------------------------------------------------------------
+
+#[test]
+fn test_persist_version_mismatch() {
+    use tokenizor_agentic_mcp::live_index::persist::IndexSnapshot;
+    use std::collections::HashMap;
+
+    let dir = tempdir().unwrap();
+
+    // Manually create a snapshot with a future version number
+    let future_snapshot = IndexSnapshot {
+        version: 999,
+        files: HashMap::new(),
+    };
+    let bytes = postcard::to_stdvec(&future_snapshot).expect("postcard serialize should work");
+    fs::create_dir_all(dir.path().join(".tokenizor")).unwrap();
+    fs::write(dir.path().join(".tokenizor").join("index.bin"), &bytes).unwrap();
+
+    // Must return None (version mismatch)
+    let result = persist::load_snapshot(dir.path());
+    assert!(result.is_none(), "version mismatch must return None");
 }

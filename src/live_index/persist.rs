@@ -304,6 +304,106 @@ fn build_snapshot(index: &LiveIndex) -> IndexSnapshot {
     }
 }
 
+/// Background task: verify a loaded index against disk and re-parse stale files.
+///
+/// Run after `snapshot_to_live_index` to bring the index to current disk state.
+/// Non-blocking for queries — writes are protected by the index's RwLock.
+pub async fn background_verify(
+    index: crate::live_index::store::SharedIndex,
+    root: std::path::PathBuf,
+    snapshot_mtimes: HashMap<String, i64>,
+) {
+    // 1. Stat-check all files (fast: just metadata reads)
+    let stat_result = {
+        let guard = index.read().expect("lock not poisoned");
+        stat_check_files(&guard, &snapshot_mtimes, &root)
+    };
+
+    let changed_count = stat_result.changed.len();
+    let deleted_count = stat_result.deleted.len();
+    let new_count = stat_result.new_files.len();
+
+    // 2. Remove deleted files
+    if !stat_result.deleted.is_empty() {
+        let mut guard = index.write().expect("lock not poisoned");
+        for path in &stat_result.deleted {
+            guard.remove_file(path);
+        }
+    }
+
+    // 3. Re-parse changed files
+    let to_reparse: Vec<String> = stat_result.changed.into_iter()
+        .chain(stat_result.new_files.into_iter())
+        .collect();
+
+    for rel_path in &to_reparse {
+        let abs_path = root.join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let bytes = match std::fs::read(&abs_path) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("background_verify: failed to read {rel_path}: {e}");
+                continue;
+            }
+        };
+
+        // Detect language from path
+        let ext = std::path::Path::new(rel_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let language = match crate::domain::LanguageId::from_extension(ext) {
+            Some(lang) => lang,
+            None => continue,
+        };
+
+        let result = crate::parsing::process_file(rel_path, &bytes, language);
+        let indexed_file = IndexedFile::from_parse_result(result, bytes);
+
+        let mut guard = index.write().expect("lock not poisoned");
+        guard.update_file(rel_path.clone(), indexed_file);
+    }
+
+    // 4. Spot-verify sample (10%) for content hash mismatches
+    let spot_mismatches = {
+        let guard = index.read().expect("lock not poisoned");
+        spot_verify_sample(&guard, &root, 0.10)
+    };
+
+    let spot_count = spot_mismatches.len();
+
+    // Re-parse spot-check mismatches
+    for rel_path in &spot_mismatches {
+        let abs_path = root.join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let bytes = match std::fs::read(&abs_path) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("background_verify spot-check: failed to read {rel_path}: {e}");
+                continue;
+            }
+        };
+
+        let ext = std::path::Path::new(rel_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let language = match crate::domain::LanguageId::from_extension(ext) {
+            Some(lang) => lang,
+            None => continue,
+        };
+
+        let result = crate::parsing::process_file(rel_path, &bytes, language);
+        let indexed_file = IndexedFile::from_parse_result(result, bytes);
+
+        let mut guard = index.write().expect("lock not poisoned");
+        guard.update_file(rel_path.clone(), indexed_file);
+    }
+
+    info!(
+        "background verify complete: {} changed, {} deleted, {} new, {} spot-check mismatches",
+        changed_count, deleted_count, new_count, spot_count
+    );
+}
+
 // ── Unit tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
