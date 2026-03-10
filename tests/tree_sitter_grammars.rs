@@ -1,5 +1,5 @@
 use tree_sitter::Parser;
-use tokenizor_agentic_mcp::domain::LanguageId;
+use tokenizor_agentic_mcp::domain::{FileOutcome, LanguageId, SymbolKind};
 use tokenizor_agentic_mcp::parsing::process_file;
 
 #[test]
@@ -88,7 +88,6 @@ fn test_c_grammar_loads_and_parses() {
 
     // Verify symbols extracted via process_file
     let result = process_file("test.c", source.as_bytes(), LanguageId::C);
-    use tokenizor_agentic_mcp::domain::{FileOutcome, SymbolKind};
     assert_eq!(result.outcome, FileOutcome::Processed);
     assert!(
         result.symbols.iter().any(|s| s.kind == SymbolKind::Struct && s.name == "Point"),
@@ -113,7 +112,6 @@ fn test_cpp_grammar_loads_and_parses() {
 
     // Verify symbols extracted via process_file
     let result = process_file("test.cpp", source.as_bytes(), LanguageId::Cpp);
-    use tokenizor_agentic_mcp::domain::{FileOutcome, SymbolKind};
     assert_eq!(result.outcome, FileOutcome::Processed);
     assert!(
         result.symbols.iter().any(|s| s.kind == SymbolKind::Module && s.name == "myns"),
@@ -122,5 +120,137 @@ fn test_cpp_grammar_loads_and_parses() {
     assert!(
         result.symbols.iter().any(|s| s.kind == SymbolKind::Class && s.name == "Foo"),
         "should extract Foo class, symbols: {:?}", result.symbols
+    );
+}
+
+// --- New language grammar tests (Phase 07-04) ---
+
+#[test]
+fn test_csharp_grammar_loads_and_parses() {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_c_sharp::LANGUAGE.into())
+        .expect("failed to load C# grammar — possible ABI mismatch");
+    let source = "public class Greeter { public void Hello() {} }";
+    let tree = parser.parse(source, None).expect("parse returned None");
+    assert!(!tree.root_node().kind().is_empty());
+
+    let result = process_file("test.cs", source.as_bytes(), LanguageId::CSharp);
+    assert_eq!(result.outcome, FileOutcome::Processed);
+    assert!(
+        result.symbols.iter().any(|s| s.kind == SymbolKind::Class && s.name == "Greeter"),
+        "should extract Greeter class, symbols: {:?}", result.symbols
+    );
+}
+
+#[test]
+fn test_ruby_grammar_loads_and_parses() {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_ruby::LANGUAGE.into())
+        .expect("failed to load Ruby grammar — possible ABI mismatch");
+    let source = "class Animal\n  def speak\n  end\nend";
+    let tree = parser.parse(source, None).expect("parse returned None");
+    assert!(!tree.root_node().kind().is_empty());
+
+    let result = process_file("test.rb", source.as_bytes(), LanguageId::Ruby);
+    assert_eq!(result.outcome, FileOutcome::Processed);
+    assert!(
+        result.symbols.iter().any(|s| s.kind == SymbolKind::Class && s.name == "Animal"),
+        "should extract Animal class, symbols: {:?}", result.symbols
+    );
+    assert!(
+        result.symbols.iter().any(|s| s.kind == SymbolKind::Function && s.name == "speak"),
+        "should extract speak method, symbols: {:?}", result.symbols
+    );
+}
+
+#[test]
+fn test_kotlin_grammar_loads_and_parses() {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_kotlin_sg::LANGUAGE.into())
+        .expect("failed to load Kotlin grammar — possible ABI mismatch");
+    let source = "class Greeter { fun greet() { } }";
+    let tree = parser.parse(source, None).expect("parse returned None");
+    assert!(!tree.root_node().kind().is_empty());
+
+    let result = process_file("test.kt", source.as_bytes(), LanguageId::Kotlin);
+    assert!(
+        matches!(result.outcome, FileOutcome::Processed | FileOutcome::PartialParse { .. }),
+        "Kotlin should be Processed or PartialParse, got: {:?}", result.outcome
+    );
+    assert!(
+        result.symbols.iter().any(|s| s.name == "Greeter"),
+        "should extract Greeter, symbols: {:?}", result.symbols
+    );
+}
+
+#[test]
+fn test_dart_grammar_loads_and_parses() {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_dart::language().into())
+        .expect("failed to load Dart grammar — possible ABI mismatch");
+    let source = "class Animal { void speak() {} }";
+    let tree = parser.parse(source, None).expect("parse returned None");
+    assert!(!tree.root_node().kind().is_empty());
+
+    let result = process_file("test.dart", source.as_bytes(), LanguageId::Dart);
+    assert_eq!(result.outcome, FileOutcome::Processed);
+    assert!(
+        result.symbols.iter().any(|s| s.kind == SymbolKind::Class && s.name == "Animal"),
+        "should extract Animal class, symbols: {:?}", result.symbols
+    );
+}
+
+#[test]
+fn test_elixir_grammar_loads_and_parses() {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_elixir::LANGUAGE.into())
+        .expect("failed to load Elixir grammar — possible ABI mismatch");
+    let source = "defmodule Greeter do\n  def greet do\n    :ok\n  end\nend";
+    let tree = parser.parse(source, None).expect("parse returned None");
+    assert!(!tree.root_node().kind().is_empty());
+
+    let result = process_file("test.ex", source.as_bytes(), LanguageId::Elixir);
+    assert_eq!(result.outcome, FileOutcome::Processed);
+    assert!(
+        result.symbols.iter().any(|s| s.kind == SymbolKind::Module && s.name == "Greeter"),
+        "should extract Greeter module, symbols: {:?}", result.symbols
+    );
+}
+
+#[test]
+fn test_php_grammar_returns_failed_gracefully() {
+    // PHP grammar requires ABI 15 — should return Failed with a clear error, not panic
+    let source = b"<?php class Foo { public function bar() {} }";
+    let result = process_file("test.php", source, LanguageId::Php);
+    assert!(
+        matches!(result.outcome, FileOutcome::Failed { .. }),
+        "PHP with ABI-incompatible grammar should return Failed, not panic: {:?}", result.outcome
+    );
+}
+
+#[test]
+fn test_swift_grammar_returns_failed_gracefully() {
+    // Swift grammar requires ABI 15 — should return Failed with a clear error, not panic
+    let source = b"class Foo { func bar() {} }";
+    let result = process_file("test.swift", source, LanguageId::Swift);
+    assert!(
+        matches!(result.outcome, FileOutcome::Failed { .. }),
+        "Swift with ABI-incompatible grammar should return Failed, not panic: {:?}", result.outcome
+    );
+}
+
+#[test]
+fn test_perl_grammar_returns_failed_gracefully() {
+    // Perl grammar requires ABI 15+ — should return Failed with a clear error, not panic
+    let source = b"sub greet { print \"hello\\n\"; }";
+    let result = process_file("test.pl", source, LanguageId::Perl);
+    assert!(
+        matches!(result.outcome, FileOutcome::Failed { .. }),
+        "Perl with ABI-incompatible grammar should return Failed, not panic: {:?}", result.outcome
     );
 }

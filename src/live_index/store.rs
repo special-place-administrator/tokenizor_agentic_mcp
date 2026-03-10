@@ -655,17 +655,18 @@ mod tests {
 
     #[test]
     fn test_live_index_load_circuit_breaker_tripped_state() {
-        // Create >20% unparseable files (unsupported language → Failed outcome)
-        // Use Ruby files which parse_source returns Failed for
+        // Create >20% unparseable files (ABI-incompatible language → Failed outcome)
+        // PHP/Swift/Perl grammar crates require ABI 15 and return Failed when loaded.
+        // Ruby is now supported (ABI-compatible grammar) and returns Processed.
         let tmp = TempDir::new().unwrap();
         write_file(tmp.path(), "a.rs", "fn alpha() {}");
         write_file(tmp.path(), "b.rs", "fn beta() {}");
         write_file(tmp.path(), "c.rs", "fn gamma() {}");
-        // 3 Ruby files — unsupported language → Failed outcome
+        // 3 Swift files — ABI-incompatible grammar → Failed outcome
         // 3/6 = 50% > 20% threshold — should trip
-        write_file(tmp.path(), "x.rb", "def foo; end");
-        write_file(tmp.path(), "y.rb", "def bar; end");
-        write_file(tmp.path(), "z.rb", "def baz; end");
+        write_file(tmp.path(), "x.swift", "class A {}");
+        write_file(tmp.path(), "y.swift", "class B {}");
+        write_file(tmp.path(), "z.swift", "class C {}");
 
         let shared = LiveIndex::load(tmp.path()).unwrap();
         let index = shared.read().unwrap();

@@ -15,6 +15,7 @@ pub enum LanguageId {
     Ruby,
     Php,
     Swift,
+    Kotlin,
     Dart,
     Perl,
     Elixir,
@@ -36,6 +37,7 @@ impl LanguageId {
             "php" => Some(Self::Php),
             "swift" => Some(Self::Swift),
             "dart" => Some(Self::Dart),
+            "kt" | "kts" => Some(Self::Kotlin),
             "pl" | "pm" => Some(Self::Perl),
             "ex" | "exs" => Some(Self::Elixir),
             _ => None,
@@ -56,6 +58,7 @@ impl LanguageId {
             Self::Ruby => &["rb"],
             Self::Php => &["php"],
             Self::Swift => &["swift"],
+            Self::Kotlin => &["kt", "kts"],
             Self::Dart => &["dart"],
             Self::Perl => &["pl", "pm"],
             Self::Elixir => &["ex", "exs"],
@@ -67,16 +70,17 @@ impl LanguageId {
             Self::Rust | Self::Python | Self::JavaScript | Self::TypeScript | Self::Go => {
                 SupportTier::QualityFocus
             }
-            Self::Java => SupportTier::Broader,
-            Self::C
+            Self::Java
+            | Self::C
             | Self::Cpp
             | Self::CSharp
             | Self::Ruby
             | Self::Php
             | Self::Swift
+            | Self::Kotlin
             | Self::Dart
             | Self::Perl
-            | Self::Elixir => SupportTier::Unsupported,
+            | Self::Elixir => SupportTier::Broader,
         }
     }
 }
@@ -96,6 +100,7 @@ impl fmt::Display for LanguageId {
             Self::Ruby => "Ruby",
             Self::Php => "PHP",
             Self::Swift => "Swift",
+            Self::Kotlin => "Kotlin",
             Self::Dart => "Dart",
             Self::Perl => "Perl",
             Self::Elixir => "Elixir",

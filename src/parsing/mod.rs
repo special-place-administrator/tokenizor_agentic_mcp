@@ -82,6 +82,12 @@ fn parse_source(
         LanguageId::Java => tree_sitter_java::LANGUAGE.into(),
         LanguageId::C => tree_sitter_c::LANGUAGE.into(),
         LanguageId::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+        LanguageId::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+        LanguageId::Ruby => tree_sitter_ruby::LANGUAGE.into(),
+        LanguageId::Kotlin => tree_sitter_kotlin_sg::LANGUAGE.into(),
+        LanguageId::Dart => tree_sitter_dart::language().into(),
+        LanguageId::Elixir => tree_sitter_elixir::LANGUAGE.into(),
+        // PHP, Swift, Perl: grammar crates require ABI 15+ (incompatible with tree-sitter 0.24)
         _ => {
             return Err(format!(
                 "language not yet onboarded for parsing: {language:?}"
@@ -217,12 +223,10 @@ mod tests {
     }
 
     #[test]
-    fn test_process_file_unsupported_language_returns_failed() {
-        let source = b"def hello; end";
+    fn test_process_file_ruby_extracts_method() {
+        let source = b"def hello\n  puts 'hi'\nend";
         let result = process_file("app.rb", source, LanguageId::Ruby);
-        assert!(matches!(result.outcome, FileOutcome::Failed { .. }));
-        if let FileOutcome::Failed { error } = &result.outcome {
-            assert!(error.contains("not yet onboarded"));
-        }
+        assert_eq!(result.outcome, FileOutcome::Processed);
+        assert!(!result.symbols.is_empty(), "should have symbols for Ruby source");
     }
 }

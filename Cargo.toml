@@ -27,6 +27,13 @@ tree-sitter-go = "0.23"
 tree-sitter-java = "0.23"
 tree-sitter-c = "0.23.4"
 tree-sitter-cpp = "0.23.4"
+tree-sitter-c-sharp = "0.23.1"
+tree-sitter-ruby = "0.23.1"
+# PHP (0.24.2) and Swift (0.7.1) require ABI 15 — incompatible with tree-sitter 0.24 (max ABI 14)
+# Perl (1.1.2) and tree-sitter-perl-next require ABI 15 or 26 — skipped
+tree-sitter-kotlin-sg = "0.4.0"
+tree-sitter-dart = "0.0.4"
+tree-sitter-elixir = "0.3.5"
 ignore = "0.4"
 notify = "8"
 notify-debouncer-full = "0.7"
