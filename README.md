@@ -17,6 +17,12 @@ Prebuilt binaries are available for **Windows x64** and **Linux x64**.
 
 ### Claude Code
 
+**Windows:**
+```bash
+claude mcp add tokenizor -e TOKENIZOR_CONTROL_PLANE_BACKEND=local_registry -- cmd /c npx -y tokenizor-mcp
+```
+
+**Linux:**
 ```bash
 claude mcp add tokenizor -e TOKENIZOR_CONTROL_PLANE_BACKEND=local_registry -- npx -y tokenizor-mcp
 ```
@@ -29,8 +35,8 @@ Add to `.cursor/mcp.json`:
 {
   "mcpServers": {
     "tokenizor": {
-      "command": "npx",
-      "args": ["-y", "tokenizor-mcp"],
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "tokenizor-mcp"],
       "env": {
         "TOKENIZOR_CONTROL_PLANE_BACKEND": "local_registry"
       }
@@ -38,6 +44,8 @@ Add to `.cursor/mcp.json`:
   }
 }
 ```
+
+On Linux, use `"command": "npx"` and `"args": ["-y", "tokenizor-mcp"]` instead.
 
 ### Claude Desktop
 
@@ -47,8 +55,8 @@ Add to `claude_desktop_config.json` (Settings > Developer > Edit Config):
 {
   "mcpServers": {
     "tokenizor": {
-      "command": "npx",
-      "args": ["-y", "tokenizor-mcp"],
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "tokenizor-mcp"],
       "env": {
         "TOKENIZOR_CONTROL_PLANE_BACKEND": "local_registry"
       }
