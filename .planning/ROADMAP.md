@@ -117,12 +117,12 @@ Plans:
 **Plans:** 3/3 plans complete
 
 Plans:
-- [ ] 06-01-PLAN.md — Sidecar enrichment: TokenStats, SidecarState, budget enforcement, enriched handlers (outline+refs, impact+diff, symbol-context+annotations, repo-map+tree)
-- [ ] 06-02-PLAN.md — Hook binary stdin JSON parsing, tool_name routing, Write support, init single-entry format with auto-migration
-- [ ] 06-03-PLAN.md — Integration tests for all hook types, health tool token savings wiring
+- [x] 06-01-PLAN.md — Sidecar enrichment: TokenStats, SidecarState, budget enforcement, enriched handlers (outline+refs, impact+diff, symbol-context+annotations, repo-map+tree)
+- [x] 06-02-PLAN.md — Hook binary stdin JSON parsing, tool_name routing, Write support, init single-entry format with auto-migration
+- [x] 06-03-PLAN.md — Integration tests for all hook types, health tool token savings wiring
 
 ### Phase 7: Polish and Persistence
-**Goal**: The server restarts in under 100ms by loading a serialized index, search returns ranked results, and additional languages are supported
+**Goal**: The server restarts in under 100ms by loading a serialized index, search returns ranked results, and C/C++ languages are supported
 **Depends on**: Phase 6
 **Requirements**: PLSH-01, PLSH-02, PLSH-03, PLSH-04, PLSH-05, LANG-01, LANG-02, LANG-03, LANG-04, LANG-05, LANG-06, LANG-07
 **Success Criteria** (what must be TRUE):
@@ -130,7 +130,12 @@ Plans:
   2. If the serialized index is corrupted or outdated, the server falls back to full re-index without crashing
   3. `search_symbols "parse"` returns exact matches before prefix matches before substring matches — relevance ranking is observable
   4. C and C++ source files appear in `get_repo_outline` and return symbols from `get_file_outline`, with the same quality as the original 6 languages
-**Plans**: TBD
+**Plans:** 3 plans
+
+Plans:
+- [ ] 07-01-PLAN.md — C and C++ language support: tree-sitter grammars, symbol extraction, cross-reference queries
+- [ ] 07-02-PLAN.md — Trigram text search, scored symbol ranking, file tree navigation tool
+- [ ] 07-03-PLAN.md — LiveIndex persistence: serialize on shutdown, load on startup, background verification
 
 ## Progress
 
@@ -145,7 +150,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | 4. Cross-Reference Extraction | 3/3 | Complete   | 2026-03-10 |
 | 5. HTTP Sidecar + Hook Infrastructure | 3/3 | Complete   | 2026-03-10 |
 | 6. Hook Enrichment Integration | 3/3 | Complete   | 2026-03-10 |
-| 7. Polish and Persistence | 0/? | Not started | - |
+| 7. Polish and Persistence | 0/3 | Not started | - |
 
 ---
 *Roadmap created: 2026-03-10*
