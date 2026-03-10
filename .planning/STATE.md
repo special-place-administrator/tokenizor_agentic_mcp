@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: completed
-stopped_at: Phase 7 context gathered
-last_updated: "2026-03-10T22:30:19.738Z"
+stopped_at: Completed 07-polish-and-persistence-07-01-PLAN.md
+last_updated: "2026-03-10T23:12:54.735Z"
 last_activity: "2026-03-10 — Phase 06 Plan 03 complete: 12 integration tests prove HOOK-04..09 + INFR-04; health tool enriched with token savings via Arc<TokenStats>"
 progress:
   total_phases: 7
   completed_phases: 6
-  total_plans: 18
-  completed_plans: 18
+  total_plans: 22
+  completed_plans: 20
   percent: 94
 ---
 
@@ -68,6 +68,7 @@ Progress: [████████░░] 94%
 | Phase 06-hook-enrichment-integration P01 | 6 | 2 tasks | 4 files |
 | Phase 06-hook-enrichment-integration P02 | 5 | 2 tasks | 4 files |
 | Phase 06-hook-enrichment-integration P03 | 7 | 2 tasks | 7 files |
+| Phase 07-polish-and-persistence P01 | 10 | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -141,6 +142,8 @@ Recent decisions affecting current work:
 - [Phase 06-03]: SidecarHandle exposes token_stats Arc: spawn_sidecar retains clone and returns in handle, avoids HTTP round-trip in health tool
 - [Phase 06-03]: format_token_savings returns empty string on all-zeros — fail-open, health tool callers append unconditionally without emptiness check
 - [Phase 06-03]: init_integration.rs 3 failures confirmed pre-existing: verified by stashing changes, deferred to deferred-items.md (not caused by Plan 06-03)
+- [Phase 07-polish-and-persistence]: Pin tree-sitter-c/cpp to 0.23.4 not 0.24.1: ABI 15 in 0.24.x grammars incompatible with tree-sitter 0.24.x host (max ABI 14); 0.23.x grammars use ABI 14 consistently
+- [Phase 07-polish-and-persistence]: C declarator name extraction uses recursive walk: pointer_declarator -> function_declarator -> identifier; template_declaration produces no symbol itself
 
 ### Pending Todos
 
@@ -154,6 +157,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T22:30:19.733Z
-Stopped at: Phase 7 context gathered
-Resume file: .planning/phases/07-polish-and-persistence/07-CONTEXT.md
+Last session: 2026-03-10T23:12:54.731Z
+Stopped at: Completed 07-polish-and-persistence-07-01-PLAN.md
+Resume file: None

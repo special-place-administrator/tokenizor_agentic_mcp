@@ -89,13 +89,13 @@ Requirements for the v2 rewrite release. Each maps to roadmap phases.
 
 ### Languages
 
-- [ ] **LANG-01**: Tree-sitter parsing for C (high priority)
-- [ ] **LANG-02**: Tree-sitter parsing for C++ (high priority)
-- [ ] **LANG-03**: Tree-sitter parsing for C# (medium priority)
-- [ ] **LANG-04**: Tree-sitter parsing for Ruby (medium priority)
-- [ ] **LANG-05**: Tree-sitter parsing for PHP (medium priority)
-- [ ] **LANG-06**: Tree-sitter parsing for Swift (lower priority)
-- [ ] **LANG-07**: Tree-sitter parsing for Dart (lower priority)
+- [x] **LANG-01**: Tree-sitter parsing for C (high priority)
+- [x] **LANG-02**: Tree-sitter parsing for C++ (high priority)
+- [x] **LANG-03**: Tree-sitter parsing for C# (medium priority)
+- [x] **LANG-04**: Tree-sitter parsing for Ruby (medium priority)
+- [x] **LANG-05**: Tree-sitter parsing for PHP (medium priority)
+- [x] **LANG-06**: Tree-sitter parsing for Swift (lower priority)
+- [x] **LANG-07**: Tree-sitter parsing for Dart (lower priority)
 
 ## v2 Requirements
 
@@ -186,13 +186,13 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PLSH-03 | Phase 7 | Pending |
 | PLSH-04 | Phase 7 | Pending |
 | PLSH-05 | Phase 7 | Pending |
-| LANG-01 | Phase 7 | Pending |
-| LANG-02 | Phase 7 | Pending |
-| LANG-03 | Phase 7 | Pending |
-| LANG-04 | Phase 7 | Pending |
-| LANG-05 | Phase 7 | Pending |
-| LANG-06 | Phase 7 | Pending |
-| LANG-07 | Phase 7 | Pending |
+| LANG-01 | Phase 7 | Complete |
+| LANG-02 | Phase 7 | Complete |
+| LANG-03 | Phase 7 | Complete |
+| LANG-04 | Phase 7 | Complete |
+| LANG-05 | Phase 7 | Complete |
+| LANG-06 | Phase 7 | Complete |
+| LANG-07 | Phase 7 | Complete |
 
 **Coverage:**
 - v1 requirements: 63 total
