@@ -9,6 +9,34 @@ The product direction is not "just another MCP server." The goal is a trusted lo
 - durable operational state
 - workflow integration that makes retrieval-first behavior practical
 
+## Quick Start
+
+Prerequisites: [Rust toolchain](https://rustup.rs) (edition 2024).
+
+```bash
+# One command — builds binary, installs SpacetimeDB CLI if missing,
+# starts the local runtime, publishes the module, verifies readiness,
+# and prints MCP config for your client.
+bash scripts/setup.sh
+```
+
+After setup, add the printed config to your MCP client (Claude Code, Claude Desktop, Cursor, etc.).
+
+For a hands-off experience on reboot, use the launcher wrapper as your MCP command:
+
+```json
+{
+  "mcpServers": {
+    "tokenizor": {
+      "command": "bash",
+      "args": ["/path/to/tokenizor_agentic_mcp/scripts/tokenizor-mcp.sh"]
+    }
+  }
+}
+```
+
+The wrapper auto-starts SpacetimeDB if it's not running, then launches the MCP server.
+
 ## What Tokenizor Is
 
 Tokenizor is being built as a Rust-native successor to the older `jcodemunch-mcp` style of code-intelligence tooling, but with a stricter architecture and stronger correctness guarantees.
@@ -245,19 +273,27 @@ Important defaults:
 
 ## Running Locally
 
-Basic local workflow:
+**Automated (recommended):**
 
-```powershell
-cargo run -- doctor
-cargo run -- init .
-cargo run -- attach C:\path\to\worktree
-cargo run -- migrate
-cargo run -- inspect
-cargo run -- resolve
-cargo run -- run
+```bash
+bash scripts/setup.sh        # one-time: build, SpacetimeDB setup, verify
+bash scripts/tokenizor-mcp.sh # start MCP server (auto-starts SpacetimeDB)
 ```
 
-At the moment, `run` will only succeed when the configured SpacetimeDB runtime/service is actually reachable and compatible.
+**Manual workflow:**
+
+```bash
+spacetime start               # start SpacetimeDB runtime
+spacetime publish tokenizor --module-path spacetime/tokenizor --server local -y
+cargo run -- doctor           # verify readiness
+cargo run -- init .           # register a repository
+cargo run -- run              # start MCP server
+```
+
+**Scripts:**
+- `scripts/setup.sh` — one-time full setup (build, SpacetimeDB, module publish, verify)
+- `scripts/tokenizor-mcp.sh` — MCP launcher wrapper (ensures SpacetimeDB is running, then serves)
+- `scripts/ensure-runtime.sh` — lightweight SpacetimeDB startup check
 
 ## MCP Surface
 
