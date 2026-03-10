@@ -29,7 +29,7 @@ Requirements for the v2 rewrite release. Each maps to roadmap phases.
 - [ ] **RELY-01**: Circuit breaker aborts indexing if >20% of files fail parsing
 - [ ] **RELY-02**: Partial parse on syntax errors — keep previous symbols, log warning
 - [ ] **RELY-03**: File deletion during edit handled gracefully (no panic/crash)
-- [ ] **RELY-04**: MCP server stdout purity — zero non-JSON output on stdout (CI gate)
+- [x] **RELY-04**: MCP server stdout purity — zero non-JSON output on stdout (CI gate)
 
 ### Cross-References
 
@@ -144,7 +144,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | RELY-01 | Phase 1 | Pending |
 | RELY-02 | Phase 1 | Pending |
 | RELY-03 | Phase 3 | Pending |
-| RELY-04 | Phase 1 | Pending |
+| RELY-04 | Phase 1 | Complete |
 | XREF-01 | Phase 4 | Pending |
 | XREF-02 | Phase 4 | Pending |
 | XREF-03 | Phase 4 | Pending |
