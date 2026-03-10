@@ -14,7 +14,7 @@ The server restarts in under 100ms by loading a serialized index, search returns
 ## Implementation Decisions
 
 ### Index persistence (PLSH-04, PLSH-05)
-- Serialization format: bincode 2.x — fastest Rust serialize/deserialize, compact binary
+- Serialization format: postcard 1.1.3 — replaces bincode 2.x per RUSTSEC-2025-0141 (unmaintained), near-identical serde API, community-endorsed replacement
 - No schema migration — version tag at file header, mismatch triggers full re-index
 - Serialize on shutdown only (stdin EOF / SIGTERM) — no periodic or per-change writes
 - If process crashes, next start does full re-index (same as today, no regression)
@@ -29,7 +29,7 @@ The server restarts in under 100ms by loading a serialized index, search returns
 
 ### Trigram text search (PLSH-01)
 - In-memory trigram index built alongside LiveIndex from content bytes already in RAM
-- Data structure: HashMap<[u8;3], Vec<(FileId, Vec<u32>)>> — trigram to list of (file, byte positions)
+- Data structure: HashMap<[u8;3], Vec<u32>> — trigram to list of file IDs (positions dropped; file-level search is the use case)
 - Rebuilt on startup from content bytes (~50ms for 1000 files) — not persisted to disk
 - Updated incrementally when watcher re-indexes a file (remove old trigrams, add new)
 - Replaces current linear scan in search_text transparently — same tool contract, same response format, just faster
@@ -62,7 +62,7 @@ The server restarts in under 100ms by loading a serialized index, search returns
 - Deferred languages (post-v2): C# (LANG-03), Ruby (LANG-04), PHP (LANG-05), Swift (LANG-06), Dart (LANG-07)
 
 ### Claude's Discretion
-- bincode 2.x exact API usage and configuration
+- postcard 1.1.3 exact API usage and configuration
 - Trigram index internal data structure optimizations (e.g., sorted posting lists for faster intersection)
 - Exact tree-sitter query patterns for C and C++ symbol/xref extraction
 - Shutdown hook implementation (signal handler vs stdin EOF detection)
@@ -107,7 +107,7 @@ The server restarts in under 100ms by loading a serialized index, search returns
 - `src/protocol/tools.rs`: Add get_file_tree handler, update search_symbols with ranking, update search_text with trigram backend
 - `src/protocol/format.rs`: Add file_tree formatter, update search_symbols formatter for tier headers
 - `src/main.rs`: Add shutdown hook for index serialization, add startup path for deserialization before auto-index
-- `Cargo.toml`: Add `bincode` 2.x, `tree-sitter-c`, `tree-sitter-cpp` dependencies
+- `Cargo.toml`: Add `postcard` 1.1.3, `tree-sitter-c`, `tree-sitter-cpp` dependencies
 
 </code_context>
 
