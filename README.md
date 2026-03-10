@@ -26,12 +26,12 @@ This split exists for a reason:
 
 ## Current Status
 
-Epic 1 (Foundation), Epic 2 (Durable Indexing and Run Control), and Epic 3 (Trusted Code Discovery and Verified Retrieval) are complete. The codebase is a working indexing and retrieval engine with full lifecycle management and 6 MCP retrieval tools.
+Epics 1–4 are complete. The codebase is a working indexing, retrieval, recovery, and repair engine with full lifecycle management, 18 MCP tools, and a live SpacetimeDB control plane.
 
 Implemented:
 - layered Rust crate structure across `application`, `domain`, `storage`, `protocol`, `indexing`, `parsing`, and `observability`
 - guarded CLI entrypoints for `run`, `doctor`, `init`, `attach`, `migrate`, `inspect`, and `resolve`
-- MCP stdio server with tools: `health`, `index_folder`, `get_index_run`, `list_index_runs`, `cancel_index_run`, `reindex_folder`, `invalidate_repository`, `checkpoint_now`
+- 18 MCP tools covering indexing, retrieval, recovery, repair, health inspection, and operational history
 - MCP resources: `tokenizor://runs/{run_id}/status` for live progress observation
 - deployment-aware startup/readiness checks
 - local byte-exact CAS foundation with atomic writes and writeability checks
@@ -58,12 +58,18 @@ Implemented:
 - batched multi-target retrieval with per-item independence and mixed symbol/code-slice targets
 - shared trust contract: ResultEnvelope, RetrievalOutcome, TrustLevel, Provenance, RequestGateError, NextAction
 - universal request gate (check_request_gate) reused across all retrieval operations
+- SpacetimeDB-backed mutable control plane (real SDK integration, schema, migration safety)
+- ControlPlane trait with 20+ methods across run lifecycle, checkpointing, file records, repair, and operational history
+- startup sweep for stale leases and interrupted state recovery
+- resume from durable checkpoints with discovery manifest validation
+- deterministic repair for suspect, quarantined, or incomplete indexed state (repository/run/file scopes)
+- repository health inspection with structured action classification
+- operational history with unified event model covering run transitions, checkpoints, repairs, integrity changes, and startup sweeps
+- action classification: ActionCondition (10 variants), NextAction vocabulary (Resume, Reindex, Repair, Wait, ResolveContext, Migrate)
 
 Not implemented yet:
-- real SpacetimeDB-backed project/workspace persistence (control plane trait boundary is ready, write methods are stubs)
-- recovery, repair, and operational confidence workflows (Epic 4)
 - MCP prompts
-- provider-native adoption layers
+- provider-native adoption layers and workflow integration (Epic 5)
 
 ## Architecture
 
@@ -255,15 +261,19 @@ At the moment, `run` will only succeed when the configured SpacetimeDB runtime/s
 
 ## MCP Surface
 
-Implemented MCP tools:
+Implemented MCP tools (18):
 - `health` — deployment readiness check
 - `index_folder` — launch background indexing run for a repository path
-- `get_index_run` — inspect run status, health, and progress
-- `list_index_runs` — list runs by repository
+- `get_index_run` — inspect run status, health, progress, and structured action classification
+- `list_index_runs` — list runs by repository or status
 - `cancel_index_run` — cooperatively cancel an active run
-- `reindex_folder` — re-index with idempotency and stale detection
-- `invalidate_repository` — mark indexed state as untrusted
+- `reindex_repository` — re-index with idempotency and stale detection
+- `invalidate_indexed_state` — mark indexed state as untrusted
 - `checkpoint_now` — trigger checkpoint for an active run
+- `resume_index_run` — resume an interrupted run from its last durable checkpoint
+- `repair_index` — trigger deterministic repair for suspect, stale, quarantined, or incomplete state
+- `inspect_repository_health` — repository health report with structured action classification
+- `get_operational_history` — time-ordered operational events (run transitions, repairs, integrity changes)
 - `search_text` — full-text search across indexed files with blob integrity verification
 - `search_symbols` — search indexed symbol records with coverage transparency
 - `get_file_outline` — file-level symbol outline with quarantine visibility
@@ -276,8 +286,8 @@ Implemented MCP resources:
 
 Planned (future):
 - MCP prompts: architecture map, codebase audit, failure triage, repair diagnosis
-- additional resources: repository health, symbol metadata views
-- recovery and repair tools (Epic 4)
+- additional MCP resources: repository health, symbol metadata views
+- workflow integration and adoption layers (Epic 5)
 
 ## Documentation
 
@@ -301,11 +311,10 @@ Completed:
 1. ~~finish durable local foundation and operator flows~~ (Epic 1)
 2. ~~implement durable indexing runs and run lifecycle control~~ (Epic 2)
 3. ~~add trusted code discovery and verified retrieval~~ (Epic 3)
+4. ~~recovery, repair, and operational confidence~~ (Epic 4)
 
 Next:
-4. recovery, repair, and operational confidence (Epic 4)
-5. wire real control-plane persistence through SpacetimeDB
-6. layer in workflow adoption paths after retrieval is trustworthy enough to matter
+5. retrieval-first workflow integration and adoption (Epic 5)
 
 ## Development Notes
 
@@ -316,7 +325,8 @@ Next:
 - serialization: `serde`, `serde_json`, `schemars`
 - error handling: `thiserror` 2.0 (domain), `anyhow` (CLI boundary only)
 - observability: `tracing`, `tracing-subscriber`
-- test suite: 607 tests (unit + integration + conformance + grammar)
+- SpacetimeDB SDK: `spacetimedb-sdk` 2.0.3
+- test suite: 747 tests (unit + integration + conformance + grammar)
 
 ```bash
 cargo test          # run all tests
