@@ -52,9 +52,9 @@ Requirements for the v2 rewrite release. Each maps to roadmap phases.
 - [x] **TOOL-06**: search_text — text search across all indexed files
 - [x] **TOOL-07**: health — report LiveIndex stats (files, symbols, watcher status, last update)
 - [x] **TOOL-08**: index_folder — trigger full reload of LiveIndex
-- [ ] **TOOL-09**: find_references — all call sites for a symbol with context snippets
-- [ ] **TOOL-10**: find_dependents — files that import a given file
-- [ ] **TOOL-11**: get_context_bundle — one-call full context (symbol + callers + callees + types + imports)
+- [x] **TOOL-09**: find_references — all call sites for a symbol with context snippets
+- [x] **TOOL-10**: find_dependents — files that import a given file
+- [x] **TOOL-11**: get_context_bundle — one-call full context (symbol + callers + callees + types + imports)
 - [x] **TOOL-12**: what_changed — files and symbols modified since timestamp
 - [x] **TOOL-13**: get_file_content — serve file content from memory with optional line range
 
@@ -161,9 +161,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TOOL-06 | Phase 2 | Complete |
 | TOOL-07 | Phase 2 | Complete |
 | TOOL-08 | Phase 2 | Complete |
-| TOOL-09 | Phase 4 | Pending |
-| TOOL-10 | Phase 4 | Pending |
-| TOOL-11 | Phase 4 | Pending |
+| TOOL-09 | Phase 4 | Complete |
+| TOOL-10 | Phase 4 | Complete |
+| TOOL-11 | Phase 4 | Complete |
 | TOOL-12 | Phase 2 | Complete |
 | TOOL-13 | Phase 2 | Complete |
 | HOOK-01 | Phase 5 | Pending |

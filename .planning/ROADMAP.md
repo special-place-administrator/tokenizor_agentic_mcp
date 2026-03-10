@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: LiveIndex Foundation** - In-memory store with concurrent access, symbol extraction, circuit breaker (completed 2026-03-10)
 - [x] **Phase 2: MCP Tools v1 Parity** - Wire all core tools to LiveIndex, compact responses, stdout purity (completed 2026-03-10)
 - [x] **Phase 3: File Watcher + Freshness** - notify crate integration, incremental reparse, staleness eliminated (completed 2026-03-10)
-- [ ] **Phase 4: Cross-Reference Extraction** - tree-sitter xref queries for all 6 languages, find_references tools
+- [x] **Phase 4: Cross-Reference Extraction** - tree-sitter xref queries for all 6 languages, find_references tools (completed 2026-03-10)
 - [ ] **Phase 5: HTTP Sidecar + Hook Infrastructure** - axum sidecar on ephemeral port, tokenizor init
 - [ ] **Phase 6: Hook Enrichment Integration** - PostToolUse hooks for Read/Edit/Write/Grep, SessionStart, token tracking
 - [ ] **Phase 7: Polish and Persistence** - LiveIndex serialization, trigram search, scored ranking, additional languages
@@ -81,7 +81,7 @@ Plans:
   3. `find_dependents("src/foo.rs")` returns only files that actually import or use symbols from that file
   4. `get_context_bundle` for any symbol returns its definition, callers, callees, and type usages in a single response under 100ms
   5. After editing a file, its cross-references update incrementally within the watcher's 200ms window
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans complete
 
 Plans:
 - [ ] 04-01-PLAN.md — Domain types (ReferenceRecord, ReferenceKind), tree-sitter xref extraction for 6 languages, LiveIndex storage extensions with reverse index
@@ -132,7 +132,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | 1. LiveIndex Foundation | 3/3 | Complete   | 2026-03-10 |
 | 2. MCP Tools v1 Parity | 3/3 | Complete   | 2026-03-10 |
 | 3. File Watcher + Freshness | 3/3 | Complete   | 2026-03-10 |
-| 4. Cross-Reference Extraction | 2/3 | In Progress|  |
+| 4. Cross-Reference Extraction | 3/3 | Complete   | 2026-03-10 |
 | 5. HTTP Sidecar + Hook Infrastructure | 0/? | Not started | - |
 | 6. Hook Enrichment Integration | 0/? | Not started | - |
 | 7. Polish and Persistence | 0/? | Not started | - |

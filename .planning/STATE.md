@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: completed
-stopped_at: Completed 04-cross-reference-extraction/04-02-PLAN.md
-last_updated: "2026-03-10T19:19:20.189Z"
+stopped_at: Completed 04-cross-reference-extraction/04-03-PLAN.md
+last_updated: "2026-03-10T19:30:25.705Z"
 last_activity: "2026-03-10 — Phase 03 Plan 03 complete: watcher wired into MCP server, 8 integration tests prove all FRSH/RELY-03 reqs"
 progress:
   total_phases: 7
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 12
-  completed_plans: 11
+  completed_plans: 12
   percent: 30
 ---
 
@@ -61,6 +61,7 @@ Progress: [███░░░░░░░] 30%
 | Phase 03-file-watcher-freshness P03 | 18 | 2 tasks | 6 files |
 | Phase 04-cross-reference-extraction P01 | 13 | 2 tasks | 10 files |
 | Phase 04-cross-reference-extraction P02 | 6 | 2 tasks | 2 files |
+| Phase 04-cross-reference-extraction P03 | 7 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -112,6 +113,9 @@ Recent decisions affecting current work:
 - [Phase Phase 04-02]: Qualified queries use full-scan not reverse_index: reverse_index is keyed by simple name; qualified names like Vec::new must scan files and match qualified_name field
 - [Phase Phase 04-02]: collect_refs_for_key as private method: closures capturing self and mut results hit E0521; private method with explicit lifetime annotation solves this
 - [Phase Phase 04-02]: is_filtered_name checks all language lists unconditionally: avoids per-file language detection at query time; cross-language repos handled uniformly
+- [Phase 04-cross-reference-extraction]: Annotation inline on reference line: is_ref_line check in context loop appends annotation string with padding
+- [Phase 04-cross-reference-extraction]: XREF-08 test uses reload not update_file: maybe_reindex is pub(crate); public reload API used in integration tests
+- [Phase 04-cross-reference-extraction]: format_ref_section extracted as private helper: eliminates cap-at-20 duplication across Callers/Callees/Type usages sections
 
 ### Pending Todos
 
@@ -125,6 +129,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T19:19:20.186Z
-Stopped at: Completed 04-cross-reference-extraction/04-02-PLAN.md
+Last session: 2026-03-10T19:30:25.702Z
+Stopped at: Completed 04-cross-reference-extraction/04-03-PLAN.md
 Resume file: None
