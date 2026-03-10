@@ -237,6 +237,8 @@ pub struct LiveIndex {
     /// Repo-level reverse index: reference name -> all locations in the index.
     /// Rebuilt synchronously after every mutation (update_file, add_file, remove_file, reload).
     pub(crate) reverse_index: HashMap<String, Vec<ReferenceLocation>>,
+    /// Trigram search index for file-level text search acceleration.
+    pub(crate) trigram_index: super::trigram::TrigramIndex,
 }
 
 /// Thread-safe shared handle to the index.
@@ -314,6 +316,8 @@ impl LiveIndex {
             load_duration
         );
 
+        let trigram_index = super::trigram::TrigramIndex::build_from_files(&files);
+
         let mut index = LiveIndex {
             files,
             loaded_at: Instant::now(),
@@ -322,6 +326,7 @@ impl LiveIndex {
             cb_state,
             is_empty: false,
             reverse_index: HashMap::new(),
+            trigram_index,
         };
         index.rebuild_reverse_index();
 
@@ -341,6 +346,7 @@ impl LiveIndex {
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: true,
             reverse_index: HashMap::new(),
+            trigram_index: super::trigram::TrigramIndex::new(),
         };
         Arc::new(RwLock::new(index))
     }
@@ -432,6 +438,7 @@ impl LiveIndex {
         self.load_duration = load_duration;
         self.cb_state = new_cb;
         self.is_empty = false;
+        self.trigram_index = super::trigram::TrigramIndex::build_from_files(&self.files);
         self.rebuild_reverse_index();
 
         Ok(())
@@ -442,6 +449,7 @@ impl LiveIndex {
     /// Updates `loaded_at_system` to reflect the mutation time.
     /// If the file already exists, its entry is replaced atomically.
     pub fn update_file(&mut self, path: String, file: IndexedFile) {
+        self.trigram_index.update_file(&path, &file.content);
         self.files.insert(path, file);
         self.loaded_at_system = SystemTime::now();
         self.rebuild_reverse_index();
@@ -462,6 +470,7 @@ impl LiveIndex {
     /// If the path is found and removed, `loaded_at_system` is updated.
     pub fn remove_file(&mut self, path: &str) {
         if self.files.remove(path).is_some() {
+            self.trigram_index.remove_file(path);
             self.loaded_at_system = SystemTime::now();
             self.rebuild_reverse_index();
         }
@@ -799,6 +808,7 @@ mod tests {
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: false,
             reverse_index: HashMap::new(),
+            trigram_index: crate::live_index::trigram::TrigramIndex::new(),
         }
     }
 

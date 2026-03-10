@@ -783,15 +783,19 @@ mod tests {
     }
 
     fn make_index(files: Vec<(String, IndexedFile)>) -> LiveIndex {
+        use crate::live_index::trigram::TrigramIndex;
         let cb = CircuitBreakerState::new(0.20);
+        let files_map = files.into_iter().collect::<HashMap<_, _>>();
+        let trigram_index = TrigramIndex::build_from_files(&files_map);
         LiveIndex {
-            files: files.into_iter().collect::<HashMap<_, _>>(),
+            files: files_map,
             loaded_at: Instant::now(),
             loaded_at_system: std::time::SystemTime::now(),
             load_duration: Duration::from_millis(42),
             cb_state: cb,
             is_empty: false,
             reverse_index: HashMap::new(),
+            trigram_index,
         }
     }
 
@@ -1040,6 +1044,7 @@ mod tests {
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: true,
             reverse_index: HashMap::new(),
+            trigram_index: crate::live_index::trigram::TrigramIndex::new(),
         };
         let result = health_report(&index);
         assert!(result.contains("Status: Empty"), "got: {result}");
@@ -1213,15 +1218,19 @@ mod tests {
     }
 
     fn make_index_with_reverse(files: Vec<(String, IndexedFile)>) -> LiveIndex {
+        use crate::live_index::trigram::TrigramIndex;
         let cb = CircuitBreakerState::new(0.20);
+        let files_map = files.into_iter().collect::<HashMap<_, _>>();
+        let trigram_index = TrigramIndex::build_from_files(&files_map);
         let mut index = LiveIndex {
-            files: files.into_iter().collect::<HashMap<_, _>>(),
+            files: files_map,
             loaded_at: Instant::now(),
             loaded_at_system: std::time::SystemTime::now(),
             load_duration: Duration::from_millis(42),
             cb_state: cb,
             is_empty: false,
             reverse_index: HashMap::new(),
+            trigram_index,
         };
         index.rebuild_reverse_index();
         index

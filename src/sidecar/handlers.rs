@@ -699,14 +699,19 @@ mod tests {
     }
 
     fn build_shared_index(files: Vec<(&str, IndexedFile)>) -> crate::live_index::store::SharedIndex {
+        use crate::live_index::trigram::TrigramIndex;
+        let files_map: HashMap<String, IndexedFile> =
+            files.into_iter().map(|(p, f)| (p.to_string(), f)).collect();
+        let trigram_index = TrigramIndex::build_from_files(&files_map);
         let mut index = LiveIndex {
-            files: files.into_iter().map(|(p, f)| (p.to_string(), f)).collect(),
+            files: files_map,
             loaded_at: Instant::now(),
             loaded_at_system: SystemTime::now(),
             load_duration: Duration::from_millis(10),
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: false,
             reverse_index: HashMap::new(),
+            trigram_index,
         };
         index.rebuild_reverse_index();
         Arc::new(RwLock::new(index))

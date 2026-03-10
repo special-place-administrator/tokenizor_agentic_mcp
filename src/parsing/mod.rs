@@ -80,6 +80,8 @@ fn parse_source(
         LanguageId::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         LanguageId::Go => tree_sitter_go::LANGUAGE.into(),
         LanguageId::Java => tree_sitter_java::LANGUAGE.into(),
+        LanguageId::C => tree_sitter_c::LANGUAGE.into(),
+        LanguageId::Cpp => tree_sitter_cpp::LANGUAGE.into(),
         _ => {
             return Err(format!(
                 "language not yet onboarded for parsing: {language:?}"

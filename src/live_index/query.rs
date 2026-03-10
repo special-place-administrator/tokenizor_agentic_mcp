@@ -426,17 +426,20 @@ mod tests {
             cb.should_abort();
         }
 
+        let files_map: std::collections::HashMap<String, IndexedFile> = files
+            .into_iter()
+            .map(|(p, f)| (p.to_string(), f))
+            .collect();
+        let trigram_index = crate::live_index::trigram::TrigramIndex::build_from_files(&files_map);
         let mut index = LiveIndex {
-            files: files
-                .into_iter()
-                .map(|(p, f)| (p.to_string(), f))
-                .collect(),
+            files: files_map,
             loaded_at: Instant::now(),
             loaded_at_system: std::time::SystemTime::now(),
             load_duration: Duration::from_millis(50),
             cb_state: cb,
             is_empty: false,
             reverse_index: std::collections::HashMap::new(),
+            trigram_index,
         };
         // Rebuild the reverse index so xref query tests work.
         index.rebuild_reverse_index();
@@ -577,6 +580,7 @@ mod tests {
             cb_state: cb,
             is_empty: false,
             reverse_index: std::collections::HashMap::new(),
+            trigram_index: crate::live_index::trigram::TrigramIndex::new(),
         };
         assert!(!index.is_ready());
     }
@@ -602,6 +606,7 @@ mod tests {
             cb_state: cb,
             is_empty: false,
             reverse_index: std::collections::HashMap::new(),
+            trigram_index: crate::live_index::trigram::TrigramIndex::new(),
         };
 
         match index.index_state() {

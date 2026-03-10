@@ -684,6 +684,7 @@ mod tests {
                 cb_state: crate::live_index::store::CircuitBreakerState::new(0.20),
                 is_empty: false,
                 reverse_index: std::collections::HashMap::new(),
+                trigram_index: crate::live_index::trigram::TrigramIndex::new(),
             };
             index.update_file(rel_path.to_string(), indexed);
             Arc::new(RwLock::new(index))
@@ -745,6 +746,7 @@ mod tests {
                 cb_state: crate::live_index::store::CircuitBreakerState::new(0.20),
                 is_empty: false,
                 reverse_index: std::collections::HashMap::new(),
+                trigram_index: crate::live_index::trigram::TrigramIndex::new(),
             };
             index.update_file(rel_path.to_string(), indexed);
             Arc::new(RwLock::new(index))

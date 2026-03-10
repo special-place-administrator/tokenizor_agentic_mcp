@@ -395,18 +395,23 @@ mod tests {
     }
 
     fn make_live_index_ready(files: Vec<(String, IndexedFile)>) -> LiveIndex {
+        use crate::live_index::trigram::TrigramIndex;
+        let files_map = files.into_iter().collect::<HashMap<_, _>>();
+        let trigram_index = TrigramIndex::build_from_files(&files_map);
         LiveIndex {
-            files: files.into_iter().collect::<HashMap<_, _>>(),
+            files: files_map,
             loaded_at: Instant::now(),
             loaded_at_system: std::time::SystemTime::now(),
             load_duration: Duration::from_millis(10),
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: false,
             reverse_index: HashMap::new(),
+            trigram_index,
         }
     }
 
     fn make_live_index_empty() -> LiveIndex {
+        use crate::live_index::trigram::TrigramIndex;
         LiveIndex {
             files: HashMap::new(),
             loaded_at: Instant::now(),
@@ -415,10 +420,12 @@ mod tests {
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: true,
             reverse_index: HashMap::new(),
+            trigram_index: TrigramIndex::new(),
         }
     }
 
     fn make_live_index_tripped() -> LiveIndex {
+        use crate::live_index::trigram::TrigramIndex;
         let cb = CircuitBreakerState::new(0.10);
         for _ in 0..8 {
             cb.record_success();
@@ -435,6 +442,7 @@ mod tests {
             cb_state: cb,
             is_empty: false,
             reverse_index: HashMap::new(),
+            trigram_index: TrigramIndex::new(),
         }
     }
 

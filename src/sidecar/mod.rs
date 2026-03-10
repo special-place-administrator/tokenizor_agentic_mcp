@@ -330,6 +330,7 @@ mod tests {
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: true,
             reverse_index: HashMap::new(),
+            trigram_index: crate::live_index::trigram::TrigramIndex::new(),
         }));
 
         let state = SidecarState {
