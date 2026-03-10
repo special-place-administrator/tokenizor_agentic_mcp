@@ -63,12 +63,12 @@ Requirements for the v2 rewrite release. Each maps to roadmap phases.
 - [x] **HOOK-01**: HTTP sidecar (axum) on localhost:0, port written to .tokenizor/sidecar.port
 - [x] **HOOK-02**: Sidecar shares Arc<LiveIndex> with MCP tools — zero data duplication
 - [x] **HOOK-03**: Hook response latency <100ms total (Python spawn + HTTP + query)
-- [ ] **HOOK-04**: PostToolUse(Read) — inject symbol outline + key references for indexed files
-- [ ] **HOOK-05**: PostToolUse(Edit) — trigger re-index + inject impact analysis (callers to review)
-- [ ] **HOOK-06**: PostToolUse(Write) — trigger index of new file + confirmation
-- [ ] **HOOK-07**: PostToolUse(Grep) — inject symbol context for matched lines
-- [ ] **HOOK-08**: SessionStart — inject compact repo map (~500 tokens)
-- [ ] **HOOK-09**: Hook output token budget enforced (<200 tokens for Read, <100 for Grep)
+- [x] **HOOK-04**: PostToolUse(Read) — inject symbol outline + key references for indexed files
+- [x] **HOOK-05**: PostToolUse(Edit) — trigger re-index + inject impact analysis (callers to review)
+- [x] **HOOK-06**: PostToolUse(Write) — trigger index of new file + confirmation
+- [x] **HOOK-07**: PostToolUse(Grep) — inject symbol context for matched lines
+- [x] **HOOK-08**: SessionStart — inject compact repo map (~500 tokens)
+- [x] **HOOK-09**: Hook output token budget enforced (<200 tokens for Read, <100 for Grep)
 - [x] **HOOK-10**: Hook stdout is valid JSON only — no debug output corruption
 
 ### Infrastructure
@@ -76,7 +76,7 @@ Requirements for the v2 rewrite release. Each maps to roadmap phases.
 - [ ] **INFR-01**: tokenizor init command writes PostToolUse hooks into .claude/hooks.json (idempotent)
 - [x] **INFR-02**: Auto-index on startup if .git exists (configurable via TOKENIZOR_AUTO_INDEX)
 - [x] **INFR-03**: Compact response formatter — human-readable output matching Read/Grep style
-- [ ] **INFR-04**: Token savings calculation and tracking per session
+- [x] **INFR-04**: Token savings calculation and tracking per session
 - [x] **INFR-05**: Removed tools: cancel_index_run, checkpoint_now, resume_index_run, get_index_run, list_index_runs, invalidate_indexed_state, repair_index, inspect_repository_health, get_operational_history, reindex_repository
 
 ### Polish
@@ -169,17 +169,17 @@ Which phases cover which requirements. Updated during roadmap creation.
 | HOOK-01 | Phase 5 | Complete |
 | HOOK-02 | Phase 5 | Complete |
 | HOOK-03 | Phase 5 | Complete |
-| HOOK-04 | Phase 6 | Pending |
-| HOOK-05 | Phase 6 | Pending |
-| HOOK-06 | Phase 6 | Pending |
-| HOOK-07 | Phase 6 | Pending |
-| HOOK-08 | Phase 6 | Pending |
-| HOOK-09 | Phase 6 | Pending |
+| HOOK-04 | Phase 6 | Complete |
+| HOOK-05 | Phase 6 | Complete |
+| HOOK-06 | Phase 6 | Complete |
+| HOOK-07 | Phase 6 | Complete |
+| HOOK-08 | Phase 6 | Complete |
+| HOOK-09 | Phase 6 | Complete |
 | HOOK-10 | Phase 5 | Complete |
 | INFR-01 | Phase 6 | Pending |
 | INFR-02 | Phase 2 | Complete |
 | INFR-03 | Phase 2 | Complete |
-| INFR-04 | Phase 6 | Pending |
+| INFR-04 | Phase 6 | Complete |
 | INFR-05 | Phase 2 | Complete |
 | PLSH-01 | Phase 7 | Pending |
 | PLSH-02 | Phase 7 | Pending |

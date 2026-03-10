@@ -114,7 +114,7 @@ Plans:
   3. After Claude runs Grep, matched lines with associated symbol context appear in the response, within 100 tokens
   4. At session start, the model receives a compact repo map (under 500 tokens) without any tool call
   5. Token savings are tracked per session and accessible — the model can report how many tokens the hooks have saved this session
-**Plans:** 3 plans
+**Plans:** 1/3 plans executed
 
 Plans:
 - [ ] 06-01-PLAN.md — Sidecar enrichment: TokenStats, SidecarState, budget enforcement, enriched handlers (outline+refs, impact+diff, symbol-context+annotations, repo-map+tree)
@@ -144,7 +144,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | 3. File Watcher + Freshness | 3/3 | Complete   | 2026-03-10 |
 | 4. Cross-Reference Extraction | 3/3 | Complete   | 2026-03-10 |
 | 5. HTTP Sidecar + Hook Infrastructure | 3/3 | Complete   | 2026-03-10 |
-| 6. Hook Enrichment Integration | 0/3 | Not started | - |
+| 6. Hook Enrichment Integration | 1/3 | In Progress|  |
 | 7. Polish and Persistence | 0/? | Not started | - |
 
 ---

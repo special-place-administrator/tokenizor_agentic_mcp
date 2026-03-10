@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: completed
-stopped_at: Phase 6 context gathered
-last_updated: "2026-03-10T21:14:43.733Z"
+stopped_at: "Completed 06-01-PLAN.md: sidecar enrichment"
+last_updated: "2026-03-10T21:45:31.539Z"
 last_activity: "2026-03-10 — Phase 03 Plan 03 complete: watcher wired into MCP server, 8 integration tests prove all FRSH/RELY-03 reqs"
 progress:
   total_phases: 7
   completed_phases: 5
-  total_plans: 15
-  completed_plans: 15
+  total_plans: 18
+  completed_plans: 16
   percent: 30
 ---
 
@@ -65,6 +65,7 @@ Progress: [███░░░░░░░] 30%
 | Phase 05-http-sidecar-hook-infrastructure P01 | 7 | 2 tasks | 8 files |
 | Phase 05-http-sidecar-hook-infrastructure P02 | 6 | 2 tasks | 4 files |
 | Phase 05-http-sidecar-hook-infrastructure P03 | 8 | 2 tasks | 5 files |
+| Phase 06-hook-enrichment-integration P01 | 6 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -129,6 +130,9 @@ Recent decisions affecting current work:
 - [Phase 05-http-sidecar-hook-infrastructure]: main() is sync (no #[tokio::main]); run_mcp_server() builds explicit tokio runtime — avoids runtime overhead for tokenizor init and tokenizor hook subcommands
 - [Phase 05-http-sidecar-hook-infrastructure]: merge_hooks_into_settings(settings_path, binary_path) extracted as public function for test isolation — avoids hardcoded ~/.claude/settings.json path
 - [Phase 05-http-sidecar-hook-infrastructure]: tokio::sync::Mutex for CWD_LOCK in async tests — std::sync::MutexGuard is not Send and cannot be held across .await in multi_thread flavor
+- [Phase 06-01]: SidecarState replaces bare SharedIndex as axum state — bundles token_stats and symbol_cache alongside the index
+- [Phase 06-01]: build_with_budget max_bytes=0 is unlimited passthrough; handlers pass 0 when no budget needed
+- [Phase 06-01]: repo_map_handler does not record token savings — SessionStart is additive context, not a replacement for native tool reads
 
 ### Pending Todos
 
@@ -142,6 +146,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T21:14:43.730Z
-Stopped at: Phase 6 context gathered
-Resume file: .planning/phases/06-hook-enrichment-integration/06-CONTEXT.md
+Last session: 2026-03-10T21:45:31.536Z
+Stopped at: Completed 06-01-PLAN.md: sidecar enrichment
+Resume file: None
