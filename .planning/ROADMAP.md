@@ -68,8 +68,8 @@ Plans:
 
 Plans:
 - [x] 03-01-PLAN.md — LiveIndex mutation methods, watcher types, extended HealthStats, Cargo.toml deps
-- [ ] 03-02-PLAN.md — Watcher core: notify-debouncer-full, path normalization, content hash skip, event loop
-- [ ] 03-03-PLAN.md — Wire watcher into main.rs + tools, integration tests for all FRSH requirements
+- [x] 03-02-PLAN.md — Watcher core: notify-debouncer-full, path normalization, content hash skip, event loop
+- [x] 03-03-PLAN.md — Wire watcher into main.rs + tools, integration tests for all FRSH requirements
 
 ### Phase 4: Cross-Reference Extraction
 **Goal**: The index tracks call sites, imports, and type usages across all 6 languages so `find_references` returns accurate results with low false-positive rates
@@ -84,9 +84,9 @@ Plans:
 **Plans:** 3/3 plans complete
 
 Plans:
-- [ ] 04-01-PLAN.md — Domain types (ReferenceRecord, ReferenceKind), tree-sitter xref extraction for 6 languages, LiveIndex storage extensions with reverse index
-- [ ] 04-02-PLAN.md — Query methods (find_references_for_name, find_dependents_for_file) with built-in/generic filters, alias resolution, watcher integration
-- [ ] 04-03-PLAN.md — MCP tool handlers (find_references, find_dependents, get_context_bundle), formatters, integration tests
+- [x] 04-01-PLAN.md — Domain types (ReferenceRecord, ReferenceKind), tree-sitter xref extraction for 6 languages, LiveIndex storage extensions with reverse index
+- [x] 04-02-PLAN.md — Query methods (find_references_for_name, find_dependents_for_file) with built-in/generic filters, alias resolution, watcher integration
+- [x] 04-03-PLAN.md — MCP tool handlers (find_references, find_dependents, get_context_bundle), formatters, integration tests
 
 ### Phase 5: HTTP Sidecar + Hook Infrastructure
 **Goal**: The axum HTTP sidecar is running on an ephemeral port, reachable by external hook scripts, and `tokenizor init` installs hooks into the Claude Code config in one command
@@ -97,7 +97,12 @@ Plans:
   2. A Python script that reads `.tokenizor/sidecar.port` and calls the `/outline` endpoint gets valid data from the LiveIndex without any in-process memory access
   3. `tokenizor init` writes valid PostToolUse entries into `.claude/hooks.json` — running it twice produces the same result (idempotent)
   4. All sidecar responses are valid JSON with no debug output — running sidecar output through `jq` succeeds
-**Plans**: TBD
+**Plans:** 3 plans
+
+Plans:
+- [ ] 05-01-PLAN.md — Cargo.toml deps (axum, clap, dirs), sidecar module (router, handlers, port/PID management, spawn)
+- [ ] 05-02-PLAN.md — CLI module (clap dispatch, hook subcommand with fail-open, tokenizor init settings.json merge)
+- [ ] 05-03-PLAN.md — Wire main.rs (CLI dispatch + sidecar spawn), integration tests for HOOK-01/02/03/10
 
 ### Phase 6: Hook Enrichment Integration
 **Goal**: After every native Read, Edit, Grep, and Write call, the model automatically receives symbol context injected by hook scripts without changing its behavior
@@ -133,7 +138,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | 2. MCP Tools v1 Parity | 3/3 | Complete   | 2026-03-10 |
 | 3. File Watcher + Freshness | 3/3 | Complete   | 2026-03-10 |
 | 4. Cross-Reference Extraction | 3/3 | Complete   | 2026-03-10 |
-| 5. HTTP Sidecar + Hook Infrastructure | 0/? | Not started | - |
+| 5. HTTP Sidecar + Hook Infrastructure | 0/3 | Not started | - |
 | 6. Hook Enrichment Integration | 0/? | Not started | - |
 | 7. Polish and Persistence | 0/? | Not started | - |
 
