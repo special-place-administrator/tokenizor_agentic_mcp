@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use rayon::prelude::*;
 use tracing::{error, info, warn};
@@ -167,6 +167,8 @@ impl CircuitBreakerState {
 /// Overall state of the index.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IndexState {
+    /// Index was constructed with empty() — no files loaded yet.
+    Empty,
     Loading,
     Ready,
     CircuitBreakerTripped { summary: String },
@@ -177,8 +179,12 @@ pub struct LiveIndex {
     /// Keyed by `relative_path` (forward-slash normalized).
     pub(crate) files: HashMap<String, IndexedFile>,
     pub(crate) loaded_at: Instant,
+    /// Wall-clock time when index was last loaded. Used by what_changed tool.
+    pub(crate) loaded_at_system: SystemTime,
     pub(crate) load_duration: Duration,
     pub(crate) cb_state: CircuitBreakerState,
+    /// True when constructed with empty() and reload() has not been called.
+    pub(crate) is_empty: bool,
 }
 
 /// Thread-safe shared handle to the index.
@@ -259,11 +265,120 @@ impl LiveIndex {
         let index = LiveIndex {
             files,
             loaded_at: Instant::now(),
+            loaded_at_system: SystemTime::now(),
             load_duration,
             cb_state,
+            is_empty: false,
         };
 
         Ok(Arc::new(RwLock::new(index)))
+    }
+
+    /// Create an empty `SharedIndex` with no files loaded.
+    ///
+    /// Used when `TOKENIZOR_AUTO_INDEX=false`. The caller must call `reload()` to populate it.
+    /// Returns `IndexState::Empty` and `is_ready() == false` until reloaded.
+    pub fn empty() -> SharedIndex {
+        let index = LiveIndex {
+            files: HashMap::new(),
+            loaded_at: Instant::now(),
+            loaded_at_system: SystemTime::now(),
+            load_duration: Duration::ZERO,
+            cb_state: CircuitBreakerState::new(0.20),
+            is_empty: true,
+        };
+        Arc::new(RwLock::new(index))
+    }
+
+    /// Reload all source files under `root` into this index in-place.
+    ///
+    /// Replaces all files, resets circuit breaker, and updates timestamps.
+    /// On success sets `is_empty = false`. On error the index remains in its previous state
+    /// (but partial results may have been loaded).
+    pub fn reload(&mut self, root: &Path) -> crate::error::Result<()> {
+        use crate::error::TokenizorError;
+
+        let start = Instant::now();
+
+        info!("LiveIndex::reload starting at {:?}", root);
+
+        // Validate root exists before attempting discovery
+        if !root.exists() {
+            return Err(TokenizorError::Discovery(format!(
+                "root path does not exist: {}",
+                root.display()
+            )));
+        }
+
+        // 1. Discover all source files
+        let discovered = discovery::discover_files(root)?;
+        info!("discovered {} source files", discovered.len());
+
+        // 2. Parse all files in parallel via Rayon
+        let parse_results: Vec<(String, IndexedFile)> = discovered
+            .par_iter()
+            .filter_map(|df| {
+                let bytes = match std::fs::read(&df.absolute_path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        warn!("failed to read {:?}: {}", df.absolute_path, e);
+                        return None;
+                    }
+                };
+
+                let result = parsing::process_file(&df.relative_path, &bytes, df.language.clone());
+                let indexed = IndexedFile::from_parse_result(result, bytes);
+                Some((df.relative_path.clone(), indexed))
+            })
+            .collect();
+
+        // 3. Build new file map with fresh circuit breaker
+        let new_cb = CircuitBreakerState::from_env();
+        let mut new_files: HashMap<String, IndexedFile> = HashMap::with_capacity(parse_results.len());
+
+        let mut cb_tripped = false;
+        for (path, indexed_file) in parse_results {
+            match &indexed_file.parse_status {
+                ParseStatus::Failed { error } => {
+                    new_cb.record_failure(&path, error);
+                }
+                _ => {
+                    new_cb.record_success();
+                }
+            }
+
+            if new_cb.should_abort() {
+                let summary = new_cb.summary();
+                error!("{}", summary);
+                cb_tripped = true;
+                new_files.insert(path, indexed_file);
+                break;
+            }
+
+            new_files.insert(path, indexed_file);
+        }
+
+        if cb_tripped {
+            new_cb.tripped.store(true, Ordering::Relaxed);
+        }
+
+        let load_duration = start.elapsed();
+        info!(
+            "LiveIndex::reload done: {} files, {} symbols, {:?}",
+            new_files.len(),
+            new_files.values().map(|f| f.symbols.len()).sum::<usize>(),
+            load_duration
+        );
+
+        // 4. Swap in-place
+        self.files = new_files;
+        self.loaded_at = Instant::now();
+        self.loaded_at_system = SystemTime::now();
+        self.load_duration = load_duration;
+        self.cb_state = new_cb;
+        self.is_empty = false;
+
+        Ok(())
     }
 
 }
@@ -463,6 +578,66 @@ mod tests {
         let index = shared.read().unwrap();
         // a.rs: 2 symbols, b.rs: 1 symbol → total 3
         assert_eq!(index.symbol_count(), 3);
+    }
+
+    // --- LiveIndex::empty() and reload() ---
+
+    #[test]
+    fn test_live_index_empty_has_zero_files() {
+        let shared = LiveIndex::empty();
+        let index = shared.read().unwrap();
+        assert_eq!(index.file_count(), 0);
+    }
+
+    #[test]
+    fn test_live_index_empty_returns_empty_state() {
+        let shared = LiveIndex::empty();
+        let index = shared.read().unwrap();
+        assert_eq!(index.index_state(), IndexState::Empty);
+    }
+
+    #[test]
+    fn test_live_index_empty_is_not_ready() {
+        let shared = LiveIndex::empty();
+        let index = shared.read().unwrap();
+        assert!(!index.is_ready(), "empty index should not be ready");
+    }
+
+    #[test]
+    fn test_live_index_reload_loads_files_and_becomes_ready() {
+        let tmp = TempDir::new().unwrap();
+        write_file(tmp.path(), "a.rs", "fn alpha() {}");
+        write_file(tmp.path(), "b.rs", "fn beta() {}");
+
+        let shared = LiveIndex::empty();
+        {
+            let mut index = shared.write().unwrap();
+            index.reload(tmp.path()).expect("reload should succeed");
+        }
+        let index = shared.read().unwrap();
+        assert_eq!(index.file_count(), 2);
+        assert!(index.is_ready(), "after reload should be ready");
+        assert_eq!(index.index_state(), IndexState::Ready);
+    }
+
+    #[test]
+    fn test_live_index_reload_invalid_root_returns_error() {
+        let shared = LiveIndex::empty();
+        let mut index = shared.write().unwrap();
+        let result = index.reload(Path::new("/nonexistent/path/that/does/not/exist"));
+        assert!(result.is_err(), "reload on invalid root should return error");
+    }
+
+    #[test]
+    fn test_live_index_loaded_at_system_is_recent() {
+        use std::time::SystemTime;
+        let before = SystemTime::now();
+        let shared = LiveIndex::empty();
+        let index = shared.read().unwrap();
+        let after = SystemTime::now();
+        let ts = index.loaded_at_system();
+        assert!(ts >= before, "loaded_at_system should be >= before creation");
+        assert!(ts <= after, "loaded_at_system should be <= after creation");
     }
 
     #[test]

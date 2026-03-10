@@ -32,6 +32,9 @@ async fn main() -> anyhow::Result<()> {
         live_index::IndexState::Loading => {
             unreachable!("load() is synchronous — cannot be in Loading state after return");
         }
+        live_index::IndexState::Empty => {
+            unreachable!("LiveIndex::load() always sets is_empty=false — cannot be Empty after load");
+        }
     }
 
     // Phase 2 adds: MCP server startup here

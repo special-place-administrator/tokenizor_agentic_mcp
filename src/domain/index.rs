@@ -153,3 +153,94 @@ pub enum SymbolKind {
     Impl,
     Other,
 }
+
+impl fmt::Display for SymbolKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let prefix = match self {
+            Self::Function => "fn",
+            Self::Method => "fn",
+            Self::Class => "class",
+            Self::Struct => "struct",
+            Self::Enum => "enum",
+            Self::Interface => "interface",
+            Self::Module => "mod",
+            Self::Constant => "const",
+            Self::Variable => "let",
+            Self::Type => "type",
+            Self::Trait => "trait",
+            Self::Impl => "impl",
+            Self::Other => "other",
+        };
+        write!(f, "{prefix}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_symbol_kind_display_function() {
+        assert_eq!(SymbolKind::Function.to_string(), "fn");
+    }
+
+    #[test]
+    fn test_symbol_kind_display_method() {
+        assert_eq!(SymbolKind::Method.to_string(), "fn");
+    }
+
+    #[test]
+    fn test_symbol_kind_display_class() {
+        assert_eq!(SymbolKind::Class.to_string(), "class");
+    }
+
+    #[test]
+    fn test_symbol_kind_display_struct() {
+        assert_eq!(SymbolKind::Struct.to_string(), "struct");
+    }
+
+    #[test]
+    fn test_symbol_kind_display_enum() {
+        assert_eq!(SymbolKind::Enum.to_string(), "enum");
+    }
+
+    #[test]
+    fn test_symbol_kind_display_interface() {
+        assert_eq!(SymbolKind::Interface.to_string(), "interface");
+    }
+
+    #[test]
+    fn test_symbol_kind_display_module() {
+        assert_eq!(SymbolKind::Module.to_string(), "mod");
+    }
+
+    #[test]
+    fn test_symbol_kind_display_constant() {
+        assert_eq!(SymbolKind::Constant.to_string(), "const");
+    }
+
+    #[test]
+    fn test_symbol_kind_display_variable() {
+        assert_eq!(SymbolKind::Variable.to_string(), "let");
+    }
+
+    #[test]
+    fn test_symbol_kind_display_type() {
+        assert_eq!(SymbolKind::Type.to_string(), "type");
+    }
+
+    #[test]
+    fn test_symbol_kind_display_trait() {
+        assert_eq!(SymbolKind::Trait.to_string(), "trait");
+    }
+
+    #[test]
+    fn test_symbol_kind_display_impl() {
+        assert_eq!(SymbolKind::Impl.to_string(), "impl");
+    }
+
+    #[test]
+    fn test_symbol_kind_display_other() {
+        assert_eq!(SymbolKind::Other.to_string(), "other");
+    }
+}

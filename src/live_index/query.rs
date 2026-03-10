@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::domain::SymbolRecord;
 
@@ -44,13 +44,19 @@ impl LiveIndex {
         self.files.values().map(|f| f.symbols.len()).sum()
     }
 
-    /// `true` when the circuit breaker has NOT tripped.
+    /// `true` when the index has been loaded and the circuit breaker has NOT tripped.
     pub fn is_ready(&self) -> bool {
+        if self.is_empty {
+            return false;
+        }
         !self.cb_state.is_tripped()
     }
 
     /// Returns the current index state.
     pub fn index_state(&self) -> IndexState {
+        if self.is_empty {
+            return IndexState::Empty;
+        }
         if self.cb_state.is_tripped() {
             IndexState::CircuitBreakerTripped {
                 summary: self.cb_state.summary(),
@@ -58,6 +64,11 @@ impl LiveIndex {
         } else {
             IndexState::Ready
         }
+    }
+
+    /// Returns the wall-clock time when the index was last loaded.
+    pub fn loaded_at_system(&self) -> SystemTime {
+        self.loaded_at_system
     }
 
     /// Compute health statistics for the index.
@@ -140,8 +151,10 @@ mod tests {
                 .map(|(p, f)| (p.to_string(), f))
                 .collect(),
             loaded_at: Instant::now(),
+            loaded_at_system: std::time::SystemTime::now(),
             load_duration: Duration::from_millis(50),
             cb_state: cb,
+            is_empty: false,
         }
     }
 
@@ -237,8 +250,10 @@ mod tests {
         let index = LiveIndex {
             files: HashMap::new(),
             loaded_at: Instant::now(),
+            loaded_at_system: std::time::SystemTime::now(),
             load_duration: Duration::from_millis(10),
             cb_state: cb,
+            is_empty: false,
         };
         assert!(!index.is_ready());
     }
@@ -259,8 +274,10 @@ mod tests {
         let index = LiveIndex {
             files: HashMap::new(),
             loaded_at: Instant::now(),
+            loaded_at_system: std::time::SystemTime::now(),
             load_duration: Duration::from_millis(10),
             cb_state: cb,
+            is_empty: false,
         };
 
         match index.index_state() {
