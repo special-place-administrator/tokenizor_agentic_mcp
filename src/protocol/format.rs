@@ -427,6 +427,235 @@ pub fn not_found_symbol(index: &LiveIndex, path: &str, name: &str) -> String {
     }
 }
 
+/// Find all references for a name across the repo, grouped by file with 3-line context.
+///
+/// kind_filter: "call" | "import" | "type_usage" | "all" | None (all)
+/// Output format matches CONTEXT.md decision AD-6 (compact human-readable).
+pub fn find_references_result(index: &LiveIndex, name: &str, kind_filter: Option<&str>) -> String {
+    let kind_enum = parse_kind_filter(kind_filter);
+    let refs = index.find_references_for_name(name, kind_enum, false);
+
+    if refs.is_empty() {
+        return format!("No references found for \"{name}\"");
+    }
+
+    // Group by file path with stable (sorted) order for determinism
+    let mut by_file: std::collections::BTreeMap<&str, Vec<&crate::domain::ReferenceRecord>> =
+        std::collections::BTreeMap::new();
+    for (file_path, r) in &refs {
+        by_file.entry(file_path).or_default().push(r);
+    }
+
+    let total = refs.len();
+    let file_count = by_file.len();
+    let mut lines = vec![format!("{total} references in {file_count} files")];
+    lines.push(String::new()); // blank line
+
+    for (file_path, file_refs) in &by_file {
+        lines.push(file_path.to_string());
+        if let Some(file) = index.get_file(file_path) {
+            let content_str = String::from_utf8_lossy(&file.content);
+            let content_lines: Vec<&str> = content_str.lines().collect();
+
+            for r in file_refs {
+                let ref_line_0 = r.line_range.0 as usize; // 0-indexed
+                // Context: 1 line before, reference line, 1 line after (all 1-indexed in output)
+                let ctx_start = ref_line_0.saturating_sub(1);
+                let ctx_end = if content_lines.is_empty() {
+                    0
+                } else {
+                    (ref_line_0 + 1).min(content_lines.len() - 1)
+                };
+
+                // Enclosing symbol annotation shown on the reference line
+                let enclosing_annotation = r
+                    .enclosing_symbol_index
+                    .and_then(|idx| file.symbols.get(idx as usize))
+                    .map(|sym| format!("  [in {} {}]", sym.kind, sym.name))
+                    .unwrap_or_default();
+
+                for (i, line) in content_lines[ctx_start..=ctx_end].iter().enumerate() {
+                    let line_number = ctx_start + i + 1; // 1-indexed
+                    let is_ref_line = (ctx_start + i) == ref_line_0;
+                    if is_ref_line && !enclosing_annotation.is_empty() {
+                        lines.push(format!("  {line_number}: {line:<40}{enclosing_annotation}"));
+                    } else {
+                        lines.push(format!("  {line_number}: {line}"));
+                    }
+                }
+            }
+        }
+        lines.push(String::new()); // blank line between files
+    }
+
+    // Remove trailing blank line
+    while lines.last().map(|l| l.is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+
+    lines.join("\n")
+}
+
+/// Parse a kind filter string to Option<ReferenceKind>.
+fn parse_kind_filter(kind_filter: Option<&str>) -> Option<crate::domain::ReferenceKind> {
+    use crate::domain::ReferenceKind;
+    match kind_filter {
+        Some("call") => Some(ReferenceKind::Call),
+        Some("import") => Some(ReferenceKind::Import),
+        Some("type_usage") => Some(ReferenceKind::TypeUsage),
+        Some("macro_use") => Some(ReferenceKind::MacroUse),
+        Some("all") | None => None,
+        _ => None,
+    }
+}
+
+/// Find all files that import (depend on) the given path.
+///
+/// Output format: compact list grouped by importing file, each with import line.
+pub fn find_dependents_result(index: &LiveIndex, path: &str) -> String {
+    let deps = index.find_dependents_for_file(path);
+
+    if deps.is_empty() {
+        return format!("No dependents found for \"{path}\"");
+    }
+
+    // Group by importing file
+    let mut by_file: std::collections::BTreeMap<&str, Vec<&crate::domain::ReferenceRecord>> =
+        std::collections::BTreeMap::new();
+    for (file_path, r) in &deps {
+        by_file.entry(file_path).or_default().push(r);
+    }
+
+    let file_count = by_file.len();
+    let mut lines = vec![format!("{file_count} files depend on {path}")];
+    lines.push(String::new()); // blank line
+
+    for (file_path, file_refs) in &by_file {
+        lines.push(file_path.to_string());
+        if let Some(file) = index.get_file(file_path) {
+            let content_str = String::from_utf8_lossy(&file.content);
+            let content_lines: Vec<&str> = content_str.lines().collect();
+
+            for r in file_refs {
+                let line_0 = r.line_range.0 as usize; // 0-indexed
+                let line_content = content_lines.get(line_0).copied().unwrap_or("");
+                let line_number = line_0 + 1; // 1-indexed
+                lines.push(format!("  {line_number}: {line_content}   [import]"));
+            }
+        }
+        lines.push(String::new()); // blank line between files
+    }
+
+    // Remove trailing blank line
+    while lines.last().map(|l| l.is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+
+    lines.join("\n")
+}
+
+/// Get full context bundle for a symbol: definition body + callers + callees + type usages.
+///
+/// Each section is capped at 20 entries with "...and N more" overflow.
+pub fn context_bundle_result(
+    index: &LiveIndex,
+    path: &str,
+    name: &str,
+    kind_filter: Option<&str>,
+) -> String {
+    use crate::domain::ReferenceKind;
+
+    let file = match index.get_file(path) {
+        Some(f) => f,
+        None => return not_found_file(path),
+    };
+
+    // Find the symbol definition
+    let sym = match file.symbols.iter().enumerate().find(|(_, s)| {
+        s.name == name
+            && kind_filter
+                .map(|k| s.kind.to_string().eq_ignore_ascii_case(k))
+                .unwrap_or(true)
+    }) {
+        None => return not_found_symbol(index, path, name),
+        Some((sym_idx, s)) => (sym_idx, s.clone()),
+    };
+
+    let (sym_idx, sym_rec) = sym;
+
+    // Symbol body
+    let start = sym_rec.byte_range.0 as usize;
+    let end = sym_rec.byte_range.1 as usize;
+    let body = if end <= file.content.len() {
+        String::from_utf8_lossy(&file.content[start..end]).into_owned()
+    } else {
+        String::from_utf8_lossy(&file.content).into_owned()
+    };
+    let byte_count = end.saturating_sub(start);
+
+    let mut output = format!(
+        "{}\n[{}, lines {}-{}, {} bytes]\n",
+        body,
+        sym_rec.kind,
+        sym_rec.line_range.0,
+        sym_rec.line_range.1,
+        byte_count
+    );
+
+    // Callers: Call references to this symbol from anywhere
+    let callers = index.find_references_for_name(name, Some(ReferenceKind::Call), false);
+    output.push_str(&format_ref_section("Callers", &callers, index));
+
+    // Callees: Call references made BY this symbol (inside it)
+    let callees = index.callees_for_symbol(path, sym_idx);
+    let callee_pairs: Vec<(&str, &crate::domain::ReferenceRecord)> =
+        callees.iter().map(|r| (path, *r)).collect();
+    output.push_str(&format_ref_section("Callees", &callee_pairs, index));
+
+    // Type usages: TypeUsage references to this symbol from anywhere
+    let type_usages = index.find_references_for_name(name, Some(ReferenceKind::TypeUsage), false);
+    output.push_str(&format_ref_section("Type usages", &type_usages, index));
+
+    output
+}
+
+const SECTION_CAP: usize = 20;
+
+/// Format a reference section (Callers, Callees, Type usages) with cap at 20.
+fn format_ref_section(
+    title: &str,
+    refs: &[(&str, &crate::domain::ReferenceRecord)],
+    index: &LiveIndex,
+) -> String {
+    let count = refs.len();
+    let display = refs.len().min(SECTION_CAP);
+    let mut lines = vec![format!("\n{title} ({count}):")];
+
+    for (file_path, r) in refs.iter().take(display) {
+        let line_1indexed = r.line_range.0 + 1; // 1-indexed
+        let enclosing = index
+            .get_file(file_path)
+            .and_then(|f| {
+                r.enclosing_symbol_index
+                    .and_then(|idx| f.symbols.get(idx as usize))
+                    .map(|s| format!("in {} {}", s.kind, s.name))
+            })
+            .unwrap_or_default();
+        let display_name = r.qualified_name.as_deref().unwrap_or(&r.name);
+        if enclosing.is_empty() {
+            lines.push(format!("  {display_name:<20} {file_path}:{line_1indexed}"));
+        } else {
+            lines.push(format!("  {display_name:<20} {file_path}:{line_1indexed}  {enclosing}"));
+        }
+    }
+
+    if count > SECTION_CAP {
+        lines.push(format!("  ...and {} more {}", count - SECTION_CAP, title.to_lowercase()));
+    }
+
+    lines.join("\n")
+}
+
 /// "Index is loading... try again shortly."
 pub fn loading_guard_message() -> String {
     "Index is loading... try again shortly.".to_string()
@@ -880,5 +1109,178 @@ mod tests {
         let index = make_index(vec![(key, file)]);
         let result = not_found_symbol(&index, "src/lib.rs", "foo");
         assert!(result.contains("No symbols in that file"));
+    }
+
+    // ─── find_references_result tests ─────────────────────────────────────
+
+    use crate::domain::{ReferenceKind, ReferenceRecord};
+
+    fn make_ref(
+        name: &str,
+        kind: ReferenceKind,
+        line: u32,
+        enclosing: Option<u32>,
+    ) -> ReferenceRecord {
+        ReferenceRecord {
+            name: name.to_string(),
+            qualified_name: None,
+            kind,
+            byte_range: (0, 1),
+            line_range: (line, line),
+            enclosing_symbol_index: enclosing,
+        }
+    }
+
+    fn make_file_with_refs(
+        path: &str,
+        content: &[u8],
+        symbols: Vec<SymbolRecord>,
+        references: Vec<ReferenceRecord>,
+    ) -> (String, IndexedFile) {
+        (
+            path.to_string(),
+            IndexedFile {
+                relative_path: path.to_string(),
+                language: LanguageId::Rust,
+                content: content.to_vec(),
+                symbols,
+                parse_status: ParseStatus::Parsed,
+                byte_len: content.len() as u64,
+                content_hash: "test".to_string(),
+                references,
+                alias_map: std::collections::HashMap::new(),
+            },
+        )
+    }
+
+    fn make_index_with_reverse(files: Vec<(String, IndexedFile)>) -> LiveIndex {
+        let cb = CircuitBreakerState::new(0.20);
+        let mut index = LiveIndex {
+            files: files.into_iter().collect::<HashMap<_, _>>(),
+            loaded_at: Instant::now(),
+            loaded_at_system: std::time::SystemTime::now(),
+            load_duration: Duration::from_millis(42),
+            cb_state: cb,
+            is_empty: false,
+            reverse_index: HashMap::new(),
+        };
+        index.rebuild_reverse_index();
+        index
+    }
+
+    #[test]
+    fn test_find_references_result_groups_by_file_and_shows_context() {
+        // Content: 3 lines so we can test context extraction
+        let content = b"fn handle() {\n    process(x);\n}\n";
+        let sym = make_symbol_with_bytes("handle", SymbolKind::Function, 0, 1, 3, 0, 30);
+        let r = make_ref("process", ReferenceKind::Call, 2, Some(0));
+        let (key, file) = make_file_with_refs("src/handler.rs", content, vec![sym], vec![r]);
+        let index = make_index_with_reverse(vec![(key, file)]);
+        let result = find_references_result(&index, "process", None);
+        assert!(result.contains("1 references in 1 files"), "header missing, got: {result}");
+        assert!(result.contains("src/handler.rs"), "file path missing, got: {result}");
+        assert!(result.contains("process"), "reference name missing, got: {result}");
+        assert!(result.contains("[in fn handle]"), "enclosing annotation missing, got: {result}");
+    }
+
+    #[test]
+    fn test_find_references_result_zero_results() {
+        let index = make_index_with_reverse(vec![]);
+        let result = find_references_result(&index, "nobody", None);
+        assert_eq!(result, "No references found for \"nobody\"");
+    }
+
+    #[test]
+    fn test_find_references_result_kind_filter_call_only() {
+        let content = b"use foo;\nfoo();\n";
+        let r_import = make_ref("foo", ReferenceKind::Import, 1, None);
+        let r_call = make_ref("foo", ReferenceKind::Call, 2, None);
+        let (key, file) = make_file_with_refs("src/lib.rs", content, vec![], vec![r_import, r_call]);
+        let index = make_index_with_reverse(vec![(key, file)]);
+        let result = find_references_result(&index, "foo", Some("call"));
+        // Should only show the call reference, not the import
+        assert!(result.contains("1 references"), "expected only 1 reference, got: {result}");
+    }
+
+    // ─── find_dependents_result tests ─────────────────────────────────────
+
+    #[test]
+    fn test_find_dependents_result_shows_importers() {
+        let content_b = b"use crate::db;\n";
+        let r = make_ref("db", ReferenceKind::Import, 1, None);
+        let (key_b, file_b) = make_file_with_refs("src/handler.rs", content_b, vec![], vec![r]);
+        // Also need "src/db.rs" in the index for find_dependents_for_file to work
+        let (key_a, file_a) = make_file("src/db.rs", b"pub fn connect() {}", vec![]);
+        let index = make_index_with_reverse(vec![(key_a, file_a), (key_b, file_b)]);
+        let result = find_dependents_result(&index, "src/db.rs");
+        assert!(result.contains("1 files depend on src/db.rs"), "header wrong, got: {result}");
+        assert!(result.contains("src/handler.rs"), "importer missing, got: {result}");
+        assert!(result.contains("[import]"), "import annotation missing, got: {result}");
+    }
+
+    #[test]
+    fn test_find_dependents_result_zero_dependents() {
+        let (key, file) = make_file("src/db.rs", b"", vec![]);
+        let index = make_index_with_reverse(vec![(key, file)]);
+        let result = find_dependents_result(&index, "src/db.rs");
+        assert_eq!(result, "No dependents found for \"src/db.rs\"");
+    }
+
+    // ─── context_bundle_result tests ──────────────────────────────────────
+
+    #[test]
+    fn test_context_bundle_result_includes_body_and_sections() {
+        let content = b"fn process(x: i32) -> i32 {\n    x + 1\n}\n";
+        let sym = make_symbol_with_bytes("process", SymbolKind::Function, 0, 1, 3, 0, 41);
+        let (key, file) = make_file_with_refs("src/lib.rs", content, vec![sym], vec![]);
+        let index = make_index_with_reverse(vec![(key, file)]);
+        let result = context_bundle_result(&index, "src/lib.rs", "process", None);
+        assert!(result.contains("fn process"), "body missing, got: {result}");
+        assert!(result.contains("[fn, lines"), "footer missing, got: {result}");
+        assert!(result.contains("Callers"), "Callers section missing, got: {result}");
+        assert!(result.contains("Callees"), "Callees section missing, got: {result}");
+        assert!(result.contains("Type usages"), "Type usages section missing, got: {result}");
+    }
+
+    #[test]
+    fn test_context_bundle_result_caps_callers_at_20() {
+        // Build 25 Call references to "process" from different positions
+        let refs: Vec<ReferenceRecord> = (0u32..25)
+            .map(|i| make_ref("process", ReferenceKind::Call, i + 100, None))
+            .collect();
+        let content = b"fn caller() {} fn process() {}";
+        let sym_caller = make_symbol_with_bytes("caller", SymbolKind::Function, 0, 1, 1, 0, 14);
+        let sym_process = make_symbol_with_bytes("process", SymbolKind::Function, 0, 1, 1, 15, 30);
+        // Add a process symbol as the target
+        let (key, file) = make_file_with_refs(
+            "src/lib.rs",
+            content,
+            vec![sym_caller, sym_process],
+            refs,
+        );
+        let index = make_index_with_reverse(vec![(key, file)]);
+        let result = context_bundle_result(&index, "src/lib.rs", "process", None);
+        assert!(result.contains("...and"), "overflow message missing, got: {result}");
+        assert!(result.contains("more callers"), "overflow count missing, got: {result}");
+    }
+
+    #[test]
+    fn test_context_bundle_result_symbol_not_found() {
+        let (key, file) = make_file("src/lib.rs", b"fn foo() {}", vec![]);
+        let index = make_index_with_reverse(vec![(key, file)]);
+        let result = context_bundle_result(&index, "src/lib.rs", "nonexistent", None);
+        assert!(result.contains("No symbol nonexistent in src/lib.rs"), "got: {result}");
+    }
+
+    #[test]
+    fn test_context_bundle_result_empty_sections_show_zero() {
+        let content = b"fn process() {}";
+        let sym = make_symbol_with_bytes("process", SymbolKind::Function, 0, 1, 1, 0, 15);
+        let (key, file) = make_file_with_refs("src/lib.rs", content, vec![sym], vec![]);
+        let index = make_index_with_reverse(vec![(key, file)]);
+        let result = context_bundle_result(&index, "src/lib.rs", "process", None);
+        assert!(result.contains("Callers (0)"), "zero callers section missing, got: {result}");
+        assert!(result.contains("Callees (0)"), "zero callees section missing, got: {result}");
+        assert!(result.contains("Type usages (0)"), "zero type usages section missing, got: {result}");
     }
 }

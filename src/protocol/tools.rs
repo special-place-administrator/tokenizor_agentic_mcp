@@ -101,6 +101,33 @@ pub struct GetFileContentInput {
     pub end_line: Option<u32>,
 }
 
+/// Input for `find_references`.
+#[derive(Deserialize, JsonSchema)]
+pub struct FindReferencesInput {
+    /// Symbol name to find references for.
+    pub name: String,
+    /// Filter by reference kind: "call", "import", "type_usage", or "all" (default: "all").
+    pub kind: Option<String>,
+}
+
+/// Input for `find_dependents`.
+#[derive(Deserialize, JsonSchema)]
+pub struct FindDependentsInput {
+    /// Relative file path to find dependents for.
+    pub path: String,
+}
+
+/// Input for `get_context_bundle`.
+#[derive(Deserialize, JsonSchema)]
+pub struct GetContextBundleInput {
+    /// File path containing the symbol.
+    pub path: String,
+    /// Symbol name to get context for.
+    pub name: String,
+    /// Optional kind filter for the symbol lookup (e.g., "fn", "struct").
+    pub kind: Option<String>,
+}
+
 // ─── Tool handlers ───────────────────────────────────────────────────────────
 
 /// Loading guard helper — returns `Some(message)` when index is NOT ready.
@@ -270,6 +297,40 @@ impl TokenizorServer {
             params.0.start_line,
             params.0.end_line,
         );
+        drop(guard);
+        result
+    }
+
+    /// Find all references (call sites, imports, type usages) for a symbol across the codebase.
+    #[tool(description = "Find all references (call sites, imports, type usages) for a symbol across the codebase")]
+    async fn find_references(&self, params: Parameters<FindReferencesInput>) -> String {
+        let guard = self.index.read().expect("lock poisoned");
+        loading_guard!(guard);
+        let input = &params.0;
+        let result = format::find_references_result(&guard, &input.name, input.kind.as_deref());
+        drop(guard);
+        result
+    }
+
+    /// Find all files that import or depend on the given file.
+    #[tool(description = "Find all files that import or depend on the given file")]
+    async fn find_dependents(&self, params: Parameters<FindDependentsInput>) -> String {
+        let guard = self.index.read().expect("lock poisoned");
+        loading_guard!(guard);
+        let input = &params.0;
+        let result = format::find_dependents_result(&guard, &input.path);
+        drop(guard);
+        result
+    }
+
+    /// Get full context for a symbol: definition body, callers, callees, and type usages in one call.
+    #[tool(description = "Get full context for a symbol: definition body, callers, callees, and type usages in one call")]
+    async fn get_context_bundle(&self, params: Parameters<GetContextBundleInput>) -> String {
+        let guard = self.index.read().expect("lock poisoned");
+        loading_guard!(guard);
+        let input = &params.0;
+        let result =
+            format::context_bundle_result(&guard, &input.path, &input.name, input.kind.as_deref());
         drop(guard);
         result
     }
@@ -630,12 +691,72 @@ mod tests {
     }
 
     #[test]
-    fn test_exactly_10_tools_registered() {
+    fn test_exactly_13_tools_registered() {
         let server = make_server(make_live_index_ready(vec![]));
         let tool_count = server.tool_router.list_all().len();
         assert_eq!(
-            tool_count, 10,
-            "server must expose exactly 10 tools; found {tool_count}"
+            tool_count, 13,
+            "server must expose exactly 13 tools; found {tool_count}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_find_references_loading_guard_empty() {
+        let server = make_server(make_live_index_empty());
+        let result = server
+            .find_references(Parameters(super::FindReferencesInput {
+                name: "process".to_string(),
+                kind: None,
+            }))
+            .await;
+        assert_eq!(result, crate::protocol::format::empty_guard_message());
+    }
+
+    #[tokio::test]
+    async fn test_find_dependents_loading_guard_empty() {
+        let server = make_server(make_live_index_empty());
+        let result = server
+            .find_dependents(Parameters(super::FindDependentsInput {
+                path: "src/lib.rs".to_string(),
+            }))
+            .await;
+        assert_eq!(result, crate::protocol::format::empty_guard_message());
+    }
+
+    #[tokio::test]
+    async fn test_get_context_bundle_loading_guard_empty() {
+        let server = make_server(make_live_index_empty());
+        let result = server
+            .get_context_bundle(Parameters(super::GetContextBundleInput {
+                path: "src/lib.rs".to_string(),
+                name: "process".to_string(),
+                kind: None,
+            }))
+            .await;
+        assert_eq!(result, crate::protocol::format::empty_guard_message());
+    }
+
+    #[tokio::test]
+    async fn test_find_references_delegates_to_formatter() {
+        let server = make_server(make_live_index_ready(vec![]));
+        let result = server
+            .find_references(Parameters(super::FindReferencesInput {
+                name: "nonexistent_xyz".to_string(),
+                kind: None,
+            }))
+            .await;
+        // Should get "No references found" not a guard message
+        assert!(result.contains("No references found"), "got: {result}");
+    }
+
+    #[tokio::test]
+    async fn test_find_dependents_delegates_to_formatter() {
+        let server = make_server(make_live_index_ready(vec![]));
+        let result = server
+            .find_dependents(Parameters(super::FindDependentsInput {
+                path: "src/nonexistent.rs".to_string(),
+            }))
+            .await;
+        assert!(result.contains("No dependents found"), "got: {result}");
     }
 }
