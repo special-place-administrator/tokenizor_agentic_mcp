@@ -1,4 +1,6 @@
 use tree_sitter::Parser;
+use tokenizor_agentic_mcp::domain::LanguageId;
+use tokenizor_agentic_mcp::parsing::process_file;
 
 #[test]
 fn test_rust_grammar_loads_and_parses() {
@@ -71,4 +73,54 @@ fn test_go_grammar_loads_and_parses() {
         .parse("package main\nfunc main() {}", None)
         .expect("parse returned None");
     assert!(!tree.root_node().kind().is_empty());
+}
+
+#[test]
+fn test_c_grammar_loads_and_parses() {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_c::LANGUAGE.into())
+        .expect("failed to load C grammar — possible ABI mismatch");
+    let source = "struct Point { int x; int y; };\nint add(int a, int b) { return a + b; }";
+    let tree = parser.parse(source, None).expect("parse returned None");
+    assert!(!tree.root_node().kind().is_empty());
+    assert!(!tree.root_node().has_error(), "C source should parse without syntax errors");
+
+    // Verify symbols extracted via process_file
+    let result = process_file("test.c", source.as_bytes(), LanguageId::C);
+    use tokenizor_agentic_mcp::domain::{FileOutcome, SymbolKind};
+    assert_eq!(result.outcome, FileOutcome::Processed);
+    assert!(
+        result.symbols.iter().any(|s| s.kind == SymbolKind::Struct && s.name == "Point"),
+        "should extract Point struct, symbols: {:?}", result.symbols
+    );
+    assert!(
+        result.symbols.iter().any(|s| s.kind == SymbolKind::Function && s.name == "add"),
+        "should extract add function, symbols: {:?}", result.symbols
+    );
+}
+
+#[test]
+fn test_cpp_grammar_loads_and_parses() {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_cpp::LANGUAGE.into())
+        .expect("failed to load C++ grammar — possible ABI mismatch");
+    let source = "namespace myns {\n  class Foo { public: void bar(); };\n  void Foo::bar() { }\n}";
+    let tree = parser.parse(source, None).expect("parse returned None");
+    assert!(!tree.root_node().kind().is_empty());
+    assert!(!tree.root_node().has_error(), "C++ source should parse without syntax errors");
+
+    // Verify symbols extracted via process_file
+    let result = process_file("test.cpp", source.as_bytes(), LanguageId::Cpp);
+    use tokenizor_agentic_mcp::domain::{FileOutcome, SymbolKind};
+    assert_eq!(result.outcome, FileOutcome::Processed);
+    assert!(
+        result.symbols.iter().any(|s| s.kind == SymbolKind::Module && s.name == "myns"),
+        "should extract myns namespace, symbols: {:?}", result.symbols
+    );
+    assert!(
+        result.symbols.iter().any(|s| s.kind == SymbolKind::Class && s.name == "Foo"),
+        "should extract Foo class, symbols: {:?}", result.symbols
+    );
 }
