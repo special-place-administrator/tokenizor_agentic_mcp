@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Completed 01-liveindex-foundation/01-02-PLAN.md
-last_updated: "2026-03-10T14:32:43.926Z"
+stopped_at: Completed 01-liveindex-foundation/01-03-PLAN.md
+last_updated: "2026-03-10T14:41:31.258Z"
 last_activity: 2026-03-10 — Roadmap created, requirements mapped, STATE initialized
 progress:
   total_phases: 7
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 3
-  completed_plans: 2
+  completed_plans: 3
   percent: 0
 ---
 
@@ -52,6 +52,7 @@ Progress: [░░░░░░░░░░] 0%
 *Updated after each plan completion*
 | Phase 01-liveindex-foundation P01 | 15 | 2 tasks | 10 files |
 | Phase 01-liveindex-foundation P02 | 5 | 2 tasks | 4 files |
+| Phase 01-liveindex-foundation P03 | 15 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -73,6 +74,9 @@ Recent decisions affecting current work:
 - [Phase 01-02]: CircuitBreakerState::new(threshold) for testability; from_env() reads TOKENIZOR_CB_THRESHOLD env var
 - [Phase 01-02]: Content bytes stored for all files including failed-parse files (LIDX-03) — zero disk I/O on read path
 - [Phase 01-02]: LiveIndex::load is sync (runs before tokio runtime) — Rayon handles internal parallelism
+- [Phase 01-03]: Gate retrieval_conformance.rs with #![cfg(feature = v1)] inner attribute — v1 types removed, file preserved for history, v2 conformance tests follow in Phase 2
+- [Phase 01-03]: Use CircuitBreakerState::new(threshold) directly in threshold tests — env vars are process-global and flaky in parallel test runs
+- [Phase 01-03]: Stdout purity RELY-04 CI gate implemented as test_stdout_purity: spawns binary as subprocess, asserts stdout is empty
 
 ### Pending Todos
 
@@ -86,6 +90,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T14:32:43.923Z
-Stopped at: Completed 01-liveindex-foundation/01-02-PLAN.md
+Last session: 2026-03-10T14:41:31.256Z
+Stopped at: Completed 01-liveindex-foundation/01-03-PLAN.md
 Resume file: None

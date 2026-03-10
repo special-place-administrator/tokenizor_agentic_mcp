@@ -12,7 +12,7 @@ Seven phases in strict dependency order, derived from the component graph: LiveI
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: LiveIndex Foundation** - In-memory store with concurrent access, symbol extraction, circuit breaker
+- [x] **Phase 1: LiveIndex Foundation** - In-memory store with concurrent access, symbol extraction, circuit breaker (completed 2026-03-10)
 - [ ] **Phase 2: MCP Tools v1 Parity** - Wire all core tools to LiveIndex, compact responses, stdout purity
 - [ ] **Phase 3: File Watcher + Freshness** - notify crate integration, incremental reparse, staleness eliminated
 - [ ] **Phase 4: Cross-Reference Extraction** - tree-sitter xref queries for all 6 languages, find_references tools
@@ -31,7 +31,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. A file with malformed syntax produces a logged warning and keeps its previous symbol set — the server does not crash or corrupt other files
   3. If more than 20% of files fail parsing, the server aborts further indexing and reports the circuit breaker trigger rather than serving partial data silently
   4. The running MCP binary produces zero non-JSON bytes on stdout — piping its output through `jq` succeeds
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans complete
 
 Plans:
 - [ ] 01-01-PLAN.md — Tear down v1 modules, strip domain types, establish v2 module skeleton
@@ -114,7 +114,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. LiveIndex Foundation | 2/3 | In Progress|  |
+| 1. LiveIndex Foundation | 3/3 | Complete   | 2026-03-10 |
 | 2. MCP Tools v1 Parity | 0/? | Not started | - |
 | 3. File Watcher + Freshness | 0/? | Not started | - |
 | 4. Cross-Reference Extraction | 0/? | Not started | - |
