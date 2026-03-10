@@ -385,9 +385,11 @@ pub async fn run_watcher(
                 let mut burst_trackers: HashMap<PathBuf, BurstTracker> = HashMap::new();
                 let mut session_errors: u32 = 0;
                 const MAX_SESSION_ERRORS: u32 = 10;
+                // Poll timeout: yield to tokio between checks to avoid blocking the executor.
+                const RECV_TIMEOUT_MS: u64 = 50;
 
                 loop {
-                    match handle.event_rx.recv() {
+                    match handle.event_rx.recv_timeout(Duration::from_millis(RECV_TIMEOUT_MS)) {
                         Ok(Ok(events)) => {
                             process_events(
                                 events,
@@ -407,7 +409,15 @@ pub async fn run_watcher(
                                 break;
                             }
                         }
-                        Err(_) => {
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            // No event within the poll window — yield to tokio so other
+                            // tasks can run. This is critical: run_watcher is an async fn
+                            // running on a tokio worker thread; using blocking recv() would
+                            // starve the executor. recv_timeout + yield_now is the safe
+                            // pattern for mixing std::sync::mpsc with async tokio.
+                            tokio::task::yield_now().await;
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                             // Channel closed — debouncer dropped or OS watcher died
                             warn!("watcher: event channel closed, restarting");
                             break;
