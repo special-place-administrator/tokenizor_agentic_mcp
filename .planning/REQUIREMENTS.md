@@ -74,7 +74,7 @@ Requirements for the v2 rewrite release. Each maps to roadmap phases.
 ### Infrastructure
 
 - [ ] **INFR-01**: tokenizor init command writes PostToolUse hooks into .claude/hooks.json (idempotent)
-- [ ] **INFR-02**: Auto-index on startup if .git exists (configurable via TOKENIZOR_AUTO_INDEX)
+- [x] **INFR-02**: Auto-index on startup if .git exists (configurable via TOKENIZOR_AUTO_INDEX)
 - [x] **INFR-03**: Compact response formatter — human-readable output matching Read/Grep style
 - [ ] **INFR-04**: Token savings calculation and tracking per session
 - [x] **INFR-05**: Removed tools: cancel_index_run, checkpoint_now, resume_index_run, get_index_run, list_index_runs, invalidate_indexed_state, repair_index, inspect_repository_health, get_operational_history, reindex_repository
@@ -177,7 +177,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | HOOK-09 | Phase 6 | Pending |
 | HOOK-10 | Phase 5 | Pending |
 | INFR-01 | Phase 6 | Pending |
-| INFR-02 | Phase 2 | Pending |
+| INFR-02 | Phase 2 | Complete |
 | INFR-03 | Phase 2 | Complete |
 | INFR-04 | Phase 6 | Pending |
 | INFR-05 | Phase 2 | Complete |

@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Completed 02-mcp-tools-v1-parity-02-02-PLAN.md
-last_updated: "2026-03-10T15:45:33.000Z"
+stopped_at: Completed 02-mcp-tools-v1-parity-02-03-PLAN.md
+last_updated: "2026-03-10T15:52:05.372Z"
 last_activity: 2026-03-10 — Roadmap created, requirements mapped, STATE initialized
 progress:
   total_phases: 7
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 6
-  completed_plans: 5
+  completed_plans: 6
   percent: 0
 ---
 
@@ -55,6 +55,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01-liveindex-foundation P03 | 15 | 2 tasks | 4 files |
 | Phase 02-mcp-tools-v1-parity P01 | 7 | 2 tasks | 7 files |
 | Phase 02-mcp-tools-v1-parity PP02 | 15 | 2 tasks | 3 files |
+| Phase 02-mcp-tools-v1-parity P03 | 15 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -86,6 +87,9 @@ Recent decisions affecting current work:
 - [Phase 02-mcp-tools-v1-parity]: schemars 1.x mandatory over 0.8 — rmcp 1.1.0 uses schemars 1.2.1 transitively; two-version split causes trait mismatch on Parameters<T>
 - [Phase 02-mcp-tools-v1-parity]: #[tool_router(vis = pub(crate))] splits struct (mod.rs) from tool impl (tools.rs) while allowing Self::tool_router() cross-module call
 - [Phase 02-mcp-tools-v1-parity]: loading_guard! macro eliminates 6-line IndexState match boilerplate repeated 9 times across tool handlers
+- [Phase 02-mcp-tools-v1-parity]: test_no_v1_tools_in_codebase uses fn-pattern matching not raw strings — avoids false positives from test assertion strings in tools.rs unit tests
+- [Phase 02-mcp-tools-v1-parity]: test_stdout_purity uses Stdio::null() + TOKENIZOR_AUTO_INDEX=false — null stdin causes immediate EOF so MCP server exits cleanly under test harness
+- [Phase 02-mcp-tools-v1-parity]: CircuitBreakerTripped is logged as error but server continues in degraded mode — health tool reports state, no early exit in v2
 
 ### Pending Todos
 
@@ -99,6 +103,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T15:45:32.997Z
-Stopped at: Completed 02-mcp-tools-v1-parity-02-02-PLAN.md
+Last session: 2026-03-10T15:52:05.369Z
+Stopped at: Completed 02-mcp-tools-v1-parity-02-03-PLAN.md
 Resume file: None
