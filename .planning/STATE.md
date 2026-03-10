@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-stopped_at: Phase 2 context gathered
-last_updated: "2026-03-10T15:00:25.773Z"
+stopped_at: Completed 02-mcp-tools-v1-parity-02-01-PLAN.md
+last_updated: "2026-03-10T15:35:02.209Z"
 last_activity: 2026-03-10 — Roadmap created, requirements mapped, STATE initialized
 progress:
   total_phases: 7
   completed_phases: 1
-  total_plans: 3
-  completed_plans: 3
+  total_plans: 6
+  completed_plans: 4
   percent: 0
 ---
 
@@ -53,6 +53,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01-liveindex-foundation P01 | 15 | 2 tasks | 10 files |
 | Phase 01-liveindex-foundation P02 | 5 | 2 tasks | 4 files |
 | Phase 01-liveindex-foundation P03 | 15 | 2 tasks | 4 files |
+| Phase 02-mcp-tools-v1-parity P01 | 7 | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -77,6 +78,10 @@ Recent decisions affecting current work:
 - [Phase 01-03]: Gate retrieval_conformance.rs with #![cfg(feature = v1)] inner attribute — v1 types removed, file preserved for history, v2 conformance tests follow in Phase 2
 - [Phase 01-03]: Use CircuitBreakerState::new(threshold) directly in threshold tests — env vars are process-global and flaky in parallel test runs
 - [Phase 01-03]: Stdout purity RELY-04 CI gate implemented as test_stdout_purity: spawns binary as subprocess, asserts stdout is empty
+- [Phase 02-mcp-tools-v1-parity]: IndexState::Empty is a first-class variant checked before Ready/CB — empty() is structurally distinct from loading
+- [Phase 02-mcp-tools-v1-parity]: reload() validates path exists before discover_files — ignore crate silently returns empty on invalid paths
+- [Phase 02-mcp-tools-v1-parity]: format.rs functions accept &LiveIndex directly — no intermediate DTOs, maximal composability for tool handlers
+- [Phase 02-mcp-tools-v1-parity]: repo_outline accepts project_name parameter — caller provides context, formatter stays pure
 
 ### Pending Todos
 
@@ -90,6 +95,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T15:00:25.771Z
-Stopped at: Phase 2 context gathered
-Resume file: .planning/phases/02-mcp-tools-v1-parity/02-CONTEXT.md
+Last session: 2026-03-10T15:35:02.207Z
+Stopped at: Completed 02-mcp-tools-v1-parity-02-01-PLAN.md
+Resume file: None

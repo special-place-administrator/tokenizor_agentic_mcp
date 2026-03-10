@@ -13,7 +13,7 @@ Requirements for the v2 rewrite release. Each maps to roadmap phases.
 - [x] **LIDX-02**: All tree-sitter extracted symbols stored with O(1) lookup by name, file, and ID
 - [x] **LIDX-03**: File content bytes stored in memory — zero disk I/O on read path
 - [x] **LIDX-04**: Concurrent access via shared ownership (Arc + concurrent map) — many readers, exclusive writer
-- [ ] **LIDX-05**: Initial load completes in <500ms for 70 files, <3s for 1,000 files
+- [x] **LIDX-05**: Initial load completes in <500ms for 70 files, <3s for 1,000 files
 
 ### Freshness
 
@@ -75,7 +75,7 @@ Requirements for the v2 rewrite release. Each maps to roadmap phases.
 
 - [ ] **INFR-01**: tokenizor init command writes PostToolUse hooks into .claude/hooks.json (idempotent)
 - [ ] **INFR-02**: Auto-index on startup if .git exists (configurable via TOKENIZOR_AUTO_INDEX)
-- [ ] **INFR-03**: Compact response formatter — human-readable output matching Read/Grep style
+- [x] **INFR-03**: Compact response formatter — human-readable output matching Read/Grep style
 - [ ] **INFR-04**: Token savings calculation and tracking per session
 - [ ] **INFR-05**: Removed tools: cancel_index_run, checkpoint_now, resume_index_run, get_index_run, list_index_runs, invalidate_indexed_state, repair_index, inspect_repository_health, get_operational_history, reindex_repository
 
@@ -134,7 +134,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | LIDX-02 | Phase 1 | Complete |
 | LIDX-03 | Phase 1 | Complete |
 | LIDX-04 | Phase 1 | Complete |
-| LIDX-05 | Phase 2 | Pending |
+| LIDX-05 | Phase 2 | Complete |
 | FRSH-01 | Phase 3 | Pending |
 | FRSH-02 | Phase 3 | Pending |
 | FRSH-03 | Phase 3 | Pending |
@@ -178,7 +178,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | HOOK-10 | Phase 5 | Pending |
 | INFR-01 | Phase 6 | Pending |
 | INFR-02 | Phase 2 | Pending |
-| INFR-03 | Phase 2 | Pending |
+| INFR-03 | Phase 2 | Complete |
 | INFR-04 | Phase 6 | Pending |
 | INFR-05 | Phase 2 | Pending |
 | PLSH-01 | Phase 7 | Pending |

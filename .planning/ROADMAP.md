@@ -48,7 +48,7 @@ Plans:
   3. Server auto-indexes on startup when `.git` is present, without any explicit tool call
   4. All v1 over-infrastructure tools (`cancel_index_run`, `checkpoint_now`, `resume_index_run`, and 7 others) are absent from the tool list — the server does not expose them
   5. Tool responses are compact human-readable text matching the style of Claude's native Read output, not verbose JSON envelopes
-**Plans:** 3 plans
+**Plans:** 1/3 plans executed
 
 Plans:
 - [ ] 02-01-PLAN.md — LiveIndex extensions (empty, reload, SystemTime) + response formatter module
@@ -120,7 +120,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. LiveIndex Foundation | 3/3 | Complete   | 2026-03-10 |
-| 2. MCP Tools v1 Parity | 0/3 | Planning complete | - |
+| 2. MCP Tools v1 Parity | 1/3 | In Progress|  |
 | 3. File Watcher + Freshness | 0/? | Not started | - |
 | 4. Cross-Reference Extraction | 0/? | Not started | - |
 | 5. HTTP Sidecar + Hook Infrastructure | 0/? | Not started | - |
