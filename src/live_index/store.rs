@@ -381,6 +381,34 @@ impl LiveIndex {
         Ok(())
     }
 
+    /// Insert or replace a single file in the index without a full reload.
+    ///
+    /// Updates `loaded_at_system` to reflect the mutation time.
+    /// If the file already exists, its entry is replaced atomically.
+    pub fn update_file(&mut self, path: String, file: IndexedFile) {
+        self.files.insert(path, file);
+        self.loaded_at_system = SystemTime::now();
+    }
+
+    /// Insert a new file into the index (alias for `update_file`).
+    ///
+    /// Semantically identical to `update_file` — if the file already exists
+    /// it is replaced. The name `add_file` is provided for clarity at call sites
+    /// where the caller knows the file is new.
+    pub fn add_file(&mut self, path: String, file: IndexedFile) {
+        self.update_file(path, file);
+    }
+
+    /// Remove a single file from the index by its relative path.
+    ///
+    /// If the path is not present, this is a no-op (no timestamp update).
+    /// If the path is found and removed, `loaded_at_system` is updated.
+    pub fn remove_file(&mut self, path: &str) {
+        if self.files.remove(path).is_some() {
+            self.loaded_at_system = SystemTime::now();
+        }
+    }
+
 }
 
 #[cfg(test)]
@@ -665,5 +693,135 @@ mod tests {
         for h in handles {
             h.join().expect("reader thread should not panic");
         }
+    }
+
+    // --- LiveIndex mutation methods ---
+
+    fn make_indexed_file_for_mutation(path: &str) -> IndexedFile {
+        IndexedFile {
+            relative_path: path.to_string(),
+            language: LanguageId::Rust,
+            content: b"fn test() {}".to_vec(),
+            symbols: vec![dummy_symbol()],
+            parse_status: ParseStatus::Parsed,
+            byte_len: 12,
+            content_hash: "abc123".to_string(),
+        }
+    }
+
+    fn make_empty_live_index() -> LiveIndex {
+        LiveIndex {
+            files: HashMap::new(),
+            loaded_at: Instant::now(),
+            loaded_at_system: SystemTime::now(),
+            load_duration: Duration::ZERO,
+            cb_state: CircuitBreakerState::new(0.20),
+            is_empty: false,
+        }
+    }
+
+    #[test]
+    fn test_update_file_inserts_and_updates_timestamp() {
+        let mut index = make_empty_live_index();
+        let before = SystemTime::now();
+        let file = make_indexed_file_for_mutation("src/new.rs");
+        index.update_file("src/new.rs".to_string(), file);
+        let after = SystemTime::now();
+
+        assert!(index.get_file("src/new.rs").is_some(), "file should be inserted");
+        let ts = index.loaded_at_system;
+        assert!(ts >= before, "loaded_at_system should be >= before update");
+        assert!(ts <= after, "loaded_at_system should be <= after update");
+    }
+
+    #[test]
+    fn test_update_file_replaces_existing() {
+        let mut index = make_empty_live_index();
+        let file1 = IndexedFile {
+            relative_path: "src/foo.rs".to_string(),
+            language: LanguageId::Rust,
+            content: b"fn old() {}".to_vec(),
+            symbols: vec![],
+            parse_status: ParseStatus::Parsed,
+            byte_len: 11,
+            content_hash: "old_hash".to_string(),
+        };
+        index.update_file("src/foo.rs".to_string(), file1);
+
+        let file2 = IndexedFile {
+            relative_path: "src/foo.rs".to_string(),
+            language: LanguageId::Rust,
+            content: b"fn new() {}".to_vec(),
+            symbols: vec![dummy_symbol()],
+            parse_status: ParseStatus::Parsed,
+            byte_len: 11,
+            content_hash: "new_hash".to_string(),
+        };
+        index.update_file("src/foo.rs".to_string(), file2);
+
+        let retrieved = index.get_file("src/foo.rs").unwrap();
+        assert_eq!(retrieved.content_hash, "new_hash", "should have replaced the file");
+        assert_eq!(index.file_count(), 1, "should still have exactly 1 file");
+    }
+
+    #[test]
+    fn test_add_file_inserts_new() {
+        let mut index = make_empty_live_index();
+        assert_eq!(index.file_count(), 0);
+
+        let file = make_indexed_file_for_mutation("src/new.rs");
+        index.add_file("src/new.rs".to_string(), file);
+
+        assert_eq!(index.file_count(), 1, "file count should increase by 1 after add_file");
+        assert!(index.get_file("src/new.rs").is_some());
+    }
+
+    #[test]
+    fn test_remove_file_removes_existing() {
+        let mut index = make_empty_live_index();
+        let file = make_indexed_file_for_mutation("src/to_delete.rs");
+        index.update_file("src/to_delete.rs".to_string(), file);
+        assert_eq!(index.file_count(), 1);
+
+        index.remove_file("src/to_delete.rs");
+        assert!(index.get_file("src/to_delete.rs").is_none(), "file should be removed");
+        assert_eq!(index.file_count(), 0);
+    }
+
+    #[test]
+    fn test_remove_file_nonexistent_is_noop() {
+        let mut index = make_empty_live_index();
+        // Set a known timestamp
+        let known_ts = index.loaded_at_system;
+        // Small sleep to ensure any timestamp update would be different
+        std::thread::sleep(Duration::from_millis(5));
+
+        index.remove_file("nonexistent.rs");
+
+        assert_eq!(
+            index.loaded_at_system, known_ts,
+            "loaded_at_system must NOT change when removing non-existent file"
+        );
+    }
+
+    #[test]
+    fn test_file_count_after_mutations() {
+        let mut index = make_empty_live_index();
+        assert_eq!(index.file_count(), 0);
+
+        index.add_file("a.rs".to_string(), make_indexed_file_for_mutation("a.rs"));
+        assert_eq!(index.file_count(), 1);
+
+        index.add_file("b.rs".to_string(), make_indexed_file_for_mutation("b.rs"));
+        assert_eq!(index.file_count(), 2);
+
+        index.update_file("a.rs".to_string(), make_indexed_file_for_mutation("a.rs"));
+        assert_eq!(index.file_count(), 2, "update does not add a new entry");
+
+        index.remove_file("a.rs");
+        assert_eq!(index.file_count(), 1);
+
+        index.remove_file("nonexistent.rs");
+        assert_eq!(index.file_count(), 1, "removing nonexistent does not change count");
     }
 }
