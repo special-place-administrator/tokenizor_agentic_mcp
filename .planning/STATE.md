@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: completed
-stopped_at: "Completed 06-02-PLAN.md: stdin JSON routing + single init entry"
-last_updated: "2026-03-10T21:54:30.698Z"
-last_activity: "2026-03-10 — Phase 03 Plan 03 complete: watcher wired into MCP server, 8 integration tests prove all FRSH/RELY-03 reqs"
+stopped_at: "Completed 06-03-PLAN.md: integration tests + token savings in health tool"
+last_updated: "2026-03-10T22:05:00Z"
+last_activity: "2026-03-10 — Phase 06 Plan 03 complete: 12 integration tests prove HOOK-04..09 + INFR-04; health tool enriched with token savings via Arc<TokenStats>"
 progress:
   total_phases: 7
-  completed_phases: 5
+  completed_phases: 6
   total_plans: 18
-  completed_plans: 17
-  percent: 30
+  completed_plans: 18
+  percent: 94
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-10)
 
 **Core value:** Measurable token savings (80%+) on multi-file code exploration — automatically via hooks, zero model behavior change required
-**Current focus:** Phase 3 — File Watcher + Freshness
+**Current focus:** Phase 7 — Final validation and release
 
 ## Current Position
 
-Phase: 3 of 7 (File Watcher + Freshness)
+Phase: 6 of 7 (Hook Enrichment Integration) — PHASE COMPLETE
 Plan: 3 of 3 completed in current phase (PHASE COMPLETE)
-Status: Phase 03 complete — Phase 04 (Cross-References) is next
-Last activity: 2026-03-10 — Phase 03 Plan 03 complete: watcher wired into MCP server, 8 integration tests prove all FRSH/RELY-03 reqs
+Status: Phase 06 complete — Phase 07 (Final validation) is next
+Last activity: 2026-03-10 — Phase 06 Plan 03 complete: 12 integration tests prove HOOK-04..09 + INFR-04; health tool enriched with token savings via Arc<TokenStats>
 
-Progress: [███░░░░░░░] 30%
+Progress: [████████░░] 94%
 
 ## Performance Metrics
 
@@ -67,6 +67,7 @@ Progress: [███░░░░░░░] 30%
 | Phase 05-http-sidecar-hook-infrastructure P03 | 8 | 2 tasks | 5 files |
 | Phase 06-hook-enrichment-integration P01 | 6 | 2 tasks | 4 files |
 | Phase 06-hook-enrichment-integration P02 | 5 | 2 tasks | 4 files |
+| Phase 06-hook-enrichment-integration P03 | 7 | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -137,6 +138,9 @@ Recent decisions affecting current work:
 - [Phase 06-02]: HookInput structs are pub(crate) not pub — eliminates private_interfaces warnings, no external access needed
 - [Phase 06-02]: Auto-migration of old 3-entry hook format is free side-effect: is_tokenizor_entry 'tokenizor hook' substring matches both old and new command formats
 - [Phase 06-02]: run_hook now takes Option<&HookSubcommand>: None triggers stdin JSON routing, Some triggers backward-compat explicit routing
+- [Phase 06-03]: SidecarHandle exposes token_stats Arc: spawn_sidecar retains clone and returns in handle, avoids HTTP round-trip in health tool
+- [Phase 06-03]: format_token_savings returns empty string on all-zeros — fail-open, health tool callers append unconditionally without emptiness check
+- [Phase 06-03]: init_integration.rs 3 failures confirmed pre-existing: verified by stashing changes, deferred to deferred-items.md (not caused by Plan 06-03)
 
 ### Pending Todos
 
@@ -150,6 +154,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T21:54:30.694Z
-Stopped at: Completed 06-02-PLAN.md: stdin JSON routing + single init entry
+Last session: 2026-03-10T22:05:00Z
+Stopped at: Completed 06-03-PLAN.md: integration tests + token savings in health tool
 Resume file: None
