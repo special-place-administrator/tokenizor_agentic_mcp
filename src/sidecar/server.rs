@@ -3,11 +3,14 @@
 //! Binds to an OS-assigned ephemeral port, writes port/PID files,
 //! and spawns an axum serve task with graceful shutdown support.
 
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+
 use tokio::net::TcpListener;
 use tracing::info;
 
 use crate::live_index::store::SharedIndex;
-use super::{SidecarHandle, port_file, router};
+use super::{SidecarHandle, SidecarState, TokenStats, port_file, router};
 
 /// Spawn the HTTP sidecar.
 ///
@@ -15,10 +18,11 @@ use super::{SidecarHandle, port_file, router};
 /// 2. Calls `port_file::check_stale(bind_host)` to clean up any stale files.
 /// 3. Binds `TcpListener::bind("{bind_host}:0")` (OS assigns the port).
 /// 4. Writes port and PID files via `port_file`.
-/// 5. Builds the axum router via `router::build_router`.
-/// 6. Spawns `axum::serve` with graceful shutdown wired to a oneshot channel.
-/// 7. After the server completes, calls `port_file::cleanup_files()`.
-/// 8. Returns `SidecarHandle { port, shutdown_tx }`.
+/// 5. Creates `SidecarState` with `TokenStats` and empty symbol cache.
+/// 6. Builds the axum router via `router::build_router`.
+/// 7. Spawns `axum::serve` with graceful shutdown wired to a oneshot channel.
+/// 8. After the server completes, calls `port_file::cleanup_files()`.
+/// 9. Returns `SidecarHandle { port, shutdown_tx }`.
 pub async fn spawn_sidecar(
     index: SharedIndex,
     bind_host: &str,
@@ -41,8 +45,15 @@ pub async fn spawn_sidecar(
 
     info!("sidecar listening on {resolved_host}:{port}");
 
-    // Build the router.
-    let app = router::build_router(index);
+    // Construct SidecarState with fresh TokenStats and empty symbol cache.
+    let state = SidecarState {
+        index,
+        token_stats: TokenStats::new(),
+        symbol_cache: Arc::new(RwLock::new(HashMap::new())),
+    };
+
+    // Build the router with SidecarState.
+    let app = router::build_router(state);
 
     // Create graceful shutdown channel.
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();

@@ -5,6 +5,14 @@ pub mod server;
 
 pub use server::spawn_sidecar;
 
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+use serde::Serialize;
+
+use crate::live_index::store::SharedIndex;
+
 /// Handle returned by `spawn_sidecar`. Dropping this or sending on `shutdown_tx`
 /// gracefully stops the background axum server and cleans up port/PID files.
 pub struct SidecarHandle {
@@ -12,4 +20,322 @@ pub struct SidecarHandle {
     pub port: u16,
     /// Send `()` on this channel to initiate graceful shutdown.
     pub shutdown_tx: tokio::sync::oneshot::Sender<()>,
+}
+
+// ---------------------------------------------------------------------------
+// TokenStats — per-session atomic counters for hook fire counts and token savings
+// ---------------------------------------------------------------------------
+
+/// Lightweight snapshot of all token stats counters. Returned by `/stats`.
+#[derive(Debug, Clone, Serialize)]
+pub struct StatsSnapshot {
+    pub read_fires: usize,
+    pub read_saved_tokens: u64,
+    pub edit_fires: usize,
+    pub edit_saved_tokens: u64,
+    pub write_fires: usize,
+    pub grep_fires: usize,
+    pub grep_saved_tokens: u64,
+}
+
+/// In-memory atomic counters tracking hook fires and estimated token savings per hook type.
+///
+/// All counters start at zero; incremented by handlers on each successful response.
+/// Token savings are estimated as `(file_bytes - output_bytes) / 4` (bytes-per-token heuristic).
+pub struct TokenStats {
+    pub read_fires: AtomicUsize,
+    pub read_saved_tokens: AtomicU64,
+    pub edit_fires: AtomicUsize,
+    pub edit_saved_tokens: AtomicU64,
+    /// Write fires track new-file indexing; no savings because it's additive context.
+    pub write_fires: AtomicUsize,
+    pub grep_fires: AtomicUsize,
+    pub grep_saved_tokens: AtomicU64,
+}
+
+impl TokenStats {
+    /// Create a new `Arc<TokenStats>` with all counters at zero.
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            read_fires: AtomicUsize::new(0),
+            read_saved_tokens: AtomicU64::new(0),
+            edit_fires: AtomicUsize::new(0),
+            edit_saved_tokens: AtomicU64::new(0),
+            write_fires: AtomicUsize::new(0),
+            grep_fires: AtomicUsize::new(0),
+            grep_saved_tokens: AtomicU64::new(0),
+        })
+    }
+
+    /// Record a Read hook fire. Savings = (file_bytes - output_bytes) / 4.
+    pub fn record_read(&self, file_bytes: u64, output_bytes: u64) {
+        self.read_fires.fetch_add(1, Ordering::Relaxed);
+        let saved = file_bytes.saturating_sub(output_bytes) / 4;
+        self.read_saved_tokens.fetch_add(saved, Ordering::Relaxed);
+    }
+
+    /// Record an Edit hook fire. Savings = (file_bytes - output_bytes) / 4.
+    pub fn record_edit(&self, file_bytes: u64, output_bytes: u64) {
+        self.edit_fires.fetch_add(1, Ordering::Relaxed);
+        let saved = file_bytes.saturating_sub(output_bytes) / 4;
+        self.edit_saved_tokens.fetch_add(saved, Ordering::Relaxed);
+    }
+
+    /// Record a Write hook fire (new-file indexing). No savings — additive context.
+    pub fn record_write(&self) {
+        self.write_fires.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a Grep hook fire. Savings = (file_bytes - output_bytes) / 4.
+    pub fn record_grep(&self, file_bytes: u64, output_bytes: u64) {
+        self.grep_fires.fetch_add(1, Ordering::Relaxed);
+        let saved = file_bytes.saturating_sub(output_bytes) / 4;
+        self.grep_saved_tokens.fetch_add(saved, Ordering::Relaxed);
+    }
+
+    /// Read all counter values atomically (Relaxed ordering — display only).
+    pub fn summary(&self) -> StatsSnapshot {
+        StatsSnapshot {
+            read_fires: self.read_fires.load(Ordering::Relaxed),
+            read_saved_tokens: self.read_saved_tokens.load(Ordering::Relaxed),
+            edit_fires: self.edit_fires.load(Ordering::Relaxed),
+            edit_saved_tokens: self.edit_saved_tokens.load(Ordering::Relaxed),
+            write_fires: self.write_fires.load(Ordering::Relaxed),
+            grep_fires: self.grep_fires.load(Ordering::Relaxed),
+            grep_saved_tokens: self.grep_saved_tokens.load(Ordering::Relaxed),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SymbolSnapshot — lightweight copy of a symbol for pre/post diff in impact handler
+// ---------------------------------------------------------------------------
+
+/// Lightweight snapshot of a symbol used to detect pre/post-edit changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolSnapshot {
+    pub name: String,
+    pub kind: String,
+    pub line_range: (u32, u32),
+    pub byte_range: (u32, u32),
+}
+
+// ---------------------------------------------------------------------------
+// SidecarState — bundles index + stats + symbol cache for all handlers
+// ---------------------------------------------------------------------------
+
+/// Axum state type bundling the shared index, token statistics, and pre-edit symbol cache.
+///
+/// Passed to every handler via `State<SidecarState>`. Replaces bare `SharedIndex` as the
+/// axum state type in Plan 06-01.
+#[derive(Clone)]
+pub struct SidecarState {
+    pub index: SharedIndex,
+    pub token_stats: Arc<TokenStats>,
+    /// Per-file symbol snapshot cache for impact diff.
+    /// Key: relative file path. Value: symbol list captured before last edit.
+    pub symbol_cache: Arc<RwLock<HashMap<String, Vec<SymbolSnapshot>>>>,
+}
+
+// ---------------------------------------------------------------------------
+// build_with_budget — truncate a list of lines at a byte boundary
+// ---------------------------------------------------------------------------
+
+/// Join `items` with newlines, stopping before exceeding `max_bytes`.
+///
+/// If `max_bytes` is 0, all items are returned without truncation.
+///
+/// Returns `(text, remaining_count)` where `remaining_count` is 0 when no
+/// truncation occurred. A `"... (truncated, N more)"` suffix is appended when
+/// items were dropped.
+pub fn build_with_budget(items: &[String], max_bytes: u64) -> (String, usize) {
+    if max_bytes == 0 || items.is_empty() {
+        return (items.join("\n"), 0);
+    }
+
+    let mut included = Vec::new();
+    let mut used_bytes: u64 = 0;
+
+    for (i, item) in items.iter().enumerate() {
+        // Each item costs: len + 1 newline (except the last).
+        let item_cost = item.len() as u64 + if i + 1 < items.len() { 1 } else { 0 };
+        if used_bytes + item_cost > max_bytes && !included.is_empty() {
+            // Would exceed budget — stop here.
+            let remaining = items.len() - included.len();
+            let mut text = included.join("\n");
+            text.push_str(&format!("\n... (truncated, {remaining} more)"));
+            return (text, remaining);
+        }
+        used_bytes += item_cost;
+        included.push(item.as_str());
+    }
+
+    (included.join("\n"), 0)
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for Task 1
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- TokenStats ---
+
+    #[test]
+    fn test_token_stats_new_all_zeros() {
+        let stats = TokenStats::new();
+        let snap = stats.summary();
+        assert_eq!(snap.read_fires, 0);
+        assert_eq!(snap.read_saved_tokens, 0);
+        assert_eq!(snap.edit_fires, 0);
+        assert_eq!(snap.edit_saved_tokens, 0);
+        assert_eq!(snap.write_fires, 0);
+        assert_eq!(snap.grep_fires, 0);
+        assert_eq!(snap.grep_saved_tokens, 0);
+    }
+
+    #[test]
+    fn test_token_stats_record_read() {
+        let stats = TokenStats::new();
+        stats.record_read(1000, 200);
+        let snap = stats.summary();
+        assert_eq!(snap.read_fires, 1);
+        // (1000 - 200) / 4 = 200
+        assert_eq!(snap.read_saved_tokens, 200);
+    }
+
+    #[test]
+    fn test_token_stats_record_edit() {
+        let stats = TokenStats::new();
+        stats.record_edit(800, 300);
+        let snap = stats.summary();
+        assert_eq!(snap.edit_fires, 1);
+        // (800 - 300) / 4 = 125
+        assert_eq!(snap.edit_saved_tokens, 125);
+    }
+
+    #[test]
+    fn test_token_stats_record_write_no_savings() {
+        let stats = TokenStats::new();
+        stats.record_write();
+        let snap = stats.summary();
+        assert_eq!(snap.write_fires, 1);
+        // No savings fields for write
+    }
+
+    #[test]
+    fn test_token_stats_record_grep() {
+        let stats = TokenStats::new();
+        stats.record_grep(2000, 100);
+        let snap = stats.summary();
+        assert_eq!(snap.grep_fires, 1);
+        // (2000 - 100) / 4 = 475
+        assert_eq!(snap.grep_saved_tokens, 475);
+    }
+
+    #[test]
+    fn test_token_stats_saturating_sub_no_underflow() {
+        // output_bytes > file_bytes — should not underflow
+        let stats = TokenStats::new();
+        stats.record_read(100, 500);
+        let snap = stats.summary();
+        assert_eq!(snap.read_saved_tokens, 0, "saturating_sub prevents underflow");
+    }
+
+    #[test]
+    fn test_token_stats_accumulates_multiple_fires() {
+        let stats = TokenStats::new();
+        stats.record_read(1000, 200);
+        stats.record_read(800, 400);
+        let snap = stats.summary();
+        assert_eq!(snap.read_fires, 2);
+        // 200 + 100 = 300
+        assert_eq!(snap.read_saved_tokens, 300);
+    }
+
+    // --- build_with_budget ---
+
+    #[test]
+    fn test_build_with_budget_no_truncation_when_fits() {
+        let items: Vec<String> = vec!["line1".to_string(), "line2".to_string(), "line3".to_string()];
+        let (text, remaining) = build_with_budget(&items, 1000);
+        assert_eq!(text, "line1\nline2\nline3");
+        assert_eq!(remaining, 0, "no truncation when all items fit");
+    }
+
+    #[test]
+    fn test_build_with_budget_truncates_at_logical_boundary() {
+        // "line1\nline2\nline3" = 5+1+5+1+5 = 17 bytes
+        // max_bytes=12 means line1(5+1=6) + line2(5+1=6) = 12 bytes fits,
+        // but adding line3(5) would be 12+5=17 > 12
+        let items: Vec<String> = vec!["line1".to_string(), "line2".to_string(), "line3".to_string()];
+        let (text, remaining) = build_with_budget(&items, 12);
+        assert!(text.contains("line1"), "line1 should be included");
+        assert!(text.contains("line2"), "line2 should be included");
+        assert!(text.contains("truncated"), "should have truncation suffix");
+        assert_eq!(remaining, 1, "1 item was truncated");
+    }
+
+    #[test]
+    fn test_build_with_budget_zero_means_unlimited() {
+        let items: Vec<String> = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let (text, remaining) = build_with_budget(&items, 0);
+        assert_eq!(text, "a\nb\nc");
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn test_build_with_budget_empty_items() {
+        let items: Vec<String> = vec![];
+        let (text, remaining) = build_with_budget(&items, 100);
+        assert_eq!(text, "");
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn test_build_with_budget_truncation_suffix_format() {
+        let items: Vec<String> = vec![
+            "line1".to_string(),
+            "line2".to_string(),
+            "line3".to_string(),
+            "line4".to_string(),
+        ];
+        let (text, remaining) = build_with_budget(&items, 12);
+        assert!(
+            text.ends_with("... (truncated, 2 more)") || text.contains("truncated, 2 more"),
+            "suffix should mention 2 more items, got: {text}"
+        );
+        assert_eq!(remaining, 2);
+    }
+
+    // --- SidecarState construction ---
+
+    #[test]
+    fn test_sidecar_state_constructs() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, RwLock};
+        use std::time::{Duration, Instant, SystemTime};
+        use crate::live_index::store::{CircuitBreakerState, LiveIndex};
+
+        let index = Arc::new(RwLock::new(LiveIndex {
+            files: HashMap::new(),
+            loaded_at: Instant::now(),
+            loaded_at_system: SystemTime::now(),
+            load_duration: Duration::ZERO,
+            cb_state: CircuitBreakerState::new(0.20),
+            is_empty: true,
+            reverse_index: HashMap::new(),
+        }));
+
+        let state = SidecarState {
+            index,
+            token_stats: TokenStats::new(),
+            symbol_cache: Arc::new(RwLock::new(HashMap::new())),
+        };
+
+        // Clone must work (derived Clone)
+        let _cloned = state.clone();
+    }
 }
