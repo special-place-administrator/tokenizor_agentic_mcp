@@ -59,19 +59,109 @@ pub fn discover_files(root: &Path) -> Result<Vec<DiscoveredFile>> {
 }
 
 /// Walk upward from the current working directory, looking for a `.git` directory.
-/// Falls back to the current working directory if none is found.
-pub fn find_git_root() -> PathBuf {
-    let mut current = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+/// Returns `None` if no git root is found and the cwd is a forbidden directory.
+pub fn find_project_root() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    // Try to find a git root first (always safe — scoped by repo boundary).
+    let mut current = cwd.clone();
     loop {
         if current.join(".git").exists() {
-            return current;
+            return Some(current);
         }
         match current.parent() {
             Some(parent) => current = parent.to_path_buf(),
             None => break,
         }
     }
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+
+    // No git root found — use cwd if it's not a forbidden directory.
+    if is_forbidden_root(&cwd) {
+        tracing::warn!(
+            path = %cwd.display(),
+            "refusing to auto-index: directory is too broad (home dir, drive root, or system path)"
+        );
+        None
+    } else {
+        Some(cwd)
+    }
+}
+
+/// Returns `true` if `path` is a directory that should never be auto-indexed
+/// because it would be too large or contain unrelated files.
+fn is_forbidden_root(path: &Path) -> bool {
+    // Canonicalize for reliable comparison (resolves symlinks, normalizes separators).
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+
+    // 1. Drive roots: C:\, D:\, /, etc.
+    if path.parent().is_none() {
+        return true;
+    }
+
+    // 2. Windows drive roots that have a parent but are still just "C:\"
+    #[cfg(target_os = "windows")]
+    {
+        let path_str = path.to_string_lossy();
+        // Matches patterns like "C:\", "\\?\C:\"
+        if path_str.len() <= 7 && path_str.ends_with('\\') {
+            return true;
+        }
+    }
+
+    // 3. User home directories.
+    if let Some(home) = home_dir() {
+        let home = home.canonicalize().unwrap_or(home);
+        if path == home {
+            return true;
+        }
+    }
+
+    // 4. Known system/broad directory names.
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        let lower = name.to_lowercase();
+        let forbidden_names = [
+            "windows", "system32", "program files", "program files (x86)",
+            "programdata", "appdata", "node_modules", ".npm", ".cargo",
+            "users", "home", "tmp", "temp", "var",
+        ];
+        if forbidden_names.contains(&lower.as_str()) {
+            return true;
+        }
+    }
+
+    // 5. Parent-of-home: e.g. C:\Users or /home
+    if let Some(home) = home_dir() {
+        let home = home.canonicalize().unwrap_or(home);
+        if let Some(parent) = home.parent() {
+            let parent = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
+            if path == parent {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Cross-platform home directory lookup.
+fn home_dir() -> Option<PathBuf> {
+    // std::env::home_dir is deprecated but dirs::home_dir may not be available.
+    // Use environment variables directly for reliability.
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var("USERPROFILE").ok().map(PathBuf::from)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::env::var("HOME").ok().map(PathBuf::from)
+    }
+}
+
+/// Deprecated: use `find_project_root()` instead.
+#[deprecated(note = "use find_project_root() which returns Option and checks forbidden dirs")]
+pub fn find_git_root() -> PathBuf {
+    find_project_root()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 #[cfg(test)]
@@ -171,8 +261,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         fs::create_dir(tmp.path().join(".git")).unwrap();
 
-        // Temporarily override CWD isn't trivial in tests; we test the logic
-        // by verifying that a directory with .git is found when we walk up
+        // Verify the walk-up logic finds .git
         let mut found = false;
         let mut current = tmp.path().to_path_buf();
         loop {
@@ -189,11 +278,30 @@ mod tests {
     }
 
     #[test]
-    fn test_find_git_root_fallback_to_cwd() {
-        // find_git_root() returns a PathBuf — if no .git anywhere it falls back to CWD.
-        // We can't easily test the full walking behavior without controlling CWD,
-        // but we can verify the return type is a valid path.
-        let root = find_git_root();
-        assert!(root.is_absolute() || root == PathBuf::from("."));
+    fn test_is_forbidden_root_blocks_home_dir() {
+        let home = home_dir();
+        if let Some(h) = home {
+            assert!(is_forbidden_root(&h), "home directory should be forbidden");
+        }
+    }
+
+    #[test]
+    fn test_is_forbidden_root_blocks_drive_root() {
+        #[cfg(target_os = "windows")]
+        assert!(is_forbidden_root(Path::new("C:\\")));
+        #[cfg(not(target_os = "windows"))]
+        assert!(is_forbidden_root(Path::new("/")));
+    }
+
+    #[test]
+    fn test_is_forbidden_root_blocks_system_dirs() {
+        assert!(is_forbidden_root(Path::new("/tmp")));
+        assert!(is_forbidden_root(Path::new("/home")));
+    }
+
+    #[test]
+    fn test_is_forbidden_root_allows_project_dirs() {
+        let tmp = TempDir::new().unwrap();
+        assert!(!is_forbidden_root(tmp.path()), "temp project dir should be allowed");
     }
 }

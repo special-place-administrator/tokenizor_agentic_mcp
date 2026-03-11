@@ -29,8 +29,13 @@ async fn run_mcp_server_async() -> anyhow::Result<()> {
         .map(|v| v != "false")
         .unwrap_or(true);
 
-    let (index, project_name, watcher_root) = if should_auto_index {
-        let root = discovery::find_git_root();
+    let resolved_root = if should_auto_index {
+        discovery::find_project_root()
+    } else {
+        None
+    };
+
+    let (index, project_name, watcher_root) = if let Some(root) = resolved_root {
         tracing::info!(root = %root.display(), "auto-indexing from project root");
 
         // Try loading from persisted snapshot first (fast path: no re-parsing).
@@ -87,7 +92,11 @@ async fn run_mcp_server_async() -> anyhow::Result<()> {
 
         (index, name, Some(root))
     } else {
-        tracing::info!("TOKENIZOR_AUTO_INDEX=false — starting with empty index");
+        if !should_auto_index {
+            tracing::info!("TOKENIZOR_AUTO_INDEX=false — starting with empty index");
+        } else {
+            tracing::info!("no safe project root found — starting with empty index");
+        }
         (live_index::LiveIndex::empty(), "project".to_string(), None)
     };
 

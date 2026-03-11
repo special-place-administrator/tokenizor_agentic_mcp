@@ -1487,7 +1487,7 @@ dependencies = [
 
 [[package]]
 name = "tokenizor_agentic_mcp"
-version = "0.2.0"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "axum",
