@@ -1,3 +1,10 @@
+// These tests were written for v1 domain types (Provenance, ResultEnvelope, TrustLevel,
+// RetrievalOutcome, RequestGateError, etc.) that were removed in the v2 rewrite.
+// The entire file is gated behind the "v1" feature flag so it compiles cleanly
+// without the deleted types. A v2 retrieval conformance test suite will be written
+// in Phase 2 when the new response format is defined.
+#![cfg(feature = "v1")]
+
 use tokenizor_agentic_mcp::domain::{
     BatchRetrievalRequest, BatchRetrievalResponseData, BatchRetrievalResultItem, CodeSliceRequest,
     FileOutcomeStatus, FileOutlineResponse, GetSymbolsResponse, IndexRunStatus, LanguageId,

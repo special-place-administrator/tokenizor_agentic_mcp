@@ -1,0 +1,759 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
+
+use notify::{EventKind, RecommendedWatcher as NotifyRecommendedWatcher, RecursiveMode};
+use notify_debouncer_full::{
+    new_debouncer, DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache,
+};
+use tracing::{debug, error, warn};
+
+use crate::domain::LanguageId;
+use crate::live_index::store::{IndexedFile, SharedIndex};
+use crate::{hash, parsing};
+
+// ---------------------------------------------------------------------------
+// Types defined in Plan 01 (kept at top for Plan 03 wiring)
+// ---------------------------------------------------------------------------
+
+/// Watcher operational state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WatcherState {
+    /// File watcher is running and receiving events.
+    Active,
+    /// File watcher encountered errors but partial operation continues.
+    Degraded,
+    /// File watcher is not running.
+    Off,
+}
+
+/// Snapshot of file watcher status for health reporting.
+#[derive(Clone, Debug)]
+pub struct WatcherInfo {
+    pub state: WatcherState,
+    pub events_processed: u64,
+    pub last_event_at: Option<SystemTime>,
+    pub debounce_window_ms: u64,
+}
+
+impl Default for WatcherInfo {
+    fn default() -> Self {
+        WatcherInfo {
+            state: WatcherState::Off,
+            events_processed: 0,
+            last_event_at: None,
+            debounce_window_ms: 200,
+        }
+    }
+}
+
+/// Tracks event bursts to adaptively extend the debounce window.
+///
+/// Debounce logic:
+/// - Base window: 200ms
+/// - Burst window: 500ms (when >BURST_THRESHOLD events in a 200ms window)
+/// - Resets to 200ms after QUIET_SECS of inactivity
+pub struct BurstTracker {
+    pub event_count: u32,
+    pub window_start: Instant,
+    pub last_event_at: Instant,
+    pub extended: bool,
+}
+
+impl BurstTracker {
+    const BURST_THRESHOLD: u32 = 3;
+    const BASE_MS: u64 = 200;
+    const BURST_MS: u64 = 500;
+    const QUIET_SECS: u64 = 5;
+
+    /// Create a new BurstTracker with all counters at zero.
+    pub fn new() -> Self {
+        let now = Instant::now();
+        BurstTracker {
+            event_count: 0,
+            window_start: now,
+            last_event_at: now,
+            extended: false,
+        }
+    }
+
+    /// Record an event at the given instant, updating burst state.
+    ///
+    /// Window logic: if `now - window_start > BASE_MS`, start a new window
+    /// and reset count to 1. Otherwise increment count.
+    /// If count exceeds BURST_THRESHOLD, set extended=true.
+    /// Always updates last_event_at.
+    pub fn update(&mut self, now: Instant) {
+        let window_duration = now.duration_since(self.window_start);
+        if window_duration > Duration::from_millis(Self::BASE_MS) {
+            // Start a new window
+            self.window_start = now;
+            self.event_count = 1;
+            self.extended = false;
+        } else {
+            self.event_count += 1;
+            if self.event_count > Self::BURST_THRESHOLD {
+                self.extended = true;
+            }
+        }
+        self.last_event_at = now;
+    }
+
+    /// Returns the effective debounce window in milliseconds.
+    ///
+    /// - If last event was more than QUIET_SECS ago, return BASE_MS (quiet reset)
+    /// - If in burst mode (extended=true), return BURST_MS
+    /// - Otherwise return BASE_MS
+    pub fn effective_debounce_ms(&self) -> u64 {
+        let since_last = self.last_event_at.elapsed();
+        if since_last > Duration::from_secs(Self::QUIET_SECS) {
+            return Self::BASE_MS;
+        }
+        if self.extended {
+            Self::BURST_MS
+        } else {
+            Self::BASE_MS
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Plan 02: Event processing, path normalization, content hash skip, ENOENT
+// ---------------------------------------------------------------------------
+
+/// Result of a single re-index attempt for one file.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReindexResult {
+    /// Content hash matched existing entry — tree-sitter parse was skipped.
+    HashSkip,
+    /// File was re-parsed and the index was updated.
+    Reindexed,
+    /// File was not found (ENOENT) — it has been removed from the index.
+    Removed,
+    /// File could not be read for a reason other than ENOENT.
+    ReadError(String),
+}
+
+/// Strip `\\?\` Windows extended-length path prefix and normalize backslashes.
+///
+/// Returns the relative forward-slash path if `abs_path` is inside `repo_root`,
+/// or `None` if it lies outside.
+pub(crate) fn normalize_event_path(abs_path: &Path, repo_root: &Path) -> Option<String> {
+    let raw = abs_path.to_string_lossy();
+
+    // Strip \\?\ prefix (Windows extended-length format)
+    let stripped_raw: &str = if raw.starts_with(r"\\?\") {
+        &raw[4..]
+    } else {
+        &raw
+    };
+
+    let clean_abs = Path::new(stripped_raw);
+
+    // Try strip_prefix with the original repo_root first, then with its own \\?\ stripped
+    let relative = clean_abs.strip_prefix(repo_root).or_else(|_| {
+        let root_raw = repo_root.to_string_lossy();
+        let stripped_root: &str = if root_raw.starts_with(r"\\?\") {
+            &root_raw[4..]
+        } else {
+            return clean_abs.strip_prefix(repo_root);
+        };
+        clean_abs.strip_prefix(Path::new(stripped_root))
+    });
+
+    relative.ok().map(|p| p.to_string_lossy().replace('\\', "/"))
+}
+
+/// Return the `LanguageId` for a file path based on its extension.
+///
+/// Returns `None` for unsupported or missing extensions.
+pub(crate) fn supported_language(path: &Path) -> Option<LanguageId> {
+    let ext = path.extension()?.to_str()?;
+    LanguageId::from_extension(ext)
+}
+
+/// Return `true` for Create, Modify, or Remove events; `false` for Access and others.
+pub(crate) fn is_relevant_event(event: &DebouncedEvent) -> bool {
+    matches!(
+        event.kind,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+    )
+}
+
+/// Content-hash-gated single-file re-index.
+///
+/// Reads the file, compares its hash against the existing index entry, and
+/// skips the expensive tree-sitter parse when the hash matches.
+///
+/// # Lock discipline
+/// The write lock is **never** held during the tree-sitter parse. The sequence is:
+/// 1. Read file bytes (no lock)
+/// 2. Acquire read lock → compare hash → drop read lock
+/// 3. Parse (no lock)
+/// 4. Acquire write lock → update_file → drop write lock
+pub(crate) fn maybe_reindex(
+    relative_path: &str,
+    abs_path: &Path,
+    shared: &SharedIndex,
+    language: LanguageId,
+) -> ReindexResult {
+    // 1. Read file bytes
+    let bytes = match std::fs::read(abs_path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // ENOENT → treat as removal
+            let mut index = shared.write().unwrap();
+            index.remove_file(relative_path);
+            warn!("watcher: file not found, removed from index: {relative_path}");
+            return ReindexResult::Removed;
+        }
+        Err(e) => {
+            warn!("watcher: failed to read {relative_path}: {e}");
+            return ReindexResult::ReadError(e.to_string());
+        }
+    };
+
+    // 2. Compute hash and check against existing entry (read lock, dropped before parse)
+    let new_hash = hash::digest_hex(&bytes);
+    {
+        let index = shared.read().unwrap();
+        if let Some(existing) = index.get_file(relative_path) {
+            if existing.content_hash == new_hash {
+                debug!("watcher: hash-skip {relative_path}");
+                return ReindexResult::HashSkip;
+            }
+        }
+        // read lock dropped here
+    }
+
+    // 3. Parse outside the lock
+    let result = parsing::process_file(relative_path, &bytes, language);
+    let indexed = IndexedFile::from_parse_result(result, bytes);
+
+    // 4. Acquire write lock and update
+    {
+        let mut index = shared.write().unwrap();
+        index.update_file(relative_path.to_string(), indexed);
+    }
+
+    debug!("watcher: re-indexed {relative_path}");
+    ReindexResult::Reindexed
+}
+
+// ---------------------------------------------------------------------------
+// Plan 02: Watcher lifecycle — start_watcher, run_watcher, restart-with-backoff
+// ---------------------------------------------------------------------------
+
+/// Owns the debouncer and the receiving end of the event channel.
+///
+/// Dropping this struct stops the OS-level file watcher.
+pub struct WatcherHandle {
+    /// The debouncer owns the OS watcher thread; dropping it stops watching.
+    _debouncer: Debouncer<NotifyRecommendedWatcher, RecommendedCache>,
+    /// Receive end of the synchronous channel from the notify callback.
+    pub event_rx: std::sync::mpsc::Receiver<DebounceEventResult>,
+}
+
+/// Create a new debouncer watching `repo_root` recursively with a 200ms timeout.
+///
+/// Uses `std::sync::mpsc` (not tokio) because notify's callback runs on its own OS thread.
+pub(crate) fn start_watcher(repo_root: &Path) -> Result<WatcherHandle, notify::Error> {
+    let (tx, rx) = std::sync::mpsc::channel::<DebounceEventResult>();
+
+    let mut debouncer = new_debouncer(
+        Duration::from_millis(200),
+        None,
+        move |result: DebounceEventResult| {
+            let _ = tx.send(result);
+        },
+    )?;
+
+    debouncer.watch(repo_root, RecursiveMode::Recursive)?;
+
+    Ok(WatcherHandle {
+        _debouncer: debouncer,
+        event_rx: rx,
+    })
+}
+
+/// Process a batch of debounced events, updating the shared index.
+///
+/// Filters out non-relevant events (Access) and unsupported file extensions.
+/// For Remove events, removes directly from the index.
+/// For Create/Modify events, calls `maybe_reindex` for hash-gated re-parsing.
+pub(crate) fn process_events(
+    events: Vec<DebouncedEvent>,
+    repo_root: &Path,
+    shared: &SharedIndex,
+    burst_trackers: &mut HashMap<PathBuf, BurstTracker>,
+    watcher_info: &Arc<Mutex<WatcherInfo>>,
+) {
+    for event in events {
+        if !is_relevant_event(&event) {
+            continue;
+        }
+
+        for abs_path in &event.paths {
+            // Normalize path — skip if outside repo_root or can't be normalized
+            let relative_path = match normalize_event_path(abs_path, repo_root) {
+                Some(r) => r,
+                None => continue,
+            };
+
+            // Filter to supported languages only
+            let language = match supported_language(abs_path) {
+                Some(l) => l,
+                None => continue,
+            };
+
+            match event.kind {
+                EventKind::Remove(_) => {
+                    let mut index = shared.write().unwrap();
+                    index.remove_file(&relative_path);
+                    drop(index);
+
+                    let mut info = watcher_info.lock().unwrap();
+                    info.events_processed += 1;
+                    info.last_event_at = Some(SystemTime::now());
+                }
+                EventKind::Create(_) | EventKind::Modify(_) => {
+                    // Update burst tracker for this path
+                    let now = Instant::now();
+                    let tracker = burst_trackers
+                        .entry(abs_path.clone())
+                        .or_insert_with(BurstTracker::new);
+                    tracker.update(now);
+                    let debounce_ms = tracker.effective_debounce_ms();
+
+                    maybe_reindex(&relative_path, abs_path, shared, language);
+
+                    let mut info = watcher_info.lock().unwrap();
+                    info.events_processed += 1;
+                    info.last_event_at = Some(SystemTime::now());
+                    info.debounce_window_ms = debounce_ms;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Main watcher supervision loop. Spawned as a background tokio task by `main.rs`.
+///
+/// Lifecycle:
+/// 1. Set state to Active
+/// 2. Loop: start_watcher → process events → restart on error with 1s backoff
+/// 3. After 3 consecutive failures: set state to Degraded and stop
+pub async fn run_watcher(
+    repo_root: PathBuf,
+    shared: SharedIndex,
+    watcher_info: Arc<Mutex<WatcherInfo>>,
+) {
+    {
+        let mut info = watcher_info.lock().unwrap();
+        info.state = WatcherState::Active;
+    }
+
+    let mut consecutive_failures: u32 = 0;
+    const MAX_FAILURES: u32 = 3;
+
+    loop {
+        match start_watcher(&repo_root) {
+            Err(e) => {
+                consecutive_failures += 1;
+                warn!(
+                    "watcher: start_watcher failed (attempt {}): {}",
+                    consecutive_failures, e
+                );
+                if consecutive_failures >= MAX_FAILURES {
+                    let mut info = watcher_info.lock().unwrap();
+                    info.state = WatcherState::Degraded;
+                    error!("watcher: entering degraded mode after {} consecutive failures", MAX_FAILURES);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+            Ok(handle) => {
+                consecutive_failures = 0;
+                {
+                    let mut info = watcher_info.lock().unwrap();
+                    info.state = WatcherState::Active;
+                }
+
+                let mut burst_trackers: HashMap<PathBuf, BurstTracker> = HashMap::new();
+                let mut session_errors: u32 = 0;
+                const MAX_SESSION_ERRORS: u32 = 10;
+                // Poll timeout: yield to tokio between checks to avoid blocking the executor.
+                const RECV_TIMEOUT_MS: u64 = 50;
+
+                loop {
+                    match handle.event_rx.recv_timeout(Duration::from_millis(RECV_TIMEOUT_MS)) {
+                        Ok(Ok(events)) => {
+                            process_events(
+                                events,
+                                &repo_root,
+                                &shared,
+                                &mut burst_trackers,
+                                &watcher_info,
+                            );
+                        }
+                        Ok(Err(errors)) => {
+                            for err in &errors {
+                                warn!("watcher: notify error: {err}");
+                            }
+                            session_errors += errors.len() as u32;
+                            if session_errors >= MAX_SESSION_ERRORS {
+                                warn!("watcher: too many session errors, restarting watcher");
+                                break;
+                            }
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            // No event within the poll window — yield to tokio so other
+                            // tasks can run. This is critical: run_watcher is an async fn
+                            // running on a tokio worker thread; using blocking recv() would
+                            // starve the executor. recv_timeout + yield_now is the safe
+                            // pattern for mixing std::sync::mpsc with async tokio.
+                            tokio::task::yield_now().await;
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            // Channel closed — debouncer dropped or OS watcher died
+                            warn!("watcher: event channel closed, restarting");
+                            break;
+                        }
+                    }
+                }
+
+                // Inner loop exited — count as a failure and try to restart
+                consecutive_failures += 1;
+                if consecutive_failures >= MAX_FAILURES {
+                    let mut info = watcher_info.lock().unwrap();
+                    info.state = WatcherState::Degraded;
+                    error!("watcher: entering degraded mode after {} consecutive failures", MAX_FAILURES);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+/// Spawn a new watcher task, cancelling implicit by JoinHandle drop.
+///
+/// Called by `index_folder` after a full reload to restart the watcher
+/// on the new root path.
+pub fn restart_watcher(
+    repo_root: PathBuf,
+    shared: SharedIndex,
+    watcher_info: Arc<Mutex<WatcherInfo>>,
+) -> tokio::task::JoinHandle<()> {
+    {
+        let mut info = watcher_info.lock().unwrap();
+        info.state = WatcherState::Off;
+    }
+    tokio::spawn(run_watcher(repo_root, shared, watcher_info))
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    // --- BurstTracker tests from Plan 01 (preserved) ---
+
+    #[test]
+    fn test_watcher_state_variants() {
+        // All three variants exist and are distinct
+        let active = WatcherState::Active;
+        let degraded = WatcherState::Degraded;
+        let off = WatcherState::Off;
+        assert_ne!(active, degraded);
+        assert_ne!(active, off);
+        assert_ne!(degraded, off);
+    }
+
+    #[test]
+    fn test_watcher_info_default() {
+        let info = WatcherInfo::default();
+        assert_eq!(info.state, WatcherState::Off);
+        assert_eq!(info.events_processed, 0);
+        assert!(info.last_event_at.is_none());
+        assert_eq!(info.debounce_window_ms, 200);
+    }
+
+    #[test]
+    fn test_burst_tracker_new() {
+        let tracker = BurstTracker::new();
+        assert_eq!(tracker.event_count, 0);
+        assert!(!tracker.extended);
+    }
+
+    #[test]
+    fn test_burst_tracker_extends_window() {
+        // 4 events within 200ms -> extended=true, effective=500
+        let mut tracker = BurstTracker::new();
+        let start = Instant::now();
+        // Simulate 4 rapid events within the same 200ms window
+        tracker.update(start + Duration::from_millis(10));
+        tracker.update(start + Duration::from_millis(20));
+        tracker.update(start + Duration::from_millis(30));
+        tracker.update(start + Duration::from_millis(40));
+        assert!(tracker.extended, "4 events in window should trigger burst");
+        assert_eq!(tracker.effective_debounce_ms(), 500);
+    }
+
+    #[test]
+    fn test_burst_tracker_resets_after_quiet() {
+        // After last event > 5s ago, effective should return 200
+        let mut tracker = BurstTracker::new();
+        let past = Instant::now() - Duration::from_secs(10);
+        // We simulate this by forcing extended=true and setting last_event_at in the past
+        tracker.extended = true;
+        tracker.last_event_at = past;
+        assert_eq!(
+            tracker.effective_debounce_ms(),
+            200,
+            "after quiet period, should reset to 200ms"
+        );
+    }
+
+    #[test]
+    fn test_burst_tracker_new_window_resets_count() {
+        // An event after >200ms gap should start a fresh window with count=1, extended=false
+        let mut tracker = BurstTracker::new();
+        let t0 = Instant::now();
+        // First burst: 4 events
+        tracker.update(t0 + Duration::from_millis(10));
+        tracker.update(t0 + Duration::from_millis(20));
+        tracker.update(t0 + Duration::from_millis(30));
+        tracker.update(t0 + Duration::from_millis(40));
+        assert!(tracker.extended, "should be extended after burst");
+
+        // Event after 300ms gap
+        tracker.update(t0 + Duration::from_millis(350));
+        assert_eq!(tracker.event_count, 1, "count should reset to 1 after gap");
+        assert!(!tracker.extended, "extended should reset after new window");
+    }
+
+    #[test]
+    fn test_burst_tracker_base_debounce_no_burst() {
+        // Under threshold: effective should remain 200ms
+        let mut tracker = BurstTracker::new();
+        let t0 = Instant::now();
+        tracker.update(t0 + Duration::from_millis(10));
+        tracker.update(t0 + Duration::from_millis(20));
+        // Only 2 events, under BURST_THRESHOLD of 3
+        assert!(!tracker.extended);
+        assert_eq!(tracker.effective_debounce_ms(), 200);
+    }
+
+    // --- Plan 02: Path normalization tests ---
+
+    #[test]
+    fn test_normalize_event_path_basic() {
+        // Windows-style absolute path: strip root prefix, normalize slashes
+        let abs = Path::new(r"C:\repo\src\main.rs");
+        let root = Path::new(r"C:\repo");
+        let result = normalize_event_path(abs, root);
+        assert_eq!(result, Some("src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_event_path_unc_prefix() {
+        // Windows extended-length path with \\?\ prefix
+        let abs = Path::new(r"\\?\C:\repo\src\main.rs");
+        let root = Path::new(r"C:\repo");
+        let result = normalize_event_path(abs, root);
+        assert_eq!(result, Some("src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_event_path_outside_repo() {
+        // Path is completely outside the repo root — should return None
+        let abs = Path::new(r"C:\other\file.rs");
+        let root = Path::new(r"C:\repo");
+        let result = normalize_event_path(abs, root);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_normalize_event_path_forward_slash() {
+        // Forward-slash paths (Linux/macOS) should also work
+        let abs = Path::new("/home/user/project/src/lib.rs");
+        let root = Path::new("/home/user/project");
+        let result = normalize_event_path(abs, root);
+        assert_eq!(result, Some("src/lib.rs".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_event_path_nested_subdir() {
+        let abs = Path::new("/repo/a/b/c.rs");
+        let root = Path::new("/repo");
+        let result = normalize_event_path(abs, root);
+        assert_eq!(result, Some("a/b/c.rs".to_string()));
+    }
+
+    // --- Plan 02: Language filter tests ---
+
+    #[test]
+    fn test_supported_language_rs() {
+        let path = Path::new("src/main.rs");
+        assert_eq!(supported_language(path), Some(LanguageId::Rust));
+    }
+
+    #[test]
+    fn test_supported_language_py() {
+        let path = Path::new("scripts/build.py");
+        assert_eq!(supported_language(path), Some(LanguageId::Python));
+    }
+
+    #[test]
+    fn test_supported_language_ts() {
+        let path = Path::new("src/app.ts");
+        assert_eq!(supported_language(path), Some(LanguageId::TypeScript));
+    }
+
+    #[test]
+    fn test_supported_language_go() {
+        let path = Path::new("main.go");
+        assert_eq!(supported_language(path), Some(LanguageId::Go));
+    }
+
+    #[test]
+    fn test_supported_language_java() {
+        let path = Path::new("Main.java");
+        assert_eq!(supported_language(path), Some(LanguageId::Java));
+    }
+
+    #[test]
+    fn test_supported_language_txt() {
+        let path = Path::new("README.txt");
+        assert_eq!(supported_language(path), None);
+    }
+
+    #[test]
+    fn test_supported_language_md() {
+        let path = Path::new("README.md");
+        assert_eq!(supported_language(path), None);
+    }
+
+    #[test]
+    fn test_supported_language_no_extension() {
+        let path = Path::new("Makefile");
+        assert_eq!(supported_language(path), None);
+    }
+
+    // --- Plan 04-02: watcher incremental xref update (XREF-08) ---
+
+    /// Proves that after `maybe_reindex` re-parses a file, the reverse_index
+    /// reflects the new references and the old references are gone.
+    ///
+    /// We write a Rust file with an initial function call, confirm the reverse
+    /// index contains it, then overwrite the file with a different call, call
+    /// maybe_reindex again, and confirm the index now reflects the new call.
+    #[test]
+    fn test_maybe_reindex_updates_reverse_index_on_change() {
+        use std::sync::{Arc, RwLock};
+        use crate::live_index::store::IndexedFile;
+        use crate::domain::LanguageId;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let rs_path = tmp.path().join("src").join("lib.rs");
+        std::fs::create_dir_all(rs_path.parent().unwrap()).unwrap();
+
+        // --- Initial content: calls `old_function` ---
+        let initial_content = b"fn entry() { old_function(); }";
+        std::fs::write(&rs_path, initial_content).unwrap();
+
+        // Build the initial shared index by parsing the file directly.
+        let rel_path = "src/lib.rs";
+        let shared: crate::live_index::store::SharedIndex = {
+            let result = crate::parsing::process_file(rel_path, initial_content, LanguageId::Rust);
+            let indexed = IndexedFile::from_parse_result(result, initial_content.to_vec());
+            let mut index = crate::live_index::store::LiveIndex {
+                files: std::collections::HashMap::new(),
+                loaded_at: std::time::Instant::now(),
+                loaded_at_system: std::time::SystemTime::now(),
+                load_duration: std::time::Duration::ZERO,
+                cb_state: crate::live_index::store::CircuitBreakerState::new(0.20),
+                is_empty: false,
+                reverse_index: std::collections::HashMap::new(),
+                trigram_index: crate::live_index::trigram::TrigramIndex::new(),
+            };
+            index.update_file(rel_path.to_string(), indexed);
+            Arc::new(RwLock::new(index))
+        };
+
+        // Confirm the reverse index contains "old_function".
+        {
+            let idx = shared.read().unwrap();
+            assert!(
+                idx.reverse_index.contains_key("old_function"),
+                "reverse_index should contain 'old_function' after initial parse"
+            );
+        }
+
+        // --- Updated content: calls `new_function` instead ---
+        let updated_content = b"fn entry() { new_function(); }";
+        std::fs::write(&rs_path, updated_content).unwrap();
+
+        // maybe_reindex detects a hash change and re-parses.
+        let result = maybe_reindex(rel_path, &rs_path, &shared, LanguageId::Rust);
+        assert_eq!(result, ReindexResult::Reindexed, "file should be re-parsed on content change");
+
+        // Confirm reverse index now has "new_function" and not "old_function".
+        {
+            let idx = shared.read().unwrap();
+            assert!(
+                idx.reverse_index.contains_key("new_function"),
+                "reverse_index should contain 'new_function' after re-index"
+            );
+            assert!(
+                !idx.reverse_index.contains_key("old_function"),
+                "reverse_index should NOT contain 'old_function' after re-index"
+            );
+        }
+    }
+
+    /// Confirms that maybe_reindex returns HashSkip when content has not changed.
+    #[test]
+    fn test_maybe_reindex_hash_skip_on_unchanged_content() {
+        use std::sync::{Arc, RwLock};
+        use crate::live_index::store::IndexedFile;
+        use crate::domain::LanguageId;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let rs_path = tmp.path().join("a.rs");
+        let content = b"fn foo() {}";
+        std::fs::write(&rs_path, content).unwrap();
+
+        let rel_path = "a.rs";
+        let shared: crate::live_index::store::SharedIndex = {
+            let result = crate::parsing::process_file(rel_path, content, LanguageId::Rust);
+            let indexed = IndexedFile::from_parse_result(result, content.to_vec());
+            let mut index = crate::live_index::store::LiveIndex {
+                files: std::collections::HashMap::new(),
+                loaded_at: std::time::Instant::now(),
+                loaded_at_system: std::time::SystemTime::now(),
+                load_duration: std::time::Duration::ZERO,
+                cb_state: crate::live_index::store::CircuitBreakerState::new(0.20),
+                is_empty: false,
+                reverse_index: std::collections::HashMap::new(),
+                trigram_index: crate::live_index::trigram::TrigramIndex::new(),
+            };
+            index.update_file(rel_path.to_string(), indexed);
+            Arc::new(RwLock::new(index))
+        };
+
+        // File content unchanged — expect HashSkip.
+        let result = maybe_reindex(rel_path, &rs_path, &shared, LanguageId::Rust);
+        assert_eq!(result, ReindexResult::HashSkip, "unchanged content should produce HashSkip");
+    }
+}

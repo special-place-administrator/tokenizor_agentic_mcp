@@ -1,46 +1,6 @@
-mod context;
-mod health;
-mod idempotency;
-mod index;
-mod init;
-mod migration;
-mod registry;
-mod repository;
-mod retrieval;
-mod workspace;
+pub mod index;
 
-pub use context::{ActiveWorkspaceContext, ContextResolutionMode};
-pub use health::{
-    ActionClassification, ActionCondition, ComponentHealth, DeploymentReport, FileHealthSummary,
-    HealthIssueCategory, HealthReport, HealthSeverity, HealthStatus, RepositoryHealthReport,
-    RunHealthSummary, ServiceIdentity, StatusContext, aggregate_status,
-    classify_repository_action, classify_run_action, unix_timestamp_ms,
-    STALE_QUEUED_ABORTED_SUMMARY,
-};
-pub use idempotency::{IdempotencyRecord, IdempotencyStatus};
 pub use index::{
-    Checkpoint, DiscoveryManifest, FileOutcome, FileOutcomeSummary, FileProcessingResult,
-    FileRecord, IndexRun, IndexRunMode, IndexRunStatus, IntegrityEventKind, LanguageId,
-    OperationalEvent, OperationalEventFilter, OperationalEventKind, PersistedFileOutcome,
-    RecoveryStateKind, RepairEvent, RepairOutcome, RepairResult, RepairScope, ResumeRejectReason,
-    ResumeRunOutcome, RunHealth, RunPhase, RunProgressSnapshot, RunRecoveryState, RunStatusReport,
-    SupportTier, SymbolKind, SymbolRecord,
+    find_enclosing_symbol, FileOutcome, FileProcessingResult, LanguageId, ReferenceKind,
+    ReferenceRecord, SupportTier, SymbolKind, SymbolRecord,
 };
-pub use init::{InitializationReport, RegistrationAction, RegistrationResult};
-pub use migration::{
-    MigrationEntityKind, MigrationIssue, MigrationMode, MigrationRecord, MigrationReport,
-    MigrationRequest, MigrationSummary,
-};
-pub use registry::{AuthorityMode, RegisteredProject, RegistryKind, RegistryView};
-pub use repository::{
-    InvalidationResult, ProjectIdentityKind, Repository, RepositoryKind, RepositoryStatus,
-};
-pub use retrieval::{
-    BatchRetrievalRequest, BatchRetrievalResponseData, BatchRetrievalResultItem, CodeSliceRequest,
-    FileOutcomeStatus, FileOutlineResponse, GetSymbolsResponse, NextAction, OutlineSymbol,
-    Provenance, RepoOutlineCoverage, RepoOutlineEntry, RepoOutlineResponse, RequestGateError,
-    ResultEnvelope, RetrievalOutcome, SearchResultItem, SymbolCoverage, SymbolRequest,
-    SymbolResultItem, SymbolSearchResponse, TrustLevel, VerifiedCodeSliceResponse,
-    VerifiedSourceResponse,
-};
-pub use workspace::{Workspace, WorkspaceStatus};

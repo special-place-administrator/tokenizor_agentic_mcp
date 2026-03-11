@@ -1,11 +1,13 @@
 pub mod languages;
+pub mod xref;
 
+use std::collections::HashMap;
 use std::panic;
 
 use tree_sitter::Parser;
 
-use crate::domain::{FileOutcome, FileProcessingResult, LanguageId, SymbolRecord};
-use crate::storage::digest_hex;
+use crate::domain::{FileOutcome, FileProcessingResult, LanguageId, ReferenceRecord, SymbolRecord};
+use crate::hash::digest_hex;
 
 pub fn process_file(
     relative_path: &str,
@@ -19,7 +21,7 @@ pub fn process_file(
     let parse_result = panic::catch_unwind(|| parse_source(&source, &language));
 
     match parse_result {
-        Ok(Ok((symbols, has_error))) => {
+        Ok(Ok((symbols, has_error, references, alias_map))) => {
             let outcome = if has_error {
                 FileOutcome::PartialParse {
                     warning: "tree-sitter reported syntax errors in the parse tree".to_string(),
@@ -34,6 +36,8 @@ pub fn process_file(
                 symbols,
                 byte_len,
                 content_hash,
+                references,
+                alias_map,
             }
         }
         Ok(Err(err)) => FileProcessingResult {
@@ -45,6 +49,8 @@ pub fn process_file(
             symbols: vec![],
             byte_len,
             content_hash,
+            references: vec![],
+            alias_map: HashMap::new(),
         },
         Err(_panic) => FileProcessingResult {
             relative_path: relative_path.to_string(),
@@ -55,11 +61,16 @@ pub fn process_file(
             symbols: vec![],
             byte_len,
             content_hash,
+            references: vec![],
+            alias_map: HashMap::new(),
         },
     }
 }
 
-fn parse_source(source: &str, language: &LanguageId) -> Result<(Vec<SymbolRecord>, bool), String> {
+fn parse_source(
+    source: &str,
+    language: &LanguageId,
+) -> Result<(Vec<SymbolRecord>, bool, Vec<ReferenceRecord>, HashMap<String, String>), String> {
     let mut parser = Parser::new();
 
     let ts_language = match language {
@@ -69,11 +80,16 @@ fn parse_source(source: &str, language: &LanguageId) -> Result<(Vec<SymbolRecord
         LanguageId::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         LanguageId::Go => tree_sitter_go::LANGUAGE.into(),
         LanguageId::Java => tree_sitter_java::LANGUAGE.into(),
-        _ => {
-            return Err(format!(
-                "language not yet onboarded for parsing: {language:?}"
-            ));
-        }
+        LanguageId::C => tree_sitter_c::LANGUAGE.into(),
+        LanguageId::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+        LanguageId::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+        LanguageId::Ruby => tree_sitter_ruby::LANGUAGE.into(),
+        LanguageId::Php => tree_sitter_php::LANGUAGE_PHP.into(),
+        LanguageId::Swift => tree_sitter_swift::LANGUAGE.into(),
+        LanguageId::Perl => tree_sitter_perl::LANGUAGE.into(),
+        LanguageId::Kotlin => tree_sitter_kotlin_sg::LANGUAGE.into(),
+        LanguageId::Dart => tree_sitter_dart::language().into(),
+        LanguageId::Elixir => tree_sitter_elixir::LANGUAGE.into(),
     };
 
     parser
@@ -87,8 +103,9 @@ fn parse_source(source: &str, language: &LanguageId) -> Result<(Vec<SymbolRecord
     let root = tree.root_node();
     let has_error = root.has_error();
     let symbols = languages::extract_symbols(&root, source, language);
+    let (references, alias_map) = xref::extract_references(&root, source, language);
 
-    Ok((symbols, has_error))
+    Ok((symbols, has_error, references, alias_map))
 }
 
 #[cfg(test)]
@@ -203,12 +220,10 @@ mod tests {
     }
 
     #[test]
-    fn test_process_file_unsupported_language_returns_failed() {
-        let source = b"def hello; end";
+    fn test_process_file_ruby_extracts_method() {
+        let source = b"def hello\n  puts 'hi'\nend";
         let result = process_file("app.rb", source, LanguageId::Ruby);
-        assert!(matches!(result.outcome, FileOutcome::Failed { .. }));
-        if let FileOutcome::Failed { error } = &result.outcome {
-            assert!(error.contains("not yet onboarded"));
-        }
+        assert_eq!(result.outcome, FileOutcome::Processed);
+        assert!(!result.symbols.is_empty(), "should have symbols for Ruby source");
     }
 }

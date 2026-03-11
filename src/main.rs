@@ -1,261 +1,148 @@
-use std::future::Future;
+use std::sync::{Arc, Mutex};
 
-use anyhow::{Result, bail};
-use rmcp::{ServiceExt, transport::stdio};
-use tokenizor_agentic_mcp::{
-    ApplicationContext, ServerConfig, TokenizorServer, domain::DeploymentReport, observability,
-};
+use clap::Parser;
+use tokenizor_agentic_mcp::{cli, discovery, live_index, observability, protocol, sidecar, watcher};
+use tokenizor_agentic_mcp::live_index::persist;
+use rmcp::{serve_server, transport};
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
+    let cli = cli::Cli::parse();
+    match cli.command {
+        Some(cli::Commands::Init) => cli::init::run_init(),
+        Some(cli::Commands::Hook { subcommand }) => cli::hook::run_hook(subcommand.as_ref()),
+        None => run_mcp_server(),
+    }
+}
+
+fn run_mcp_server() -> anyhow::Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async { run_mcp_server_async().await })
+}
+
+async fn run_mcp_server_async() -> anyhow::Result<()> {
     observability::init_tracing()?;
 
-    match std::env::args().nth(1).as_deref() {
-        None | Some("run") => run().await,
-        Some("doctor") => doctor(),
-        Some("init") => init(),
-        Some("attach") => attach(),
-        Some("migrate") => migrate(),
-        Some("inspect") => inspect(),
-        Some("resolve") => resolve(),
-        Some(command) => {
-            bail!(
-                "unknown command `{command}`; expected `run`, `doctor`, `init`, `attach`, `migrate`, `inspect`, or `resolve`"
-            )
+    // INFR-02: Auto-index on startup (configurable via TOKENIZOR_AUTO_INDEX)
+    let should_auto_index = std::env::var("TOKENIZOR_AUTO_INDEX")
+        .map(|v| v != "false")
+        .unwrap_or(true);
+
+    let (index, project_name, watcher_root) = if should_auto_index {
+        let root = discovery::find_git_root();
+        tracing::info!(root = %root.display(), "auto-indexing from project root");
+
+        // Try loading from persisted snapshot first (fast path: no re-parsing).
+        let index = if let Some(snapshot) = persist::load_snapshot(&root) {
+            let file_count = snapshot.files.len();
+            // Extract mtime map before consuming snapshot
+            let snapshot_mtimes: std::collections::HashMap<String, i64> = snapshot.files.iter()
+                .map(|(k, v)| (k.clone(), v.mtime_secs))
+                .collect();
+
+            tracing::info!(files = file_count, "loaded serialized index from .tokenizor/index.bin");
+            let live = persist::snapshot_to_live_index(snapshot);
+            let shared: live_index::SharedIndex = std::sync::Arc::new(std::sync::RwLock::new(live));
+
+            // Spawn background verification to reconcile against current disk state.
+            let bg_index = shared.clone();
+            let bg_root = root.clone();
+            tokio::spawn(async move {
+                persist::background_verify(bg_index, bg_root, snapshot_mtimes).await;
+            });
+
+            shared
+        } else {
+            // Fall back to full re-index (existing behavior).
+            live_index::LiveIndex::load(&root)?
+        };
+
+        let guard = index.read().expect("lock poisoned");
+        match guard.index_state() {
+            live_index::IndexState::Ready => {
+                let stats = guard.health_stats();
+                tracing::info!(
+                    files = stats.file_count,
+                    symbols = stats.symbol_count,
+                    parsed = stats.parsed_count,
+                    partial = stats.partial_parse_count,
+                    failed = stats.failed_count,
+                    duration_ms = stats.load_duration.as_millis() as u64,
+                    "LiveIndex ready"
+                );
+            }
+            live_index::IndexState::CircuitBreakerTripped { ref summary } => {
+                tracing::error!(%summary, "circuit breaker tripped — index degraded");
+            }
+            _ => {}
         }
-    }
-}
+        drop(guard);
 
-async fn run() -> Result<()> {
-    let config = ServerConfig::from_env()?;
-    let application = ApplicationContext::from_config(config)?;
-    let readiness_application = application.clone();
+        let name = root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("project")
+            .to_string();
 
-    guard_and_serve(
-        move || Ok(readiness_application.ensure_runtime_ready()?),
-        move |_report| async move {
-            tracing::info!("starting tokenizor_agentic_mcp");
-
-            let service = TokenizorServer::new(application)
-                .serve(stdio())
-                .await
-                .inspect_err(|error| tracing::error!(?error, "failed to start MCP server"))?;
-
-            service.waiting().await?;
-            Ok(())
-        },
-    )
-    .await
-}
-
-fn doctor() -> Result<()> {
-    let config = ServerConfig::from_env()?;
-    let application = ApplicationContext::from_config(config)?;
-    let report = application.deployment_report()?;
-
-    println!("{}", serde_json::to_string_pretty(&report)?);
-
-    if report.is_ready() {
-        Ok(())
+        (index, name, Some(root))
     } else {
-        bail!("{}", doctor_failure_message(&report))
-    }
-}
-
-fn init() -> Result<()> {
-    let target_path = std::env::args().nth(2).map(std::path::PathBuf::from);
-    let config = ServerConfig::from_env()?;
-    let application = ApplicationContext::from_config(config)?;
-    let report = application.initialize_repository(target_path)?;
-
-    println!("{}", serde_json::to_string_pretty(&report)?);
-
-    if report.is_ready() {
-        Ok(())
-    } else {
-        bail!("initialization completed with remaining required actions")
-    }
-}
-
-fn attach() -> Result<()> {
-    let target_path = std::env::args().nth(2).map(std::path::PathBuf::from);
-    let config = ServerConfig::from_env()?;
-    let application = ApplicationContext::from_config(config)?;
-    let report = application.attach_workspace(target_path)?;
-
-    println!("{}", serde_json::to_string_pretty(&report)?);
-
-    if report.is_ready() {
-        Ok(())
-    } else {
-        bail!("workspace attachment completed with remaining required actions")
-    }
-}
-
-fn migrate() -> Result<()> {
-    let args = std::env::args().skip(2).collect::<Vec<_>>();
-    if matches!(args.as_slice(), [scope] if scope == "control-plane" || scope == "mutable-state") {
-        let config = ServerConfig::from_env()?;
-        let application = ApplicationContext::from_config(config)?;
-        let report = application.migrate_control_plane_mutable_state()?;
-
-        println!("{}", serde_json::to_string_pretty(&report)?);
-
-        if report.is_ready() {
-            return Ok(());
-        }
-
-        bail!("{}", doctor_failure_message(&report));
-    }
-    let (source_path, target_path) = match args.as_slice() {
-        [] => (None, None),
-        [source_path, target_path] => (
-            Some(std::path::PathBuf::from(source_path)),
-            Some(std::path::PathBuf::from(target_path)),
-        ),
-        _ => {
-            bail!(
-                "migrate expects either no path arguments, an explicit `<from-path> <to-path>` pair, or the `control-plane` subcommand"
-            )
-        }
+        tracing::info!("TOKENIZOR_AUTO_INDEX=false — starting with empty index");
+        (live_index::LiveIndex::empty(), "project".to_string(), None)
     };
-    let config = ServerConfig::from_env()?;
-    let application = ApplicationContext::from_config(config)?;
-    let report = application.migrate_registry(source_path, target_path)?;
 
-    println!("{}", serde_json::to_string_pretty(&report)?);
+    // Spawn file watcher after initial load (only when auto-index is enabled).
+    let watcher_info = Arc::new(Mutex::new(watcher::WatcherInfo::default()));
 
-    if report.is_successful() {
-        Ok(())
-    } else {
-        bail!("migration completed with unresolved records; review the JSON report for guidance")
+    if let Some(ref root) = watcher_root {
+        let watcher_index = Arc::clone(&index);
+        let watcher_root_clone = root.clone();
+        let watcher_info_clone = Arc::clone(&watcher_info);
+        tokio::spawn(async move {
+            watcher::run_watcher(watcher_root_clone, watcher_index, watcher_info_clone).await;
+        });
+        tracing::info!("file watcher started");
     }
-}
 
-fn inspect() -> Result<()> {
-    let config = ServerConfig::from_env()?;
-    let application = ApplicationContext::from_config(config)?;
-    let report = application.inspect_registry()?;
+    // Spawn HTTP sidecar after watcher, before MCP serve.
+    // The sidecar shares the same Arc<LiveIndex> so mutations are immediately visible.
+    let bind_host = std::env::var("TOKENIZOR_SIDECAR_BIND")
+        .unwrap_or_else(|_| "127.0.0.1".to_string());
+    let sidecar_handle = sidecar::spawn_sidecar(Arc::clone(&index), &bind_host).await?;
+    tracing::info!(port = sidecar_handle.port, "HTTP sidecar started");
 
-    println!("{}", serde_json::to_string_pretty(&report)?);
+    // Share the sidecar's TokenStats Arc with the MCP server so the health tool
+    // can display token savings without an HTTP round-trip.
+    let token_stats = Some(sidecar_handle.token_stats);
+
+    // Create MCP server and serve on stdio transport.
+    let server = protocol::TokenizorServer::new(Arc::clone(&index), project_name, watcher_info, watcher_root.clone(), token_stats);
+    tracing::info!("starting MCP server on stdio transport");
+    let service = serve_server(server, transport::stdio()).await?;
+
+    // Wait for either MCP server shutdown (stdin EOF) or Ctrl+C/SIGTERM.
+    tokio::select! {
+        result = service.waiting() => { result?; }
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("Ctrl+C received, shutting down");
+        }
+    }
+
+    tracing::info!("MCP server shut down cleanly");
+
+    // Serialize index to disk on clean shutdown.
+    // Only serialize when auto-index is enabled (i.e., we have a real project root).
+    if let Some(ref root) = watcher_root {
+        let guard = index.read().expect("lock not poisoned");
+        match persist::serialize_index(&guard, root) {
+            Ok(()) => tracing::info!("index serialized to .tokenizor/index.bin"),
+            Err(e) => tracing::warn!("failed to serialize index on shutdown: {e}"),
+        }
+    }
+
+    // Shutdown the sidecar now that the MCP server has exited.
+    let _ = sidecar_handle.shutdown_tx.send(());
+    tracing::info!("sidecar shutdown signal sent");
+
     Ok(())
-}
-
-fn resolve() -> Result<()> {
-    let target_path = std::env::args().nth(2).map(std::path::PathBuf::from);
-    let config = ServerConfig::from_env()?;
-    let application = ApplicationContext::from_config(config)?;
-    let report = application.resolve_active_context(target_path)?;
-
-    println!("{}", serde_json::to_string_pretty(&report)?);
-    Ok(())
-}
-
-fn doctor_failure_message(report: &tokenizor_agentic_mcp::domain::DeploymentReport) -> String {
-    format!(
-        "deployment readiness is blocked: {}",
-        report.blocking_summary()
-    )
-}
-
-async fn guard_and_serve<R, S, Fut>(readiness_check: R, serve: S) -> Result<()>
-where
-    R: FnOnce() -> Result<DeploymentReport>,
-    S: FnOnce(DeploymentReport) -> Fut,
-    Fut: Future<Output = Result<()>>,
-{
-    let report = readiness_check()?;
-
-    if report.is_ready() {
-        tracing::info!(
-            control_plane_backend = %report.control_plane_backend,
-            check_count = report.checks.len(),
-            "runtime readiness confirmed"
-        );
-    } else {
-        tracing::warn!(
-            control_plane_backend = %report.control_plane_backend,
-            summary = %report.blocking_summary(),
-            "runtime readiness enforcement disabled; continuing startup despite blockers"
-        );
-    }
-
-    serve(report).await
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use tokenizor_agentic_mcp::domain::{ComponentHealth, DeploymentReport, HealthIssueCategory};
-
-    use super::{doctor_failure_message, guard_and_serve};
-
-    #[test]
-    fn doctor_failure_message_lists_remediation() {
-        let report = DeploymentReport::new(
-            "spacetimedb",
-            PathBuf::from(".tokenizor"),
-            vec![ComponentHealth::error(
-                "spacetimedb_cli",
-                HealthIssueCategory::Dependency,
-                "`spacetimedb` is not installed",
-                "Install the SpacetimeDB CLI and ensure it is on PATH.",
-            )],
-        );
-
-        let message = doctor_failure_message(&report);
-
-        assert!(message.contains("deployment readiness is blocked"));
-        assert!(message.contains("spacetimedb_cli"));
-        assert!(message.contains("Install the SpacetimeDB CLI"));
-    }
-
-    #[tokio::test]
-    async fn guard_and_serve_stops_before_serving_when_readiness_fails() {
-        let serve_calls = Arc::new(AtomicUsize::new(0));
-        let serve_calls_for_closure = serve_calls.clone();
-
-        let result = guard_and_serve(
-            || anyhow::bail!("runtime readiness is blocked: spacetimedb_cli"),
-            move |_report| async move {
-                serve_calls_for_closure.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            },
-        )
-        .await;
-
-        assert!(result.is_err());
-        assert_eq!(serve_calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn guard_and_serve_reaches_serve_path_when_readiness_succeeds() {
-        let serve_calls = Arc::new(AtomicUsize::new(0));
-        let serve_calls_for_closure = serve_calls.clone();
-
-        let result = guard_and_serve(
-            || {
-                Ok(DeploymentReport::new(
-                    "spacetimedb",
-                    PathBuf::from(".tokenizor"),
-                    vec![ComponentHealth::ok(
-                        "spacetimedb_endpoint",
-                        HealthIssueCategory::Dependency,
-                        "endpoint is reachable",
-                    )],
-                ))
-            },
-            move |_report| async move {
-                serve_calls_for_closure.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            },
-        )
-        .await;
-
-        assert!(result.is_ok());
-        assert_eq!(serve_calls.load(Ordering::SeqCst), 1);
-    }
 }

@@ -1,13 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::fmt;
 
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-
-use super::repository::RepositoryStatus;
-use super::retrieval::NextAction;
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum LanguageId {
     Rust,
     Python,
@@ -21,6 +15,7 @@ pub enum LanguageId {
     Ruby,
     Php,
     Swift,
+    Kotlin,
     Dart,
     Perl,
     Elixir,
@@ -42,6 +37,7 @@ impl LanguageId {
             "php" => Some(Self::Php),
             "swift" => Some(Self::Swift),
             "dart" => Some(Self::Dart),
+            "kt" | "kts" => Some(Self::Kotlin),
             "pl" | "pm" => Some(Self::Perl),
             "ex" | "exs" => Some(Self::Elixir),
             _ => None,
@@ -62,6 +58,7 @@ impl LanguageId {
             Self::Ruby => &["rb"],
             Self::Php => &["php"],
             Self::Swift => &["swift"],
+            Self::Kotlin => &["kt", "kts"],
             Self::Dart => &["dart"],
             Self::Perl => &["pl", "pm"],
             Self::Elixir => &["ex", "exs"],
@@ -73,29 +70,53 @@ impl LanguageId {
             Self::Rust | Self::Python | Self::JavaScript | Self::TypeScript | Self::Go => {
                 SupportTier::QualityFocus
             }
-            Self::Java => SupportTier::Broader,
-            Self::C
+            Self::Java
+            | Self::C
             | Self::Cpp
             | Self::CSharp
             | Self::Ruby
             | Self::Php
             | Self::Swift
+            | Self::Kotlin
             | Self::Dart
             | Self::Perl
-            | Self::Elixir => SupportTier::Unsupported,
+            | Self::Elixir => SupportTier::Broader,
         }
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+impl fmt::Display for LanguageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::Rust => "Rust",
+            Self::Python => "Python",
+            Self::JavaScript => "JavaScript",
+            Self::TypeScript => "TypeScript",
+            Self::Go => "Go",
+            Self::Java => "Java",
+            Self::C => "C",
+            Self::Cpp => "C++",
+            Self::CSharp => "C#",
+            Self::Ruby => "Ruby",
+            Self::Php => "PHP",
+            Self::Swift => "Swift",
+            Self::Kotlin => "Kotlin",
+            Self::Dart => "Dart",
+            Self::Perl => "Perl",
+            Self::Elixir => "Elixir",
+        };
+        write!(f, "{name}")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SupportTier {
     QualityFocus,
     Broader,
     Unsupported,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileProcessingResult {
     pub relative_path: String,
     pub language: LanguageId,
@@ -103,17 +124,21 @@ pub struct FileProcessingResult {
     pub symbols: Vec<SymbolRecord>,
     pub byte_len: u64,
     pub content_hash: String,
+    /// Cross-references extracted by `parsing::xref::extract_references`.
+    /// Empty until Task 2 wires xref extraction into the parse pipeline.
+    pub references: Vec<ReferenceRecord>,
+    /// Import alias map for this file: alias -> original name (e.g. "Map" -> "HashMap").
+    pub alias_map: HashMap<String, String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileOutcome {
     Processed,
     PartialParse { warning: String },
     Failed { error: String },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SymbolRecord {
     pub name: String,
     pub kind: SymbolKind,
@@ -123,8 +148,7 @@ pub struct SymbolRecord {
     pub line_range: (u32, u32),
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SymbolKind {
     Function,
     Method,
@@ -141,396 +165,89 @@ pub enum SymbolKind {
     Other,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct IndexRun {
-    pub run_id: String,
-    pub repo_id: String,
-    pub mode: IndexRunMode,
-    pub status: IndexRunStatus,
-    pub requested_at_unix_ms: u64,
-    pub started_at_unix_ms: Option<u64>,
-    pub finished_at_unix_ms: Option<u64>,
-    pub idempotency_key: Option<String>,
-    pub request_hash: Option<String>,
-    pub checkpoint_cursor: Option<String>,
-    pub error_summary: Option<String>,
-    #[serde(default)]
-    pub not_yet_supported: Option<BTreeMap<LanguageId, u64>>,
-    #[serde(default)]
-    pub prior_run_id: Option<String>,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery_state: Option<RunRecoveryState>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum IndexRunMode {
-    Full,
-    Incremental,
-    Repair,
-    Verify,
-    Reindex,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum IndexRunStatus {
-    Queued,
-    Running,
-    Succeeded,
-    Failed,
-    Cancelled,
-    Interrupted,
-    Aborted,
-}
-
-impl IndexRunStatus {
-    pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            IndexRunStatus::Succeeded
-                | IndexRunStatus::Failed
-                | IndexRunStatus::Cancelled
-                | IndexRunStatus::Interrupted
-                | IndexRunStatus::Aborted
-        )
+impl fmt::Display for SymbolKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let prefix = match self {
+            Self::Function => "fn",
+            Self::Method => "fn",
+            Self::Class => "class",
+            Self::Struct => "struct",
+            Self::Enum => "enum",
+            Self::Interface => "interface",
+            Self::Module => "mod",
+            Self::Constant => "const",
+            Self::Variable => "let",
+            Self::Type => "type",
+            Self::Trait => "trait",
+            Self::Impl => "impl",
+            Self::Other => "other",
+        };
+        write!(f, "{prefix}")
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Checkpoint {
-    pub run_id: String,
-    pub cursor: String,
-    pub files_processed: u64,
-    pub symbols_written: u64,
-    #[serde(default)]
-    pub files_failed: u64,
-    pub created_at_unix_ms: u64,
+/// A single cross-reference (call site, import, type usage, or macro use) extracted
+/// from a source file. Part of the Phase 4 cross-reference pipeline.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReferenceRecord {
+    /// Simple name at the reference site (e.g. "new", "process", "HashMap").
+    pub name: String,
+    /// Best-effort qualified name when available (e.g. "Vec::new", "fmt.Println").
+    pub qualified_name: Option<String>,
+    /// What kind of reference this is.
+    pub kind: ReferenceKind,
+    /// Byte range in the source file (start, end).
+    pub byte_range: (u32, u32),
+    /// Line range in the source file (start, end — zero-indexed).
+    pub line_range: (u32, u32),
+    /// Index into the file's symbol list for the innermost containing definition.
+    /// `None` means the reference is at module/top level.
+    pub enclosing_symbol_index: Option<u32>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DiscoveryManifest {
-    pub run_id: String,
-    pub discovered_at_unix_ms: u64,
-    pub relative_paths: Vec<String>,
+/// Discriminates the semantic role of a cross-reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ReferenceKind {
+    /// A function or method call site.
+    Call,
+    /// An import/use/require statement.
+    Import,
+    /// A type annotation, generic parameter, or other type usage.
+    TypeUsage,
+    /// A macro invocation.
+    MacroUse,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RecoveryStateKind {
-    Resumed,
-    ResumeRejected,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ResumeRejectReason {
-    RunNotInterrupted,
-    MissingCheckpoint,
-    EmptyCheckpointCursor,
-    ActiveRunConflict,
-    RepositoryInvalidated,
-    RepositoryFailed,
-    RepositoryDegraded,
-    RepositoryQuarantined,
-    MissingDiscoveryManifest,
-    CorruptDiscoveryManifest,
-    CheckpointCursorMissing,
-    MissingDurableOutputs,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunRecoveryState {
-    pub state: RecoveryStateKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rejection_reason: Option<ResumeRejectReason>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_action: Option<NextAction>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-    pub updated_at_unix_ms: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum ResumeRunOutcome {
-    Resumed {
-        run: IndexRun,
-        checkpoint: Checkpoint,
-        durable_files_skipped: u64,
-    },
-    Rejected {
-        run: IndexRun,
-        reason: ResumeRejectReason,
-        next_action: NextAction,
-        detail: String,
-    },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PersistedFileOutcome {
-    Committed,
-    EmptySymbols,
-    Failed { error: String },
-    Quarantined { reason: String },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct FileRecord {
-    pub relative_path: String,
-    pub language: LanguageId,
-    pub blob_id: String,
-    pub byte_len: u64,
-    pub content_hash: String,
-    pub outcome: PersistedFileOutcome,
-    pub symbols: Vec<SymbolRecord>,
-    pub run_id: String,
-    pub repo_id: String,
-    pub committed_at_unix_ms: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunPhase {
-    Discovering,
-    Processing,
-    Finalizing,
-    Complete,
-}
-
-impl RunPhase {
-    pub fn to_u8(&self) -> u8 {
-        match self {
-            RunPhase::Discovering => 0,
-            RunPhase::Processing => 1,
-            RunPhase::Finalizing => 2,
-            RunPhase::Complete => 3,
-        }
+impl fmt::Display for ReferenceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::Call => "call",
+            Self::Import => "import",
+            Self::TypeUsage => "type_usage",
+            Self::MacroUse => "macro_use",
+        };
+        write!(f, "{s}")
     }
+}
 
-    pub fn from_u8(value: u8) -> RunPhase {
-        match value {
-            0 => RunPhase::Discovering,
-            1 => RunPhase::Processing,
-            2 => RunPhase::Finalizing,
-            3 => RunPhase::Complete,
-            other => {
-                tracing::debug!(
-                    value = other,
-                    "unexpected RunPhase u8 value, defaulting to Complete"
-                );
-                RunPhase::Complete
+/// Returns the index of the innermost `SymbolRecord` whose `line_range` contains
+/// `ref_line`, or `None` if the reference is at module level.
+///
+/// "Innermost" is defined as the symbol with the latest `line_range.0` (start line)
+/// that still contains `ref_line`. This handles nested function definitions correctly.
+pub fn find_enclosing_symbol(symbols: &[SymbolRecord], ref_line: u32) -> Option<u32> {
+    let mut best: Option<(u32, u32)> = None; // (start_line, index)
+    for (idx, sym) in symbols.iter().enumerate() {
+        let (start, end) = sym.line_range;
+        if ref_line >= start && ref_line <= end {
+            match best {
+                None => best = Some((start, idx as u32)),
+                Some((best_start, _)) if start > best_start => best = Some((start, idx as u32)),
+                _ => {}
             }
         }
     }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunHealth {
-    Healthy,
-    Degraded,
-    Unhealthy,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunProgressSnapshot {
-    pub phase: RunPhase,
-    pub total_files: u64,
-    pub files_processed: u64,
-    pub files_failed: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct FileOutcomeSummary {
-    pub total_committed: u64,
-    pub processed_ok: u64,
-    pub partial_parse: u64,
-    pub failed: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunStatusReport {
-    pub run: IndexRun,
-    pub health: RunHealth,
-    pub is_active: bool,
-    pub progress: Option<RunProgressSnapshot>,
-    pub file_outcome_summary: Option<FileOutcomeSummary>,
-    pub classification: super::health::ActionClassification,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_action: Option<super::retrieval::NextAction>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub action_required: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "scope")]
-pub enum RepairScope {
-    Repository,
-    Run { run_id: String },
-    File { run_id: String, relative_path: String },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "outcome")]
-pub enum RepairOutcome {
-    Restored,
-    AlreadyHealthy,
-    CannotRestore { reason: String },
-    RequiresReindex,
-    InProgress { run_id: String },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RepairResult {
-    pub repo_id: String,
-    pub scope: RepairScope,
-    pub previous_status: RepositoryStatus,
-    pub outcome: RepairOutcome,
-    pub next_action: Option<NextAction>,
-    pub detail: String,
-    pub recorded_at_unix_ms: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RepairEvent {
-    pub repo_id: String,
-    pub scope: RepairScope,
-    pub previous_status: RepositoryStatus,
-    pub outcome: RepairOutcome,
-    pub detail: String,
-    pub timestamp_unix_ms: u64,
-}
-
-impl RepairEvent {
-    pub fn to_operational_event(&self) -> OperationalEvent {
-        OperationalEvent {
-            repo_id: self.repo_id.clone(),
-            kind: OperationalEventKind::RepairPerformed {
-                scope: self.scope.clone(),
-                previous_status: self.previous_status.clone(),
-                outcome: self.outcome.clone(),
-                detail: self.detail.clone(),
-            },
-            timestamp_unix_ms: self.timestamp_unix_ms,
-        }
-    }
-}
-
-// --- Operational history types (Story 4.6) ---
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum IntegrityEventKind {
-    Quarantined,
-    VerificationFailed,
-    SuspectDetected,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum OperationalEventKind {
-    RunStarted {
-        run_id: String,
-        mode: IndexRunMode,
-    },
-    RunCompleted {
-        run_id: String,
-        status: IndexRunStatus,
-        files_processed: usize,
-        error_summary: Option<String>,
-    },
-    RunInterrupted {
-        run_id: String,
-        reason: String,
-    },
-    CheckpointCreated {
-        run_id: String,
-        cursor: String,
-        files_committed: usize,
-    },
-    RepairPerformed {
-        scope: RepairScope,
-        previous_status: RepositoryStatus,
-        outcome: RepairOutcome,
-        detail: String,
-    },
-    RepositoryStatusChanged {
-        previous: RepositoryStatus,
-        current: RepositoryStatus,
-        trigger: String,
-    },
-    IntegrityEvent {
-        run_id: Option<String>,
-        relative_path: Option<String>,
-        kind: IntegrityEventKind,
-        detail: String,
-    },
-    StartupSweepCompleted {
-        stale_runs_found: usize,
-        actions_taken: Vec<String>,
-    },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct OperationalEvent {
-    pub repo_id: String,
-    pub kind: OperationalEventKind,
-    pub timestamp_unix_ms: u64,
-}
-
-impl OperationalEvent {
-    pub fn to_repair_event(&self) -> Option<RepairEvent> {
-        match &self.kind {
-            OperationalEventKind::RepairPerformed {
-                scope,
-                previous_status,
-                outcome,
-                detail,
-            } => Some(RepairEvent {
-                repo_id: self.repo_id.clone(),
-                scope: scope.clone(),
-                previous_status: previous_status.clone(),
-                outcome: outcome.clone(),
-                detail: detail.clone(),
-                timestamp_unix_ms: self.timestamp_unix_ms,
-            }),
-            _ => None,
-        }
-    }
-
-    pub fn event_name(&self) -> &'static str {
-        match &self.kind {
-            OperationalEventKind::RunStarted { .. } => "run.started",
-            OperationalEventKind::RunCompleted { status, .. } => match status {
-                IndexRunStatus::Succeeded => "run.succeeded",
-                IndexRunStatus::Failed => "run.failed",
-                IndexRunStatus::Cancelled => "run.cancelled",
-                IndexRunStatus::Aborted => "run.aborted",
-                _ => "run.completed",
-            },
-            OperationalEventKind::RunInterrupted { .. } => "run.interrupted",
-            OperationalEventKind::CheckpointCreated { .. } => "checkpoint.created",
-            OperationalEventKind::RepairPerformed { .. } => "repair.completed",
-            OperationalEventKind::RepositoryStatusChanged { .. } => "repository.status_changed",
-            OperationalEventKind::IntegrityEvent { kind, .. } => match kind {
-                IntegrityEventKind::Quarantined => "integrity.quarantined",
-                IntegrityEventKind::VerificationFailed => "integrity.verification_failed",
-                IntegrityEventKind::SuspectDetected => "integrity.suspect_detected",
-            },
-            OperationalEventKind::StartupSweepCompleted { .. } => "startup.sweep_completed",
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct OperationalEventFilter {
-    pub category: Option<String>,
-    pub since_unix_ms: Option<u64>,
-    pub limit: Option<usize>,
+    best.map(|(_, idx)| idx)
 }
 
 #[cfg(test)]
@@ -538,1246 +255,187 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_from_extension_maps_rust() {
-        assert_eq!(LanguageId::from_extension("rs"), Some(LanguageId::Rust));
+    fn test_symbol_kind_display_function() {
+        assert_eq!(SymbolKind::Function.to_string(), "fn");
     }
 
     #[test]
-    fn test_from_extension_maps_python() {
-        assert_eq!(LanguageId::from_extension("py"), Some(LanguageId::Python));
+    fn test_symbol_kind_display_method() {
+        assert_eq!(SymbolKind::Method.to_string(), "fn");
     }
 
     #[test]
-    fn test_from_extension_maps_javascript() {
-        assert_eq!(
-            LanguageId::from_extension("js"),
-            Some(LanguageId::JavaScript)
-        );
-        assert_eq!(
-            LanguageId::from_extension("jsx"),
-            Some(LanguageId::JavaScript)
-        );
+    fn test_symbol_kind_display_class() {
+        assert_eq!(SymbolKind::Class.to_string(), "class");
     }
 
     #[test]
-    fn test_from_extension_maps_typescript() {
-        assert_eq!(
-            LanguageId::from_extension("ts"),
-            Some(LanguageId::TypeScript)
-        );
-        assert_eq!(
-            LanguageId::from_extension("tsx"),
-            Some(LanguageId::TypeScript)
-        );
+    fn test_symbol_kind_display_struct() {
+        assert_eq!(SymbolKind::Struct.to_string(), "struct");
     }
 
     #[test]
-    fn test_from_extension_maps_go() {
-        assert_eq!(LanguageId::from_extension("go"), Some(LanguageId::Go));
+    fn test_symbol_kind_display_enum() {
+        assert_eq!(SymbolKind::Enum.to_string(), "enum");
     }
 
     #[test]
-    fn test_from_extension_returns_none_for_unknown() {
-        assert_eq!(LanguageId::from_extension("zig"), None);
-        assert_eq!(LanguageId::from_extension("lua"), None);
-        assert_eq!(LanguageId::from_extension(""), None);
+    fn test_symbol_kind_display_interface() {
+        assert_eq!(SymbolKind::Interface.to_string(), "interface");
     }
 
     #[test]
-    fn test_extensions_returns_correct_set() {
-        assert_eq!(LanguageId::Rust.extensions(), &["rs"]);
-        assert_eq!(LanguageId::Python.extensions(), &["py"]);
-        assert_eq!(LanguageId::JavaScript.extensions(), &["js", "jsx"]);
-        assert_eq!(LanguageId::TypeScript.extensions(), &["ts", "tsx"]);
-        assert_eq!(LanguageId::Go.extensions(), &["go"]);
+    fn test_symbol_kind_display_module() {
+        assert_eq!(SymbolKind::Module.to_string(), "mod");
     }
 
     #[test]
-    fn test_support_tier_all_quality_focus() {
-        assert_eq!(LanguageId::Rust.support_tier(), SupportTier::QualityFocus);
-        assert_eq!(LanguageId::Python.support_tier(), SupportTier::QualityFocus);
-        assert_eq!(
-            LanguageId::JavaScript.support_tier(),
-            SupportTier::QualityFocus
-        );
-        assert_eq!(
-            LanguageId::TypeScript.support_tier(),
-            SupportTier::QualityFocus
-        );
-        assert_eq!(LanguageId::Go.support_tier(), SupportTier::QualityFocus);
+    fn test_symbol_kind_display_constant() {
+        assert_eq!(SymbolKind::Constant.to_string(), "const");
     }
 
     #[test]
-    fn test_from_extension_maps_java() {
-        assert_eq!(LanguageId::from_extension("java"), Some(LanguageId::Java));
+    fn test_symbol_kind_display_variable() {
+        assert_eq!(SymbolKind::Variable.to_string(), "let");
     }
 
     #[test]
-    fn test_from_extension_maps_c() {
-        assert_eq!(LanguageId::from_extension("c"), Some(LanguageId::C));
-        assert_eq!(LanguageId::from_extension("h"), Some(LanguageId::C));
+    fn test_symbol_kind_display_type() {
+        assert_eq!(SymbolKind::Type.to_string(), "type");
     }
 
     #[test]
-    fn test_from_extension_maps_cpp() {
-        assert_eq!(LanguageId::from_extension("cpp"), Some(LanguageId::Cpp));
-        assert_eq!(LanguageId::from_extension("cxx"), Some(LanguageId::Cpp));
-        assert_eq!(LanguageId::from_extension("cc"), Some(LanguageId::Cpp));
-        assert_eq!(LanguageId::from_extension("hpp"), Some(LanguageId::Cpp));
-        assert_eq!(LanguageId::from_extension("hxx"), Some(LanguageId::Cpp));
-        assert_eq!(LanguageId::from_extension("hh"), Some(LanguageId::Cpp));
+    fn test_symbol_kind_display_trait() {
+        assert_eq!(SymbolKind::Trait.to_string(), "trait");
     }
 
     #[test]
-    fn test_from_extension_maps_csharp() {
-        assert_eq!(LanguageId::from_extension("cs"), Some(LanguageId::CSharp));
+    fn test_symbol_kind_display_impl() {
+        assert_eq!(SymbolKind::Impl.to_string(), "impl");
     }
 
     #[test]
-    fn test_from_extension_maps_ruby() {
-        assert_eq!(LanguageId::from_extension("rb"), Some(LanguageId::Ruby));
+    fn test_symbol_kind_display_other() {
+        assert_eq!(SymbolKind::Other.to_string(), "other");
+    }
+
+    // --- ReferenceRecord and ReferenceKind ---
+
+    #[test]
+    fn test_reference_kind_all_variants_constructible() {
+        let _call = ReferenceKind::Call;
+        let _import = ReferenceKind::Import;
+        let _type_usage = ReferenceKind::TypeUsage;
+        let _macro_use = ReferenceKind::MacroUse;
     }
 
     #[test]
-    fn test_from_extension_maps_php() {
-        assert_eq!(LanguageId::from_extension("php"), Some(LanguageId::Php));
+    fn test_reference_kind_display_call() {
+        assert_eq!(ReferenceKind::Call.to_string(), "call");
     }
 
     #[test]
-    fn test_from_extension_maps_swift() {
-        assert_eq!(LanguageId::from_extension("swift"), Some(LanguageId::Swift));
+    fn test_reference_kind_display_import() {
+        assert_eq!(ReferenceKind::Import.to_string(), "import");
     }
 
     #[test]
-    fn test_from_extension_maps_dart() {
-        assert_eq!(LanguageId::from_extension("dart"), Some(LanguageId::Dart));
+    fn test_reference_kind_display_type_usage() {
+        assert_eq!(ReferenceKind::TypeUsage.to_string(), "type_usage");
     }
 
     #[test]
-    fn test_from_extension_maps_perl() {
-        assert_eq!(LanguageId::from_extension("pl"), Some(LanguageId::Perl));
-        assert_eq!(LanguageId::from_extension("pm"), Some(LanguageId::Perl));
+    fn test_reference_kind_display_macro_use() {
+        assert_eq!(ReferenceKind::MacroUse.to_string(), "macro_use");
     }
 
     #[test]
-    fn test_from_extension_maps_elixir() {
-        assert_eq!(LanguageId::from_extension("ex"), Some(LanguageId::Elixir));
-        assert_eq!(LanguageId::from_extension("exs"), Some(LanguageId::Elixir));
+    fn test_reference_record_construction_with_all_fields() {
+        let r = ReferenceRecord {
+            name: "foo".to_string(),
+            qualified_name: Some("Bar::foo".to_string()),
+            kind: ReferenceKind::Call,
+            byte_range: (10, 20),
+            line_range: (1, 1),
+            enclosing_symbol_index: Some(0),
+        };
+        assert_eq!(r.name, "foo");
+        assert_eq!(r.qualified_name.as_deref(), Some("Bar::foo"));
+        assert_eq!(r.kind, ReferenceKind::Call);
+        assert_eq!(r.byte_range, (10, 20));
+        assert_eq!(r.line_range, (1, 1));
+        assert_eq!(r.enclosing_symbol_index, Some(0));
     }
 
     #[test]
-    fn test_support_tier_java_is_broader() {
-        assert_eq!(LanguageId::Java.support_tier(), SupportTier::Broader);
+    fn test_reference_record_without_optional_fields() {
+        let r = ReferenceRecord {
+            name: "baz".to_string(),
+            qualified_name: None,
+            kind: ReferenceKind::Import,
+            byte_range: (0, 5),
+            line_range: (0, 0),
+            enclosing_symbol_index: None,
+        };
+        assert!(r.qualified_name.is_none());
+        assert!(r.enclosing_symbol_index.is_none());
     }
 
     #[test]
-    fn test_support_tier_unsupported_languages() {
-        let unsupported = vec![
-            LanguageId::C,
-            LanguageId::Cpp,
-            LanguageId::CSharp,
-            LanguageId::Ruby,
-            LanguageId::Php,
-            LanguageId::Swift,
-            LanguageId::Dart,
-            LanguageId::Perl,
-            LanguageId::Elixir,
-        ];
-        for lang in unsupported {
-            assert_eq!(
-                lang.support_tier(),
-                SupportTier::Unsupported,
-                "{lang:?} should be Unsupported"
-            );
-        }
-    }
-
-    #[test]
-    fn test_extensions_broader_languages() {
-        assert_eq!(LanguageId::Java.extensions(), &["java"]);
-        assert_eq!(LanguageId::C.extensions(), &["c", "h"]);
-        assert_eq!(
-            LanguageId::Cpp.extensions(),
-            &["cpp", "cxx", "cc", "hpp", "hxx", "hh"]
-        );
-        assert_eq!(LanguageId::CSharp.extensions(), &["cs"]);
-        assert_eq!(LanguageId::Ruby.extensions(), &["rb"]);
-        assert_eq!(LanguageId::Php.extensions(), &["php"]);
-        assert_eq!(LanguageId::Swift.extensions(), &["swift"]);
-        assert_eq!(LanguageId::Dart.extensions(), &["dart"]);
-        assert_eq!(LanguageId::Perl.extensions(), &["pl", "pm"]);
-        assert_eq!(LanguageId::Elixir.extensions(), &["ex", "exs"]);
-    }
-
-    #[test]
-    fn test_broader_language_serde_roundtrip() {
-        let languages = vec![
-            LanguageId::Java,
-            LanguageId::C,
-            LanguageId::Cpp,
-            LanguageId::CSharp,
-            LanguageId::Ruby,
-            LanguageId::Php,
-            LanguageId::Swift,
-            LanguageId::Dart,
-            LanguageId::Perl,
-            LanguageId::Elixir,
-        ];
-        for lang in languages {
-            let json = serde_json::to_string(&lang).unwrap();
-            let deserialized: LanguageId = serde_json::from_str(&json).unwrap();
-            assert_eq!(lang, deserialized, "serde roundtrip failed for {lang:?}");
-        }
-    }
-
-    #[test]
-    fn test_language_id_serde_roundtrip() {
-        let languages = vec![
-            LanguageId::Rust,
-            LanguageId::Python,
-            LanguageId::JavaScript,
-            LanguageId::TypeScript,
-            LanguageId::Go,
-        ];
-        for lang in languages {
-            let json = serde_json::to_string(&lang).unwrap();
-            let deserialized: LanguageId = serde_json::from_str(&json).unwrap();
-            assert_eq!(lang, deserialized);
-        }
-    }
-
-    #[test]
-    fn test_support_tier_serde_roundtrip() {
-        let tiers = vec![
-            SupportTier::QualityFocus,
-            SupportTier::Broader,
-            SupportTier::Unsupported,
-        ];
-        for tier in tiers {
-            let json = serde_json::to_string(&tier).unwrap();
-            let deserialized: SupportTier = serde_json::from_str(&json).unwrap();
-            assert_eq!(tier, deserialized);
-        }
-    }
-
-    #[test]
-    fn test_file_processing_result_serde_roundtrip() {
+    fn test_file_processing_result_backward_compat_with_empty_refs() {
+        use std::collections::HashMap;
         let result = FileProcessingResult {
-            relative_path: "src/main.rs".to_string(),
+            relative_path: "test.rs".to_string(),
             language: LanguageId::Rust,
             outcome: FileOutcome::Processed,
-            symbols: vec![SymbolRecord {
-                name: "main".to_string(),
-                kind: SymbolKind::Function,
-                depth: 0,
-                sort_order: 0,
-                byte_range: (0, 50),
-                line_range: (1, 3),
-            }],
-            byte_len: 50,
-            content_hash: "abc123".to_string(),
-        };
-        let json = serde_json::to_string(&result).unwrap();
-        let deserialized: FileProcessingResult = serde_json::from_str(&json).unwrap();
-        assert_eq!(result, deserialized);
-    }
-
-    #[test]
-    fn test_file_outcome_partial_parse_serde_roundtrip() {
-        let outcome = FileOutcome::PartialParse {
-            warning: "syntax error at line 5".to_string(),
-        };
-        let json = serde_json::to_string(&outcome).unwrap();
-        let deserialized: FileOutcome = serde_json::from_str(&json).unwrap();
-        assert_eq!(outcome, deserialized);
-    }
-
-    #[test]
-    fn test_file_outcome_failed_serde_roundtrip() {
-        let outcome = FileOutcome::Failed {
-            error: "could not parse file".to_string(),
-        };
-        let json = serde_json::to_string(&outcome).unwrap();
-        let deserialized: FileOutcome = serde_json::from_str(&json).unwrap();
-        assert_eq!(outcome, deserialized);
-    }
-
-    #[test]
-    fn test_symbol_record_serde_roundtrip() {
-        let record = SymbolRecord {
-            name: "MyStruct".to_string(),
-            kind: SymbolKind::Struct,
-            depth: 0,
-            sort_order: 1,
-            byte_range: (10, 100),
-            line_range: (2, 10),
-        };
-        let json = serde_json::to_string(&record).unwrap();
-        let deserialized: SymbolRecord = serde_json::from_str(&json).unwrap();
-        assert_eq!(record, deserialized);
-    }
-
-    #[test]
-    fn test_symbol_kind_all_variants_serde() {
-        let kinds = vec![
-            SymbolKind::Function,
-            SymbolKind::Method,
-            SymbolKind::Class,
-            SymbolKind::Struct,
-            SymbolKind::Enum,
-            SymbolKind::Interface,
-            SymbolKind::Module,
-            SymbolKind::Constant,
-            SymbolKind::Variable,
-            SymbolKind::Type,
-            SymbolKind::Trait,
-            SymbolKind::Impl,
-            SymbolKind::Other,
-        ];
-        for kind in kinds {
-            let json = serde_json::to_string(&kind).unwrap();
-            let deserialized: SymbolKind = serde_json::from_str(&json).unwrap();
-            assert_eq!(kind, deserialized);
-        }
-    }
-
-    #[test]
-    fn test_file_processing_result_failed_has_empty_symbols() {
-        let result = FileProcessingResult {
-            relative_path: "bad.rs".to_string(),
-            language: LanguageId::Rust,
-            outcome: FileOutcome::Failed {
-                error: "parse failed".to_string(),
-            },
             symbols: vec![],
-            byte_len: 100,
-            content_hash: "def456".to_string(),
-        };
-        assert!(result.symbols.is_empty());
-    }
-
-    #[test]
-    fn test_deserialize_interrupted_status() {
-        let json = r#""interrupted""#;
-        let status: IndexRunStatus = serde_json::from_str(json).unwrap();
-        assert_eq!(status, IndexRunStatus::Interrupted);
-    }
-
-    #[test]
-    fn test_serialize_interrupted_status() {
-        let json = serde_json::to_string(&IndexRunStatus::Interrupted).unwrap();
-        assert_eq!(json, r#""interrupted""#);
-    }
-
-    #[test]
-    fn test_deserialize_existing_statuses_backward_compatible() {
-        let cases = vec![
-            (r#""queued""#, IndexRunStatus::Queued),
-            (r#""running""#, IndexRunStatus::Running),
-            (r#""succeeded""#, IndexRunStatus::Succeeded),
-            (r#""failed""#, IndexRunStatus::Failed),
-            (r#""cancelled""#, IndexRunStatus::Cancelled),
-        ];
-        for (json, expected) in cases {
-            let status: IndexRunStatus = serde_json::from_str(json).unwrap();
-            assert_eq!(status, expected, "failed for {json}");
-        }
-    }
-
-    #[test]
-    fn test_persisted_file_outcome_committed_serde_roundtrip() {
-        let outcome = PersistedFileOutcome::Committed;
-        let json = serde_json::to_string(&outcome).unwrap();
-        let deserialized: PersistedFileOutcome = serde_json::from_str(&json).unwrap();
-        assert_eq!(outcome, deserialized);
-    }
-
-    #[test]
-    fn test_persisted_file_outcome_empty_symbols_serde_roundtrip() {
-        let outcome = PersistedFileOutcome::EmptySymbols;
-        let json = serde_json::to_string(&outcome).unwrap();
-        let deserialized: PersistedFileOutcome = serde_json::from_str(&json).unwrap();
-        assert_eq!(outcome, deserialized);
-    }
-
-    #[test]
-    fn test_persisted_file_outcome_failed_serde_roundtrip() {
-        let outcome = PersistedFileOutcome::Failed {
-            error: "disk full".to_string(),
-        };
-        let json = serde_json::to_string(&outcome).unwrap();
-        let deserialized: PersistedFileOutcome = serde_json::from_str(&json).unwrap();
-        assert_eq!(outcome, deserialized);
-    }
-
-    #[test]
-    fn test_persisted_file_outcome_quarantined_serde_roundtrip() {
-        let outcome = PersistedFileOutcome::Quarantined {
-            reason: "blob_id/content_hash mismatch".to_string(),
-        };
-        let json = serde_json::to_string(&outcome).unwrap();
-        let deserialized: PersistedFileOutcome = serde_json::from_str(&json).unwrap();
-        assert_eq!(outcome, deserialized);
-    }
-
-    #[test]
-    fn test_file_record_construction_committed() {
-        let record = FileRecord {
-            relative_path: "src/main.rs".to_string(),
-            language: LanguageId::Rust,
-            blob_id: "abcdef1234567890".to_string(),
-            byte_len: 256,
-            content_hash: "abcdef1234567890".to_string(),
-            outcome: PersistedFileOutcome::Committed,
-            symbols: vec![SymbolRecord {
-                name: "main".to_string(),
-                kind: SymbolKind::Function,
-                depth: 0,
-                sort_order: 0,
-                byte_range: (0, 50),
-                line_range: (1, 3),
-            }],
-            run_id: "run-001".to_string(),
-            repo_id: "repo-001".to_string(),
-            committed_at_unix_ms: 1700000000000,
-        };
-        assert_eq!(record.outcome, PersistedFileOutcome::Committed);
-        assert_eq!(record.symbols.len(), 1);
-    }
-
-    #[test]
-    fn test_file_record_construction_empty_symbols() {
-        let record = FileRecord {
-            relative_path: "src/empty.py".to_string(),
-            language: LanguageId::Python,
-            blob_id: "hash123".to_string(),
-            byte_len: 10,
-            content_hash: "hash123".to_string(),
-            outcome: PersistedFileOutcome::EmptySymbols,
-            symbols: vec![],
-            run_id: "run-001".to_string(),
-            repo_id: "repo-001".to_string(),
-            committed_at_unix_ms: 1700000000000,
-        };
-        assert_eq!(record.outcome, PersistedFileOutcome::EmptySymbols);
-        assert!(record.symbols.is_empty());
-    }
-
-    #[test]
-    fn test_file_record_serde_roundtrip() {
-        let record = FileRecord {
-            relative_path: "src/lib.rs".to_string(),
-            language: LanguageId::Rust,
-            blob_id: "deadbeef".to_string(),
-            byte_len: 1024,
-            content_hash: "deadbeef".to_string(),
-            outcome: PersistedFileOutcome::Committed,
-            symbols: vec![
-                SymbolRecord {
-                    name: "MyStruct".to_string(),
-                    kind: SymbolKind::Struct,
-                    depth: 0,
-                    sort_order: 0,
-                    byte_range: (0, 200),
-                    line_range: (1, 10),
-                },
-                SymbolRecord {
-                    name: "new".to_string(),
-                    kind: SymbolKind::Method,
-                    depth: 1,
-                    sort_order: 1,
-                    byte_range: (50, 150),
-                    line_range: (3, 8),
-                },
-            ],
-            run_id: "run-002".to_string(),
-            repo_id: "repo-002".to_string(),
-            committed_at_unix_ms: 1700000000000,
-        };
-        let json = serde_json::to_string(&record).unwrap();
-        let deserialized: FileRecord = serde_json::from_str(&json).unwrap();
-        assert_eq!(record, deserialized);
-    }
-
-    #[test]
-    fn test_file_record_failed_serde_roundtrip() {
-        let record = FileRecord {
-            relative_path: "bad.go".to_string(),
-            language: LanguageId::Go,
-            blob_id: "abc".to_string(),
-            byte_len: 50,
+            byte_len: 0,
             content_hash: "abc".to_string(),
-            outcome: PersistedFileOutcome::Failed {
-                error: "CAS write failed".to_string(),
+            references: vec![],
+            alias_map: HashMap::new(),
+        };
+        assert!(result.references.is_empty());
+        assert!(result.alias_map.is_empty());
+    }
+
+    #[test]
+    fn test_find_enclosing_symbol_innermost_for_nested() {
+        // outer: line 0..10, inner: line 3..6
+        let symbols = vec![
+            SymbolRecord {
+                name: "outer".to_string(),
+                kind: SymbolKind::Function,
+                depth: 0,
+                sort_order: 0,
+                byte_range: (0, 100),
+                line_range: (0, 10),
             },
-            symbols: vec![],
-            run_id: "run-003".to_string(),
-            repo_id: "repo-003".to_string(),
-            committed_at_unix_ms: 1700000000000,
-        };
-        let json = serde_json::to_string(&record).unwrap();
-        let deserialized: FileRecord = serde_json::from_str(&json).unwrap();
-        assert_eq!(record, deserialized);
-    }
-
-    #[test]
-    fn test_file_record_quarantined_serde_roundtrip() {
-        let record = FileRecord {
-            relative_path: "suspect.ts".to_string(),
-            language: LanguageId::TypeScript,
-            blob_id: "xyz".to_string(),
-            byte_len: 100,
-            content_hash: "different_hash".to_string(),
-            outcome: PersistedFileOutcome::Quarantined {
-                reason: "blob_id/content_hash mismatch".to_string(),
-            },
-            symbols: vec![],
-            run_id: "run-004".to_string(),
-            repo_id: "repo-004".to_string(),
-            committed_at_unix_ms: 1700000000000,
-        };
-        let json = serde_json::to_string(&record).unwrap();
-        let deserialized: FileRecord = serde_json::from_str(&json).unwrap();
-        assert_eq!(record, deserialized);
-    }
-
-    #[test]
-    fn test_roundtrip_index_run_with_interrupted() {
-        let run = IndexRun {
-            run_id: "test-run".to_string(),
-            repo_id: "repo-1".to_string(),
-            mode: IndexRunMode::Full,
-            status: IndexRunStatus::Interrupted,
-            requested_at_unix_ms: 1000,
-            started_at_unix_ms: Some(1001),
-            finished_at_unix_ms: None,
-            idempotency_key: None,
-            request_hash: None,
-            checkpoint_cursor: None,
-            error_summary: Some("process exited unexpectedly".to_string()),
-            not_yet_supported: None,
-            prior_run_id: None,
-            description: None,
-            recovery_state: Some(RunRecoveryState {
-                state: RecoveryStateKind::ResumeRejected,
-                rejection_reason: Some(ResumeRejectReason::MissingCheckpoint),
-                next_action: Some(NextAction::Reindex),
-                detail: Some("missing checkpoint".to_string()),
-                updated_at_unix_ms: 1010,
-            }),
-        };
-        let json = serde_json::to_string(&run).unwrap();
-        let deserialized: IndexRun = serde_json::from_str(&json).unwrap();
-        assert_eq!(run, deserialized);
-    }
-
-    #[test]
-    fn test_run_health_serde_roundtrip() {
-        for variant in [
-            RunHealth::Healthy,
-            RunHealth::Degraded,
-            RunHealth::Unhealthy,
-        ] {
-            let json = serde_json::to_string(&variant).unwrap();
-            let deserialized: RunHealth = serde_json::from_str(&json).unwrap();
-            assert_eq!(variant, deserialized);
-        }
-    }
-
-    #[test]
-    fn test_run_progress_snapshot_serde_roundtrip() {
-        let snapshot = RunProgressSnapshot {
-            phase: RunPhase::Processing,
-            total_files: 100,
-            files_processed: 80,
-            files_failed: 5,
-        };
-        let json = serde_json::to_string(&snapshot).unwrap();
-        let deserialized: RunProgressSnapshot = serde_json::from_str(&json).unwrap();
-        assert_eq!(snapshot, deserialized);
-    }
-
-    #[test]
-    fn test_file_outcome_summary_serde_roundtrip() {
-        let summary = FileOutcomeSummary {
-            total_committed: 50,
-            processed_ok: 40,
-            partial_parse: 7,
-            failed: 3,
-        };
-        let json = serde_json::to_string(&summary).unwrap();
-        let deserialized: FileOutcomeSummary = serde_json::from_str(&json).unwrap();
-        assert_eq!(summary, deserialized);
-    }
-
-    #[test]
-    fn test_run_status_report_serde_roundtrip() {
-        let report = RunStatusReport {
-            run: IndexRun {
-                run_id: "run-1".into(),
-                repo_id: "repo-1".into(),
-                mode: IndexRunMode::Full,
-                status: IndexRunStatus::Succeeded,
-                requested_at_unix_ms: 1000,
-                started_at_unix_ms: Some(1001),
-                finished_at_unix_ms: Some(2000),
-                idempotency_key: None,
-                request_hash: None,
-                checkpoint_cursor: None,
-                error_summary: None,
-                not_yet_supported: None,
-                prior_run_id: None,
-                description: None,
-                recovery_state: Some(RunRecoveryState {
-                    state: RecoveryStateKind::Resumed,
-                    rejection_reason: None,
-                    next_action: None,
-                    detail: None,
-                    updated_at_unix_ms: 1500,
-                }),
-            },
-            health: RunHealth::Healthy,
-            is_active: false,
-            progress: Some(RunProgressSnapshot {
-                phase: RunPhase::Complete,
-                total_files: 10,
-                files_processed: 10,
-                files_failed: 0,
-            }),
-            file_outcome_summary: Some(FileOutcomeSummary {
-                total_committed: 10,
-                processed_ok: 10,
-                partial_parse: 0,
-                failed: 0,
-            }),
-            classification: super::super::health::ActionClassification {
-                condition: super::super::health::ActionCondition::TerminalComplete,
-                action_required: false,
-                next_action: None,
-                detail: "Run run-1 succeeded.".to_string(),
-            },
-            next_action: None,
-            action_required: None,
-        };
-        let json = serde_json::to_string(&report).unwrap();
-        let deserialized: RunStatusReport = serde_json::from_str(&json).unwrap();
-        assert_eq!(report, deserialized);
-    }
-
-    #[test]
-    fn test_run_phase_serde_roundtrip() {
-        let variants = [
-            RunPhase::Discovering,
-            RunPhase::Processing,
-            RunPhase::Finalizing,
-            RunPhase::Complete,
-        ];
-        for phase in &variants {
-            let json = serde_json::to_string(phase).unwrap();
-            let deserialized: RunPhase = serde_json::from_str(&json).unwrap();
-            assert_eq!(*phase, deserialized);
-        }
-    }
-
-    #[test]
-    fn test_run_phase_serde_snake_case() {
-        assert_eq!(
-            serde_json::to_string(&RunPhase::Discovering).unwrap(),
-            "\"discovering\""
-        );
-        assert_eq!(
-            serde_json::to_string(&RunPhase::Processing).unwrap(),
-            "\"processing\""
-        );
-        assert_eq!(
-            serde_json::to_string(&RunPhase::Finalizing).unwrap(),
-            "\"finalizing\""
-        );
-        assert_eq!(
-            serde_json::to_string(&RunPhase::Complete).unwrap(),
-            "\"complete\""
-        );
-    }
-
-    #[test]
-    fn test_run_phase_u8_conversion_round_trips() {
-        let variants = [
-            RunPhase::Discovering,
-            RunPhase::Processing,
-            RunPhase::Finalizing,
-            RunPhase::Complete,
-        ];
-        for (i, phase) in variants.iter().enumerate() {
-            assert_eq!(phase.to_u8(), i as u8);
-            assert_eq!(RunPhase::from_u8(i as u8), *phase);
-        }
-    }
-
-    #[test]
-    fn test_run_phase_from_u8_unknown_defaults_to_complete() {
-        assert_eq!(RunPhase::from_u8(4), RunPhase::Complete);
-        assert_eq!(RunPhase::from_u8(255), RunPhase::Complete);
-    }
-
-    #[test]
-    fn test_run_progress_snapshot_with_phase_serde_roundtrip() {
-        let snapshot = RunProgressSnapshot {
-            phase: RunPhase::Finalizing,
-            total_files: 50,
-            files_processed: 48,
-            files_failed: 2,
-        };
-        let json = serde_json::to_string(&snapshot).unwrap();
-        let deserialized: RunProgressSnapshot = serde_json::from_str(&json).unwrap();
-        assert_eq!(snapshot, deserialized);
-    }
-
-    #[test]
-    fn test_roundtrip_index_run_with_prior_run_id() {
-        let run = IndexRun {
-            run_id: "reindex-run".to_string(),
-            repo_id: "repo-1".to_string(),
-            mode: IndexRunMode::Reindex,
-            status: IndexRunStatus::Queued,
-            requested_at_unix_ms: 2000,
-            started_at_unix_ms: None,
-            finished_at_unix_ms: None,
-            idempotency_key: None,
-            request_hash: None,
-            checkpoint_cursor: None,
-            error_summary: None,
-            not_yet_supported: None,
-            prior_run_id: Some("previous-run-id".to_string()),
-            description: None,
-            recovery_state: None,
-        };
-        let json = serde_json::to_string(&run).unwrap();
-        let deserialized: IndexRun = serde_json::from_str(&json).unwrap();
-        assert_eq!(run, deserialized);
-        assert_eq!(
-            deserialized.prior_run_id,
-            Some("previous-run-id".to_string())
-        );
-    }
-
-    #[test]
-    fn test_deserialize_index_run_without_prior_run_id_backward_compat() {
-        let json = r#"{
-            "run_id": "old-run",
-            "repo_id": "repo-1",
-            "mode": "full",
-            "status": "succeeded",
-            "requested_at_unix_ms": 1000,
-            "started_at_unix_ms": 1001,
-            "finished_at_unix_ms": 2000,
-            "idempotency_key": null,
-            "request_hash": null,
-            "checkpoint_cursor": null,
-            "error_summary": null
-        }"#;
-        let run: IndexRun = serde_json::from_str(json).unwrap();
-        assert_eq!(run.run_id, "old-run");
-        assert_eq!(run.prior_run_id, None);
-        assert_eq!(run.not_yet_supported, None);
-        assert_eq!(run.recovery_state, None);
-    }
-
-    #[test]
-    fn test_run_recovery_state_serde_roundtrip() {
-        let recovery = RunRecoveryState {
-            state: RecoveryStateKind::ResumeRejected,
-            rejection_reason: Some(ResumeRejectReason::MissingDurableOutputs),
-            next_action: Some(NextAction::Reindex),
-            detail: Some("missing durable file record for src/lib.rs".to_string()),
-            updated_at_unix_ms: 1234,
-        };
-        let json = serde_json::to_string(&recovery).unwrap();
-        let deserialized: RunRecoveryState = serde_json::from_str(&json).unwrap();
-        assert_eq!(recovery, deserialized);
-    }
-
-    #[test]
-    fn test_resume_run_outcome_serde_roundtrip() {
-        let run = IndexRun {
-            run_id: "run-1".to_string(),
-            repo_id: "repo-1".to_string(),
-            mode: IndexRunMode::Full,
-            status: IndexRunStatus::Running,
-            requested_at_unix_ms: 1000,
-            started_at_unix_ms: Some(1001),
-            finished_at_unix_ms: None,
-            idempotency_key: None,
-            request_hash: None,
-            checkpoint_cursor: Some("src/main.rs".to_string()),
-            error_summary: None,
-            not_yet_supported: None,
-            prior_run_id: None,
-            description: None,
-            recovery_state: Some(RunRecoveryState {
-                state: RecoveryStateKind::Resumed,
-                rejection_reason: None,
-                next_action: None,
-                detail: None,
-                updated_at_unix_ms: 1200,
-            }),
-        };
-        let outcome = ResumeRunOutcome::Resumed {
-            run,
-            checkpoint: Checkpoint {
-                run_id: "run-1".to_string(),
-                cursor: "src/main.rs".to_string(),
-                files_processed: 1,
-                symbols_written: 2,
-                files_failed: 0,
-                created_at_unix_ms: 1100,
-            },
-            durable_files_skipped: 1,
-        };
-        let json = serde_json::to_string(&outcome).unwrap();
-        let deserialized: ResumeRunOutcome = serde_json::from_str(&json).unwrap();
-        assert_eq!(outcome, deserialized);
-    }
-
-    #[test]
-    fn test_reindex_mode_serde_roundtrip() {
-        let mode = IndexRunMode::Reindex;
-        let json = serde_json::to_string(&mode).unwrap();
-        assert_eq!(json, "\"reindex\"");
-        let deserialized: IndexRunMode = serde_json::from_str(&json).unwrap();
-        assert_eq!(mode, deserialized);
-    }
-
-    // --- Operational history tests (Story 4.6) ---
-
-    #[test]
-    fn test_event_name_run_started() {
-        let event = OperationalEvent {
-            repo_id: "r1".to_string(),
-            kind: OperationalEventKind::RunStarted {
-                run_id: "run-1".to_string(),
-                mode: IndexRunMode::Full,
-            },
-            timestamp_unix_ms: 1000,
-        };
-        assert_eq!(event.event_name(), "run.started");
-    }
-
-    #[test]
-    fn test_event_name_run_completed_variants() {
-        let make = |status: IndexRunStatus| OperationalEvent {
-            repo_id: "r1".to_string(),
-            kind: OperationalEventKind::RunCompleted {
-                run_id: "run-1".to_string(),
-                status,
-                files_processed: 10,
-                error_summary: None,
-            },
-            timestamp_unix_ms: 2000,
-        };
-        assert_eq!(make(IndexRunStatus::Succeeded).event_name(), "run.succeeded");
-        assert_eq!(make(IndexRunStatus::Failed).event_name(), "run.failed");
-        assert_eq!(make(IndexRunStatus::Cancelled).event_name(), "run.cancelled");
-        assert_eq!(make(IndexRunStatus::Aborted).event_name(), "run.aborted");
-        assert_eq!(make(IndexRunStatus::Running).event_name(), "run.completed");
-    }
-
-    #[test]
-    fn test_event_name_checkpoint() {
-        let event = OperationalEvent {
-            repo_id: "r1".to_string(),
-            kind: OperationalEventKind::CheckpointCreated {
-                run_id: "run-1".to_string(),
-                cursor: "file-5".to_string(),
-                files_committed: 5,
-            },
-            timestamp_unix_ms: 3000,
-        };
-        assert_eq!(event.event_name(), "checkpoint.created");
-    }
-
-    #[test]
-    fn test_event_name_repair() {
-        let event = OperationalEvent {
-            repo_id: "r1".to_string(),
-            kind: OperationalEventKind::RepairPerformed {
-                scope: RepairScope::Repository,
-                previous_status: RepositoryStatus::Degraded,
-                outcome: RepairOutcome::Restored,
-                detail: "ok".to_string(),
-            },
-            timestamp_unix_ms: 4000,
-        };
-        assert_eq!(event.event_name(), "repair.completed");
-    }
-
-    #[test]
-    fn test_event_name_integrity_variants() {
-        let make = |kind: IntegrityEventKind| OperationalEvent {
-            repo_id: "r1".to_string(),
-            kind: OperationalEventKind::IntegrityEvent {
-                run_id: None,
-                relative_path: None,
-                kind,
-                detail: "test".to_string(),
-            },
-            timestamp_unix_ms: 5000,
-        };
-        assert_eq!(
-            make(IntegrityEventKind::Quarantined).event_name(),
-            "integrity.quarantined"
-        );
-        assert_eq!(
-            make(IntegrityEventKind::VerificationFailed).event_name(),
-            "integrity.verification_failed"
-        );
-        assert_eq!(
-            make(IntegrityEventKind::SuspectDetected).event_name(),
-            "integrity.suspect_detected"
-        );
-    }
-
-    #[test]
-    fn test_event_name_startup_sweep() {
-        let event = OperationalEvent {
-            repo_id: "r1".to_string(),
-            kind: OperationalEventKind::StartupSweepCompleted {
-                stale_runs_found: 2,
-                actions_taken: vec!["a".to_string()],
-            },
-            timestamp_unix_ms: 6000,
-        };
-        assert_eq!(event.event_name(), "startup.sweep_completed");
-    }
-
-    #[test]
-    fn test_event_name_repository_status_changed() {
-        let event = OperationalEvent {
-            repo_id: "r1".to_string(),
-            kind: OperationalEventKind::RepositoryStatusChanged {
-                previous: RepositoryStatus::Ready,
-                current: RepositoryStatus::Invalidated,
-                trigger: "user request".to_string(),
-            },
-            timestamp_unix_ms: 7000,
-        };
-        assert_eq!(event.event_name(), "repository.status_changed");
-    }
-
-    #[test]
-    fn test_event_name_run_interrupted() {
-        let event = OperationalEvent {
-            repo_id: "r1".to_string(),
-            kind: OperationalEventKind::RunInterrupted {
-                run_id: "run-1".to_string(),
-                reason: "stale".to_string(),
-            },
-            timestamp_unix_ms: 8000,
-        };
-        assert_eq!(event.event_name(), "run.interrupted");
-    }
-
-    #[test]
-    fn test_operational_event_serde_roundtrip() {
-        let event = OperationalEvent {
-            repo_id: "repo-1".to_string(),
-            kind: OperationalEventKind::RunStarted {
-                run_id: "run-1".to_string(),
-                mode: IndexRunMode::Full,
-            },
-            timestamp_unix_ms: 1000,
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let deserialized: OperationalEvent = serde_json::from_str(&json).unwrap();
-        assert_eq!(event, deserialized);
-    }
-
-    #[test]
-    fn test_operational_event_repair_serde_roundtrip() {
-        let event = OperationalEvent {
-            repo_id: "repo-1".to_string(),
-            kind: OperationalEventKind::RepairPerformed {
-                scope: RepairScope::Repository,
-                previous_status: RepositoryStatus::Degraded,
-                outcome: RepairOutcome::Restored,
-                detail: "fixed".to_string(),
-            },
-            timestamp_unix_ms: 2000,
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let deserialized: OperationalEvent = serde_json::from_str(&json).unwrap();
-        assert_eq!(event, deserialized);
-    }
-
-    #[test]
-    fn test_repair_event_to_operational_event_roundtrip() {
-        let repair = RepairEvent {
-            repo_id: "repo-1".to_string(),
-            scope: RepairScope::Repository,
-            previous_status: RepositoryStatus::Degraded,
-            outcome: RepairOutcome::Restored,
-            detail: "fixed".to_string(),
-            timestamp_unix_ms: 3000,
-        };
-        let op_event = repair.to_operational_event();
-        assert_eq!(op_event.repo_id, "repo-1");
-        assert_eq!(op_event.timestamp_unix_ms, 3000);
-        assert_eq!(op_event.event_name(), "repair.completed");
-
-        let back = op_event.to_repair_event().unwrap();
-        assert_eq!(back, repair);
-    }
-
-    #[test]
-    fn test_to_repair_event_returns_none_for_non_repair() {
-        let event = OperationalEvent {
-            repo_id: "repo-1".to_string(),
-            kind: OperationalEventKind::RunStarted {
-                run_id: "run-1".to_string(),
-                mode: IndexRunMode::Full,
-            },
-            timestamp_unix_ms: 1000,
-        };
-        assert!(event.to_repair_event().is_none());
-    }
-
-    #[test]
-    fn test_operational_event_filter_defaults() {
-        let filter = OperationalEventFilter::default();
-        assert!(filter.category.is_none());
-        assert!(filter.since_unix_ms.is_none());
-        assert!(filter.limit.is_none());
-    }
-
-    #[test]
-    fn test_event_no_raw_source_content() {
-        // Privacy: operational events must not contain raw source code
-        let event = OperationalEvent {
-            repo_id: "repo-1".to_string(),
-            kind: OperationalEventKind::RunCompleted {
-                run_id: "run-1".to_string(),
-                status: IndexRunStatus::Succeeded,
-                files_processed: 42,
-                error_summary: None,
-            },
-            timestamp_unix_ms: 1000,
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        // Should only contain identifiers, not file contents
-        assert!(!json.contains("fn "));
-        assert!(!json.contains("pub struct"));
-        assert!(json.contains("run-1"));
-        assert!(json.contains("repo-1"));
-    }
-
-    #[test]
-    fn test_integrity_event_does_not_contain_source_content() {
-        // Task 6.4.1: IntegrityEvent detail uses blob_id and path, not raw bytes
-        let events = vec![
-            OperationalEvent {
-                repo_id: "repo-1".to_string(),
-                kind: OperationalEventKind::IntegrityEvent {
-                    run_id: Some("run-1".to_string()),
-                    relative_path: Some("src/main.rs".to_string()),
-                    kind: IntegrityEventKind::Quarantined,
-                    detail: "blob_id/content_hash mismatch".to_string(),
-                },
-                timestamp_unix_ms: 1000,
-            },
-            OperationalEvent {
-                repo_id: "repo-1".to_string(),
-                kind: OperationalEventKind::IntegrityEvent {
-                    run_id: Some("run-2".to_string()),
-                    relative_path: Some("src/lib.rs".to_string()),
-                    kind: IntegrityEventKind::VerificationFailed,
-                    detail: "blob integrity verification failed: content hash mismatch".to_string(),
-                },
-                timestamp_unix_ms: 2000,
-            },
-            OperationalEvent {
-                repo_id: "repo-1".to_string(),
-                kind: OperationalEventKind::IntegrityEvent {
-                    run_id: Some("run-3".to_string()),
-                    relative_path: Some("src/app.rs".to_string()),
-                    kind: IntegrityEventKind::SuspectDetected,
-                    detail: "quarantined file failed re-verification during repair".to_string(),
-                },
-                timestamp_unix_ms: 3000,
+            SymbolRecord {
+                name: "inner".to_string(),
+                kind: SymbolKind::Function,
+                depth: 1,
+                sort_order: 1,
+                byte_range: (30, 60),
+                line_range: (3, 6),
             },
         ];
-
-        for event in &events {
-            let json = serde_json::to_string(event).unwrap();
-            // Must contain identifiers
-            assert!(json.contains("repo-1"));
-            // Must NOT contain source code patterns
-            assert!(!json.contains("fn "), "event detail must not contain source code");
-            assert!(!json.contains("pub struct"), "event detail must not contain source code");
-            assert!(!json.contains("import "), "event detail must not contain source code");
-            assert!(!json.contains("class "), "event detail must not contain source code");
-        }
+        // Reference at line 4 is inside both — should return inner (index 1)
+        let idx = find_enclosing_symbol(&symbols, 4);
+        assert_eq!(idx, Some(1), "should return innermost enclosing symbol");
     }
 
     #[test]
-    fn test_event_serialization_excludes_raw_content_fields() {
-        // Task 6.4.2: serialized event JSON contains no field named content, source, or bytes
-        let event = OperationalEvent {
-            repo_id: "repo-1".to_string(),
-            kind: OperationalEventKind::IntegrityEvent {
-                run_id: Some("run-1".to_string()),
-                relative_path: Some("src/main.rs".to_string()),
-                kind: IntegrityEventKind::Quarantined,
-                detail: "blob_id/content_hash mismatch".to_string(),
-            },
-            timestamp_unix_ms: 1000,
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-
-        // Recursively check no field is named "content", "source", or "bytes"
-        fn check_no_forbidden_keys(val: &serde_json::Value) {
-            if let serde_json::Value::Object(map) = val {
-                for (key, child) in map {
-                    assert_ne!(key, "content", "serialized event must not have a 'content' field");
-                    assert_ne!(key, "source", "serialized event must not have a 'source' field");
-                    assert_ne!(key, "bytes", "serialized event must not have a 'bytes' field");
-                    assert_ne!(key, "source_bytes", "serialized event must not have a 'source_bytes' field");
-                    check_no_forbidden_keys(child);
-                }
-            } else if let serde_json::Value::Array(arr) = val {
-                for child in arr {
-                    check_no_forbidden_keys(child);
-                }
-            }
-        }
-        check_no_forbidden_keys(&parsed);
-    }
-
-    // --- Task 5.5: RunStatusReport enrichment tests ---
-
-    #[test]
-    fn test_run_status_report_includes_classification() {
-        let report = RunStatusReport {
-            run: IndexRun {
-                run_id: "run-1".into(),
-                repo_id: "repo-1".into(),
-                mode: IndexRunMode::Full,
-                status: IndexRunStatus::Succeeded,
-                requested_at_unix_ms: 1000,
-                started_at_unix_ms: Some(1001),
-                finished_at_unix_ms: Some(2000),
-                idempotency_key: None,
-                request_hash: None,
-                checkpoint_cursor: None,
-                error_summary: None,
-                not_yet_supported: None,
-                prior_run_id: None,
-                description: None,
-                recovery_state: None,
-            },
-            health: RunHealth::Healthy,
-            is_active: false,
-            progress: None,
-            file_outcome_summary: None,
-            classification: super::super::health::ActionClassification {
-                condition: super::super::health::ActionCondition::TerminalComplete,
-                action_required: false,
-                next_action: None,
-                detail: "Run run-1 succeeded.".to_string(),
-            },
-            next_action: None,
-            action_required: None,
-        };
-
-        let value = serde_json::to_value(&report).unwrap();
-        assert_eq!(value["classification"]["condition"], "terminal_complete");
-        assert_eq!(value["classification"]["action_required"], false);
-        assert!(value["classification"]["next_action"].is_null());
-        // H2 fix: action_required and next_action omitted from JSON when None
-        assert!(
-            value.get("action_required").is_none()
-                || value["action_required"].is_null(),
-            "action_required should be omitted or null when None"
-        );
-        assert!(
-            value.get("next_action").is_none()
-                || value["next_action"].is_null(),
-            "next_action should be omitted when None"
-        );
-    }
-
-    #[test]
-    fn test_run_status_report_backward_compat() {
-        let report = RunStatusReport {
-            run: IndexRun {
-                run_id: "run-2".into(),
-                repo_id: "repo-2".into(),
-                mode: IndexRunMode::Full,
-                status: IndexRunStatus::Failed,
-                requested_at_unix_ms: 1000,
-                started_at_unix_ms: Some(1001),
-                finished_at_unix_ms: Some(2000),
-                idempotency_key: None,
-                request_hash: None,
-                checkpoint_cursor: None,
-                error_summary: Some("disk full".to_string()),
-                not_yet_supported: None,
-                prior_run_id: None,
-                description: None,
-                recovery_state: None,
-            },
-            health: RunHealth::Unhealthy,
-            is_active: false,
-            progress: None,
-            file_outcome_summary: None,
-            classification: super::super::health::ActionClassification {
-                condition: super::super::health::ActionCondition::Failed,
-                action_required: true,
-                next_action: Some(NextAction::Repair),
-                detail: "Run run-2 failed: disk full.".to_string(),
-            },
-            next_action: Some(NextAction::Repair),
-            action_required: Some("Run run-2 failed: disk full.".to_string()),
-        };
-
-        let value = serde_json::to_value(&report).unwrap();
-        assert_eq!(value["action_required"], "Run run-2 failed: disk full.");
-        assert_eq!(value["next_action"], "repair");
-    }
-
-    #[test]
-    fn test_run_status_report_next_action_field() {
-        let report = RunStatusReport {
-            run: IndexRun {
-                run_id: "run-3".into(),
-                repo_id: "repo-3".into(),
-                mode: IndexRunMode::Full,
-                status: IndexRunStatus::Interrupted,
-                requested_at_unix_ms: 1000,
-                started_at_unix_ms: Some(1001),
-                finished_at_unix_ms: None,
-                idempotency_key: None,
-                request_hash: None,
-                checkpoint_cursor: Some("file_a.rs".to_string()),
-                error_summary: None,
-                not_yet_supported: None,
-                prior_run_id: None,
-                description: None,
-                recovery_state: None,
-            },
-            health: RunHealth::Healthy,
-            is_active: false,
-            progress: None,
-            file_outcome_summary: None,
-            classification: super::super::health::ActionClassification {
-                condition: super::super::health::ActionCondition::Interrupted,
-                action_required: true,
-                next_action: Some(NextAction::Resume),
-                detail: "Run run-3 was interrupted.".to_string(),
-            },
-            next_action: Some(NextAction::Resume),
-            action_required: Some("Run run-3 was interrupted.".to_string()),
-        };
-
-        assert_eq!(report.next_action, report.classification.next_action);
+    fn test_find_enclosing_symbol_none_at_module_level() {
+        let symbols = vec![SymbolRecord {
+            name: "foo".to_string(),
+            kind: SymbolKind::Function,
+            depth: 0,
+            sort_order: 0,
+            byte_range: (50, 100),
+            line_range: (5, 10),
+        }];
+        // Reference at line 0 is not inside any symbol
+        let idx = find_enclosing_symbol(&symbols, 0);
+        assert_eq!(idx, None, "should return None when not inside any symbol");
     }
 }
