@@ -209,7 +209,10 @@ Current query behavior implemented in the server:
 
 - `search_symbols` supports substring matching and an optional `kind` filter.
 - `search_text` supports literal search, multi-term OR via `terms`, and regex mode.
-- `find_references` and `find_dependents` include C# and Java type-usage heuristics.
+- `find_dependents` prefers concrete non-import symbol usage over import stubs when matching module or namespace evidence exists.
+- `find_dependents` includes namespace-aware type-usage matching for C# and Java and module-backed symbol/type usage attribution for files that import the target module.
+- Rust grouped `use crate::{...}` imports are expanded during reference extraction.
+- `get_file_context` builds its key-reference section from attributed file dependents rather than global bare-name matches.
 - `get_context_bundle` returns symbol source plus caller, callee, and type-usage context.
 - `what_changed` supports uncommitted git changes, git-ref comparisons, and explicit timestamp mode.
 
