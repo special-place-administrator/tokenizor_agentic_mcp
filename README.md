@@ -16,21 +16,41 @@ All enrichment happens in <100ms via an HTTP sidecar that shares memory with the
 
 ## Installation
 
-**Prerequisite:** Node.js 18+ (for `npx`). No Rust toolchain needed.
+**Prerequisite:** Node.js 18+. No Rust toolchain needed.
 
 Prebuilt binaries: **Windows x64** and **Linux x64**.
 
-### Claude Code (recommended)
+### Claude Code
+
+Three commands. Run them in order.
+
+**Step 1 — Install globally**
 
 ```bash
-# Install as MCP server
-claude mcp add tokenizor -- npx -y tokenizor-mcp
-
-# Install hooks for automatic enrichment
-npx -y tokenizor-mcp init
+npm install -g tokenizor-mcp
 ```
 
-Auto-approve tools (recommended — all operations are read-only or local indexing):
+> **Do NOT use `npx`.** The next step writes the binary's absolute path into your Claude Code settings for hook invocation. `npx` runs from a temporary cache directory that gets cleaned up, which silently breaks your hooks. A global install gives a stable path that survives across sessions.
+
+**Step 2 — Register the MCP server**
+
+```bash
+claude mcp add tokenizor -- tokenizor-mcp
+```
+
+This tells Claude Code to launch tokenizor as an MCP server on stdio.
+
+**Step 3 — Install hooks**
+
+```bash
+tokenizor-mcp init
+```
+
+This writes PostToolUse and SessionStart hooks into `~/.claude/settings.json`. The hooks call the tokenizor binary to enrich Read/Edit/Write/Grep results with symbol context automatically.
+
+**Step 4 (optional) — Auto-approve tools**
+
+All tokenizor tools are read-only or local indexing. To skip approval prompts, add this to `~/.claude/settings.json` or your project's `.claude/settings.json`:
 
 ```json
 {
@@ -40,7 +60,13 @@ Auto-approve tools (recommended — all operations are read-only or local indexi
 }
 ```
 
-Add to `~/.claude/settings.json` or `.claude/settings.json`.
+**Verify it works:**
+
+Start a new Claude Code session in any git repo. You should see:
+- No errors on startup (the SessionStart hook fires)
+- When you read a file, extra symbol context appears after the file contents
+
+If hooks aren't firing, run `tokenizor-mcp init` again and check that `~/.claude/settings.json` contains hook entries with a stable path (not one containing `_npx` or `npm-cache`).
 
 ### Cursor
 
@@ -59,11 +85,29 @@ Add to `.cursor/mcp.json`:
 
 On Windows, use `"command": "cmd"` and `"args": ["/c", "npx", "-y", "tokenizor-mcp"]`.
 
-### Any MCP client
+`npx` is fine for Cursor — MCP servers are launched fresh each session, so there are no persisted hook paths to break.
+
+### Other MCP clients
 
 Standard stdio MCP server:
-- **Command:** `npx -y tokenizor-mcp`
-- No environment variables required. Auto-indexes on startup when `.git` is present.
+- **Command:** `tokenizor-mcp` (if installed globally) or `npx -y tokenizor-mcp`
+- No environment variables required
+- Auto-indexes on startup when `.git` is present in the working directory
+
+### Updating
+
+```bash
+npm update -g tokenizor-mcp
+tokenizor-mcp init          # re-run to update hook paths if the binary moved
+```
+
+### Uninstalling
+
+```bash
+npm uninstall -g tokenizor-mcp
+```
+
+Then remove the tokenizor entries from `~/.claude/settings.json` (any hook whose command contains `tokenizor`) and run `claude mcp remove tokenizor`.
 
 ## MCP Tools (14)
 

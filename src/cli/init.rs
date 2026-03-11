@@ -128,14 +128,17 @@ fn build_session_start_entries(binary_path: &str) -> Vec<Value> {
 // Merge helpers
 // ---------------------------------------------------------------------------
 
-/// Returns `true` if a hook entry array contains the substring "tokenizor hook"
-/// in any of its `command` fields.
+/// Returns `true` if a hook entry array contains a tokenizor hook command.
+///
+/// The binary may be named `tokenizor` or `tokenizor-mcp` (with optional `.exe`),
+/// so we check for "tokenizor" anywhere in the command AND " hook" as the
+/// subcommand indicator.
 fn is_tokenizor_entry(entry: &Value) -> bool {
     if let Some(hooks) = entry["hooks"].as_array() {
         hooks.iter().any(|h| {
             h["command"]
                 .as_str()
-                .map(|cmd| cmd.contains("tokenizor hook"))
+                .map(|cmd| cmd.contains("tokenizor") && cmd.contains(" hook"))
                 .unwrap_or(false)
         })
     } else {
@@ -190,11 +193,14 @@ fn discover_binary_path() -> String {
     match std::env::current_exe() {
         Ok(path) => {
             let s = path.display().to_string();
-            // Warn if the binary looks like it's running through a node wrapper.
-            if s.contains("node_modules") || s.ends_with(".cmd") {
+            // Warn if the binary is running from an ephemeral npx cache (will break
+            // when the cache is cleaned). Global npm installs under node_modules are
+            // fine — only npx cache paths and .cmd wrappers are problematic.
+            let is_npx_cache = s.contains("_npx") || s.contains("npx-cache");
+            if is_npx_cache || s.ends_with(".cmd") {
                 eprintln!(
                     "warning: tokenizor binary path looks like a node wrapper ({s}); \
-                     hooks may not work correctly"
+                     hooks may not work correctly. Install globally instead: npm install -g tokenizor-mcp"
                 );
             }
             // Normalise backslashes to forward slashes for JSON command strings.
@@ -428,6 +434,15 @@ mod tests {
             "hooks": [{"type": "command", "command": "/path/tokenizor hook read"}]
         });
         assert!(is_tokenizor_entry(&entry));
+    }
+
+    #[test]
+    fn test_is_tokenizor_entry_detects_tokenizor_mcp_binary() {
+        let entry = json!({
+            "matcher": "Read|Edit|Write|Grep",
+            "hooks": [{"type": "command", "command": "C:/Users/user/node_modules/tokenizor-mcp/bin/tokenizor-mcp.exe hook"}]
+        });
+        assert!(is_tokenizor_entry(&entry), "must detect tokenizor-mcp.exe binary name");
     }
 
     #[test]
