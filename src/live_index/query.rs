@@ -1,9 +1,123 @@
 use std::time::{Duration, SystemTime};
 
-use crate::domain::{ReferenceKind, ReferenceRecord, SymbolRecord};
+use crate::domain::{LanguageId, ReferenceKind, ReferenceRecord, SymbolRecord};
 use crate::watcher::{WatcherInfo, WatcherState};
 
 use super::store::{IndexedFile, IndexState, LiveIndex, ParseStatus};
+
+// ---------------------------------------------------------------------------
+// Module path resolution for find_dependents
+// ---------------------------------------------------------------------------
+
+/// Resolve the logical module path for a file based on language conventions.
+///
+/// Returns `None` if the file doesn't follow a recognized module convention.
+///
+/// Examples (Rust):
+///   "src/lib.rs"              → Some("crate")
+///   "src/main.rs"             → Some("crate")
+///   "src/error.rs"            → Some("crate::error")
+///   "src/live_index/mod.rs"   → Some("crate::live_index")
+///   "src/live_index/store.rs" → Some("crate::live_index::store")
+///
+/// Examples (Python):
+///   "src/__init__.py"         → Some("src")
+///   "src/foo.py"              → Some("src.foo")
+///   "src/foo/__init__.py"     → Some("src.foo")
+///
+/// Examples (JS/TS):
+///   "src/index.js"            → Some("src")
+///   "src/utils/index.ts"      → Some("src/utils")
+fn resolve_module_path(file_path: &str, language: &LanguageId) -> Option<String> {
+    let path = std::path::Path::new(file_path);
+
+    match language {
+        LanguageId::Rust => {
+            // Strip "src/" prefix; files outside src/ don't have crate module paths.
+            let stripped = path.strip_prefix("src").ok()?;
+            let mut components: Vec<String> = stripped
+                .components()
+                .filter_map(|c| c.as_os_str().to_str().map(String::from))
+                .collect();
+
+            // Remove extension from last component
+            if let Some(last) = components.last_mut() {
+                if let Some(stem) = std::path::Path::new(last.as_str())
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                {
+                    *last = stem.to_string();
+                }
+            }
+
+            // Drop "lib", "main", "mod" — these map to their parent module
+            if matches!(components.last().map(|s| s.as_str()), Some("lib" | "main" | "mod")) {
+                components.pop();
+            }
+
+            if components.is_empty() {
+                Some("crate".to_string())
+            } else {
+                Some(format!("crate::{}", components.join("::")))
+            }
+        }
+        LanguageId::Python => {
+            let mut components: Vec<String> = path
+                .components()
+                .filter_map(|c| c.as_os_str().to_str().map(String::from))
+                .collect();
+
+            // Remove extension from last component
+            if let Some(last) = components.last_mut() {
+                if let Some(stem) = std::path::Path::new(last.as_str())
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                {
+                    *last = stem.to_string();
+                }
+            }
+
+            // Drop __init__ — maps to the package (parent directory)
+            if matches!(components.last().map(|s| s.as_str()), Some("__init__")) {
+                components.pop();
+            }
+
+            if components.is_empty() {
+                None
+            } else {
+                Some(components.join("."))
+            }
+        }
+        LanguageId::JavaScript | LanguageId::TypeScript => {
+            let mut components: Vec<String> = path
+                .components()
+                .filter_map(|c| c.as_os_str().to_str().map(String::from))
+                .collect();
+
+            // Remove extension from last component
+            if let Some(last) = components.last_mut() {
+                if let Some(stem) = std::path::Path::new(last.as_str())
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                {
+                    *last = stem.to_string();
+                }
+            }
+
+            // Drop "index" — maps to the directory
+            if matches!(components.last().map(|s| s.as_str()), Some("index")) {
+                components.pop();
+            }
+
+            if components.is_empty() {
+                None
+            } else {
+                Some(components.join("/"))
+            }
+        }
+        _ => None,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Built-in type filter lists (per-language)
@@ -300,10 +414,13 @@ impl LiveIndex {
 
     /// Find all files that import (depend on) `target_path`.
     ///
-    /// An import reference in file F is treated as a dependency on `target_path` when
-    /// the import's `name` (or `qualified_name`) contains the file stem of `target_path`
-    /// as a path segment. This is a heuristic match sufficient for most build-system
-    /// import styles (e.g. `import db` matches `src/db.rs`, `use crate::db` matches too).
+    /// Uses two strategies:
+    /// 1. **Stem matching** — the import's `name`/`qualified_name` contains the file stem
+    ///    as a path segment (e.g. `import db` matches `src/db.rs`).
+    /// 2. **Module path matching** — resolves the file to its logical module path
+    ///    (e.g. `src/live_index/mod.rs` → `crate::live_index`) and checks if any import
+    ///    starts with that module path. This handles `lib.rs`, `mod.rs`, `__init__.py`,
+    ///    and `index.js`/`index.ts` which stem matching misses.
     ///
     /// Returns a `Vec` of `(importing_file_path, &import_reference)` tuples.
     pub fn find_dependents_for_file(
@@ -315,6 +432,23 @@ impl LiveIndex {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or(target_path);
+
+        // Resolve the logical module path for the target file.
+        let module_path = self
+            .files
+            .get(target_path)
+            .and_then(|f| resolve_module_path(target_path, &f.language));
+
+        // Module-path separator for matching (language-dependent).
+        let module_sep = self
+            .files
+            .get(target_path)
+            .map(|f| match f.language {
+                LanguageId::Python => ".",
+                LanguageId::JavaScript | LanguageId::TypeScript => "/",
+                _ => "::",
+            })
+            .unwrap_or("::");
 
         let mut results = Vec::new();
 
@@ -329,8 +463,8 @@ impl LiveIndex {
                     continue;
                 }
 
-                // Check if the import name (or qualified_name) contains the stem as a segment.
-                let matches_import = |text: &str| -> bool {
+                // Strategy 1: stem matching (original heuristic).
+                let matches_stem = |text: &str| -> bool {
                     text == stem
                         || text.ends_with(&format!("/{stem}"))
                         || text.ends_with(&format!("::{stem}"))
@@ -339,11 +473,22 @@ impl LiveIndex {
                         || text.contains(&format!("::{stem}::"))
                 };
 
-                let found = matches_import(&reference.name)
+                // Strategy 2: module path matching.
+                let matches_module = |text: &str| -> bool {
+                    if let Some(ref mp) = module_path {
+                        return text == mp.as_str()
+                            || text.starts_with(&format!("{mp}{module_sep}"));
+                    }
+                    false
+                };
+
+                let check = |text: &str| matches_stem(text) || matches_module(text);
+
+                let found = check(&reference.name)
                     || reference
                         .qualified_name
                         .as_deref()
-                        .map(matches_import)
+                        .map(check)
                         .unwrap_or(false);
 
                 if found {
@@ -871,6 +1016,133 @@ mod tests {
 
         let deps = index.find_dependents_for_file("src/db.rs");
         assert_eq!(deps.len(), 1, "qualified 'crate::db' should match src/db.rs");
+    }
+
+    // --- find_dependents: module path resolution ---
+
+    #[test]
+    fn test_find_dependents_lib_rs_via_module_path() {
+        // main.rs imports "crate::error" — lib.rs is the crate root, so it's a dependent.
+        let import_ref = make_ref("crate::error", None, ReferenceKind::Import, None, 0);
+        let f_main = make_file_with_refs("src/main.rs", vec![import_ref], HashMap::new());
+        let f_lib = make_file_with_refs("src/lib.rs", vec![], HashMap::new());
+        let index = make_index(vec![("src/main.rs", f_main), ("src/lib.rs", f_lib)], false);
+
+        let deps = index.find_dependents_for_file("src/lib.rs");
+        assert_eq!(deps.len(), 1, "crate::error starts with 'crate' module path of lib.rs");
+        assert_eq!(deps[0].0, "src/main.rs");
+    }
+
+    #[test]
+    fn test_find_dependents_mod_rs_via_module_path() {
+        // store.rs imports "crate::live_index" — mod.rs defines that module.
+        let import_ref =
+            make_ref("crate::live_index::store", None, ReferenceKind::Import, None, 0);
+        let f_store = make_file_with_refs("src/store.rs", vec![import_ref], HashMap::new());
+        let f_mod = make_file_with_refs("src/live_index/mod.rs", vec![], HashMap::new());
+        let index = make_index(
+            vec![("src/store.rs", f_store), ("src/live_index/mod.rs", f_mod)],
+            false,
+        );
+
+        let deps = index.find_dependents_for_file("src/live_index/mod.rs");
+        assert_eq!(
+            deps.len(),
+            1,
+            "'crate::live_index::store' starts with module path 'crate::live_index'"
+        );
+        assert_eq!(deps[0].0, "src/store.rs");
+    }
+
+    #[test]
+    fn test_find_dependents_python_init_via_module_path() {
+        // app.py imports "utils.helpers" — __init__.py defines the utils package.
+        let import_ref = make_ref("utils.helpers", None, ReferenceKind::Import, None, 0);
+        let mut f_app = make_file_with_refs("src/app.py", vec![import_ref], HashMap::new());
+        f_app.language = LanguageId::Python;
+        let mut f_init = make_file_with_refs("utils/__init__.py", vec![], HashMap::new());
+        f_init.language = LanguageId::Python;
+        let index = make_index(
+            vec![("src/app.py", f_app), ("utils/__init__.py", f_init)],
+            false,
+        );
+
+        let deps = index.find_dependents_for_file("utils/__init__.py");
+        assert_eq!(deps.len(), 1, "'utils.helpers' starts with module path 'utils'");
+    }
+
+    #[test]
+    fn test_find_dependents_js_index_via_module_path() {
+        // app.js imports "src/utils" — index.ts defines that directory module.
+        let import_ref = make_ref("src/utils/foo", None, ReferenceKind::Import, None, 0);
+        let mut f_app = make_file_with_refs("src/app.js", vec![import_ref], HashMap::new());
+        f_app.language = LanguageId::JavaScript;
+        let mut f_index = make_file_with_refs("src/utils/index.js", vec![], HashMap::new());
+        f_index.language = LanguageId::JavaScript;
+        let index = make_index(
+            vec![("src/app.js", f_app), ("src/utils/index.js", f_index)],
+            false,
+        );
+
+        let deps = index.find_dependents_for_file("src/utils/index.js");
+        assert_eq!(deps.len(), 1, "'src/utils/foo' starts with module path 'src/utils'");
+    }
+
+    #[test]
+    fn test_resolve_module_path_rust_cases() {
+        use super::resolve_module_path;
+        assert_eq!(
+            resolve_module_path("src/lib.rs", &LanguageId::Rust),
+            Some("crate".to_string())
+        );
+        assert_eq!(
+            resolve_module_path("src/main.rs", &LanguageId::Rust),
+            Some("crate".to_string())
+        );
+        assert_eq!(
+            resolve_module_path("src/error.rs", &LanguageId::Rust),
+            Some("crate::error".to_string())
+        );
+        assert_eq!(
+            resolve_module_path("src/live_index/mod.rs", &LanguageId::Rust),
+            Some("crate::live_index".to_string())
+        );
+        assert_eq!(
+            resolve_module_path("src/live_index/store.rs", &LanguageId::Rust),
+            Some("crate::live_index::store".to_string())
+        );
+        // Files outside src/ have no module path
+        assert_eq!(resolve_module_path("tests/foo.rs", &LanguageId::Rust), None);
+    }
+
+    #[test]
+    fn test_resolve_module_path_python_cases() {
+        use super::resolve_module_path;
+        assert_eq!(
+            resolve_module_path("utils/__init__.py", &LanguageId::Python),
+            Some("utils".to_string())
+        );
+        assert_eq!(
+            resolve_module_path("utils/helpers.py", &LanguageId::Python),
+            Some("utils.helpers".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_module_path_js_cases() {
+        use super::resolve_module_path;
+        assert_eq!(
+            resolve_module_path("src/utils/index.js", &LanguageId::JavaScript),
+            Some("src/utils".to_string())
+        );
+        assert_eq!(
+            resolve_module_path("src/utils/index.ts", &LanguageId::TypeScript),
+            Some("src/utils".to_string())
+        );
+        assert_eq!(
+            resolve_module_path("src/foo.js", &LanguageId::JavaScript),
+            Some("src/foo".to_string())
+        );
     }
 
     // --- callees_for_symbol ---
