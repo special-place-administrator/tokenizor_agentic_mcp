@@ -87,9 +87,14 @@ async fn test_watcher_detects_modify_and_updates_index() {
     // Verify initial state
     {
         let index = shared.read().unwrap();
-        let file = index.get_file("src/hello.rs").expect("src/hello.rs should be indexed");
+        let file = index
+            .get_file("src/hello.rs")
+            .expect("src/hello.rs should be indexed");
         let names: Vec<&str> = file.symbols.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"hello"), "initial symbol 'hello' should exist: {names:?}");
+        assert!(
+            names.contains(&"hello"),
+            "initial symbol 'hello' should exist: {names:?}"
+        );
     }
 
     let _watcher_info = spawn_watcher(&dir, &shared).await;
@@ -102,7 +107,9 @@ async fn test_watcher_detects_modify_and_updates_index() {
     // Verify index reflects the updated symbol
     {
         let index = shared.read().unwrap();
-        let file = index.get_file("src/hello.rs").expect("src/hello.rs should still be in index");
+        let file = index
+            .get_file("src/hello.rs")
+            .expect("src/hello.rs should still be in index");
         let names: Vec<&str> = file.symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(
             names.contains(&"hello_world"),
@@ -151,7 +158,8 @@ async fn test_watcher_indexes_new_file() {
             "FRSH-04: file_count should have increased by 1 after creating new_file.rs"
         );
 
-        let file = index.get_file("src/new_file.rs")
+        let file = index
+            .get_file("src/new_file.rs")
             .expect("FRSH-04: src/new_file.rs should be in index after create");
         let names: Vec<&str> = file.symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(
@@ -254,7 +262,8 @@ async fn test_watcher_hash_skip_on_noop_write() {
     // but even if it did, the result should be the same)
     {
         let index = shared.read().unwrap();
-        let file = index.get_file("src/stable.rs")
+        let file = index
+            .get_file("src/stable.rs")
             .expect("src/stable.rs should still be indexed after noop write");
         let after_symbols: Vec<String> = file.symbols.iter().map(|s| s.name.clone()).collect();
         assert_eq!(
@@ -327,9 +336,9 @@ async fn test_watcher_enoent_handled_gracefully() {
 /// It does NOT go through the watcher (that latency is dominated by debounce).
 #[test]
 fn test_single_file_reparse_under_50ms() {
+    use std::time::Instant;
     use tokenizor_agentic_mcp::domain::LanguageId;
     use tokenizor_agentic_mcp::parsing;
-    use std::time::Instant;
 
     // A moderate Rust function (~20 lines)
     let source = r#"
@@ -451,4 +460,3 @@ async fn test_watcher_ignores_non_source_files() {
         );
     }
 }
-

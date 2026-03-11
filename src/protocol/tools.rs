@@ -398,7 +398,10 @@ impl TokenizorServer {
     /// Show the file tree with language and symbol counts per file.
     #[tool(description = "Show the file tree with language and symbol counts per file.")]
     pub(crate) async fn get_repo_outline(&self) -> String {
-        if let Some(result) = self.proxy_tool_call_without_params("get_repo_outline").await {
+        if let Some(result) = self
+            .proxy_tool_call_without_params("get_repo_outline")
+            .await
+        {
             return result;
         }
         let guard = self.index.read().expect("lock poisoned");
@@ -409,9 +412,7 @@ impl TokenizorServer {
     }
 
     /// Show the compact repo map used for session-start enrichment.
-    #[tool(
-        description = "Show the compact repo map used for session-start enrichment."
-    )]
+    #[tool(description = "Show the compact repo map used for session-start enrichment.")]
     pub(crate) async fn get_repo_map(&self) -> String {
         if let Some(result) = self.proxy_tool_call_without_params("get_repo_map").await {
             return result;
@@ -459,9 +460,7 @@ impl TokenizorServer {
     }
 
     /// Show grouped references for a symbol with enclosing-symbol annotations.
-    #[tool(
-        description = "Show grouped references for a symbol with enclosing-symbol annotations."
-    )]
+    #[tool(description = "Show grouped references for a symbol with enclosing-symbol annotations.")]
     pub(crate) async fn get_symbol_context(
         &self,
         params: Parameters<GetSymbolContextInput>,
@@ -488,9 +487,7 @@ impl TokenizorServer {
     }
 
     /// Re-read a file from disk, update the index, and report symbol impact.
-    #[tool(
-        description = "Re-read a file from disk, update the index, and report symbol impact."
-    )]
+    #[tool(description = "Re-read a file from disk, update the index, and report symbol impact.")]
     pub(crate) async fn analyze_file_impact(
         &self,
         params: Parameters<AnalyzeFileImpactInput>,
@@ -742,7 +739,10 @@ impl TokenizorServer {
     #[tool(
         description = "Get full context for a symbol: definition body, callers, callees, and type usages in one call"
     )]
-    pub(crate) async fn get_context_bundle(&self, params: Parameters<GetContextBundleInput>) -> String {
+    pub(crate) async fn get_context_bundle(
+        &self,
+        params: Parameters<GetContextBundleInput>,
+    ) -> String {
         if let Some(result) = self.proxy_tool_call("get_context_bundle", &params.0).await {
             return result;
         }
@@ -760,8 +760,8 @@ impl TokenizorServer {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
     use std::collections::HashMap;
+    use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -1105,16 +1105,26 @@ mod tests {
         let target_file = make_file("src/target.rs", b"fn target() {}", vec![callee]);
         let caller_file = make_file_with_refs(
             "src/caller.rs",
-            b"fn caller() { target(); }",
+            b"use crate::target;\nfn caller() { target(); }",
             vec![caller],
-            vec![ReferenceRecord {
-                name: "target".to_string(),
-                qualified_name: None,
-                kind: ReferenceKind::Call,
-                byte_range: (12, 18),
-                line_range: (1, 1),
-                enclosing_symbol_index: Some(0),
-            }],
+            vec![
+                ReferenceRecord {
+                    name: "target".to_string(),
+                    qualified_name: Some("crate::target".to_string()),
+                    kind: ReferenceKind::Import,
+                    byte_range: (4, 10),
+                    line_range: (0, 0),
+                    enclosing_symbol_index: None,
+                },
+                ReferenceRecord {
+                    name: "target".to_string(),
+                    qualified_name: None,
+                    kind: ReferenceKind::Call,
+                    byte_range: (30, 36),
+                    line_range: (1, 1),
+                    enclosing_symbol_index: Some(0),
+                },
+            ],
         );
         let server = make_server(make_live_index_ready(vec![target_file, caller_file]));
 
@@ -1136,6 +1146,40 @@ mod tests {
         assert!(
             result.contains("src/caller.rs"),
             "file context should include caller file; got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_file_context_ignores_generic_name_noise_without_real_dependency() {
+        let target = make_symbol("main", SymbolKind::Function, 1, 3);
+        let helper = make_symbol("helper", SymbolKind::Function, 1, 4);
+        let helper_main = make_symbol("main", SymbolKind::Function, 5, 7);
+        let target_file = make_file("src/target.py", b"def main():\n    pass\n", vec![target]);
+        let helper_file = make_file_with_refs(
+            "scripts/helper.py",
+            b"def helper():\n    main()\n\ndef main():\n    pass\n",
+            vec![helper, helper_main],
+            vec![ReferenceRecord {
+                name: "main".to_string(),
+                qualified_name: None,
+                kind: ReferenceKind::Call,
+                byte_range: (18, 22),
+                line_range: (1, 1),
+                enclosing_symbol_index: Some(0),
+            }],
+        );
+        let server = make_server(make_live_index_ready(vec![target_file, helper_file]));
+
+        let result = server
+            .get_file_context(Parameters(super::GetFileContextInput {
+                path: "src/target.py".to_string(),
+                max_tokens: None,
+            }))
+            .await;
+
+        assert!(
+            !result.contains("scripts/helper.py"),
+            "generic-name local calls should not be attributed as key references: {result}"
         );
     }
 
@@ -1183,7 +1227,10 @@ mod tests {
 
         let old_symbol = make_symbol("old_name", SymbolKind::Function, 1, 1);
         let (key, file) = make_file("src/lib.rs", b"pub fn old_name() {}\n", vec![old_symbol]);
-        let server = make_server_with_root(make_live_index_ready(vec![(key, file)]), Some(repo.path().to_path_buf()));
+        let server = make_server_with_root(
+            make_live_index_ready(vec![(key, file)]),
+            Some(repo.path().to_path_buf()),
+        );
 
         let result = server
             .analyze_file_impact(Parameters(super::AnalyzeFileImpactInput {

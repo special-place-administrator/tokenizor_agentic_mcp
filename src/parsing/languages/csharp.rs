@@ -26,9 +26,15 @@ fn walk_node(
         _ => None,
     };
 
-    push_named_symbol(node, source, depth, sort_order, symbols, kind, |node, source, _| {
-        find_name(node, source)
-    });
+    push_named_symbol(
+        node,
+        source,
+        depth,
+        sort_order,
+        symbols,
+        kind,
+        |node, source, _| find_name(node, source),
+    );
     walk_children(node, source, depth, sort_order, symbols, kind, walk_node);
 }
 
@@ -69,7 +75,11 @@ mod tests {
         let source = "public interface IRunnable { void Run(); }";
         let symbols = parse_csharp(source);
         let iface = symbols.iter().find(|s| s.kind == SymbolKind::Interface);
-        assert!(iface.is_some(), "should extract interface, got: {:?}", symbols);
+        assert!(
+            iface.is_some(),
+            "should extract interface, got: {:?}",
+            symbols
+        );
         assert_eq!(iface.unwrap().name, "IRunnable");
     }
 
@@ -86,7 +96,12 @@ mod tests {
     fn test_csharp_process_file_returns_processed() {
         let source = b"public class Foo { public void Bar() { } }";
         let result = process_file("test.cs", source, LanguageId::CSharp);
-        assert_eq!(result.outcome, FileOutcome::Processed, "outcome: {:?}", result.outcome);
+        assert_eq!(
+            result.outcome,
+            FileOutcome::Processed,
+            "outcome: {:?}",
+            result.outcome
+        );
         assert!(!result.symbols.is_empty(), "should have symbols");
     }
 }

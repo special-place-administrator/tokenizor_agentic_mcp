@@ -2,8 +2,8 @@ use reqwest::Url;
 use rmcp::ErrorData as McpError;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    AnnotateAble, RawResource, RawResourceTemplate, ReadResourceResult, Resource,
-    ResourceContents, ResourceTemplate,
+    AnnotateAble, RawResource, RawResourceTemplate, ReadResourceResult, Resource, ResourceContents,
+    ResourceTemplate,
 };
 
 use super::TokenizorServer;
@@ -17,7 +17,8 @@ pub(crate) const REPO_OUTLINE_URI: &str = "tokenizor://repo/outline";
 pub(crate) const REPO_MAP_URI: &str = "tokenizor://repo/map";
 pub(crate) const REPO_CHANGES_URI: &str = "tokenizor://repo/changes/uncommitted";
 
-pub(crate) const FILE_CONTEXT_TEMPLATE: &str = "tokenizor://file/context?path={path}&max_tokens={max_tokens}";
+pub(crate) const FILE_CONTEXT_TEMPLATE: &str =
+    "tokenizor://file/context?path={path}&max_tokens={max_tokens}";
 pub(crate) const FILE_CONTENT_TEMPLATE: &str =
     "tokenizor://file/content?path={path}&start_line={start_line}&end_line={end_line}";
 pub(crate) const SYMBOL_DETAIL_TEMPLATE: &str =
@@ -109,9 +110,12 @@ impl TokenizorServer {
         ]
     }
 
-    pub(crate) async fn read_resource_uri(&self, uri: &str) -> Result<ReadResourceResult, McpError> {
-        let request = parse_resource_uri(uri)
-            .map_err(|error| McpError::invalid_params(error, None))?;
+    pub(crate) async fn read_resource_uri(
+        &self,
+        uri: &str,
+    ) -> Result<ReadResourceResult, McpError> {
+        let request =
+            parse_resource_uri(uri).map_err(|error| McpError::invalid_params(error, None))?;
         let text = self
             .render_resource_text(request)
             .await
@@ -204,7 +208,10 @@ pub(crate) fn repo_changes_resource() -> Resource {
 pub(crate) fn file_context_resource(path: &str, max_tokens: Option<u64>) -> Resource {
     let uri = build_uri(
         "tokenizor://file/context",
-        &[("path", Some(path.to_string())), ("max_tokens", max_tokens.map(|v| v.to_string()))],
+        &[
+            ("path", Some(path.to_string())),
+            ("max_tokens", max_tokens.map(|v| v.to_string())),
+        ],
     );
     make_resource(
         &uri,
@@ -298,10 +305,7 @@ fn required_query(
         .ok_or_else(|| format!("resource URI missing required query parameter '{key}'"))
 }
 
-fn optional_text(
-    query: &std::collections::HashMap<String, String>,
-    key: &str,
-) -> Option<String> {
+fn optional_text(query: &std::collections::HashMap<String, String>, key: &str) -> Option<String> {
     query
         .get(key)
         .map(|value| value.trim().to_string())
@@ -380,7 +384,10 @@ mod tests {
     fn test_resource_definitions_include_repo_surfaces() {
         let server = make_server();
         let resources = server.resource_definitions();
-        let uris: Vec<&str> = resources.iter().map(|resource| resource.uri.as_str()).collect();
+        let uris: Vec<&str> = resources
+            .iter()
+            .map(|resource| resource.uri.as_str())
+            .collect();
         assert!(uris.contains(&REPO_HEALTH_URI));
         assert!(uris.contains(&REPO_MAP_URI));
     }

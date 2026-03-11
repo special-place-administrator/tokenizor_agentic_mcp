@@ -26,6 +26,8 @@ const RUST_XREF_QUERY: &str = r#"
 ; Use declarations: use std::collections::HashMap
 (use_declaration argument: (identifier) @ref.import)
 (use_declaration argument: (scoped_identifier) @ref.import)
+(use_declaration argument: (use_list) @ref.import)
+(use_declaration argument: (scoped_use_list) @ref.import)
 
 ; Import with alias: use HashMap as Map
 (use_as_clause path: (_) @import.original alias: (identifier) @import.alias)
@@ -363,6 +365,106 @@ fn perl_query(lang: &Language) -> &'static Query {
     PERL_QUERY.get_or_init(|| Query::new(lang, PERL_XREF_QUERY).expect("valid perl xref query"))
 }
 
+fn split_top_level_rust_items(input: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+
+    for (idx, ch) in input.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(input[start..idx].trim());
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    if start <= input.len() {
+        parts.push(input[start..].trim());
+    }
+
+    parts.into_iter().filter(|part| !part.is_empty()).collect()
+}
+
+fn rust_grouped_import_parts(input: &str) -> Option<(&str, &str)> {
+    let trimmed = input.trim();
+    let brace_start = trimmed.find('{')?;
+    let brace_end = trimmed.rfind('}')?;
+    if brace_end <= brace_start {
+        return None;
+    }
+
+    let prefix = trimmed[..brace_start].trim_end().trim_end_matches("::");
+    let inner = &trimmed[brace_start + 1..brace_end];
+    Some((prefix, inner))
+}
+
+fn expand_rust_import_paths(input: &str) -> Vec<String> {
+    let trimmed = input.trim();
+    let alias_free = trimmed
+        .split_once(" as ")
+        .map(|(original, _)| original.trim())
+        .unwrap_or(trimmed);
+
+    if let Some((prefix, inner)) = rust_grouped_import_parts(alias_free) {
+        return split_top_level_rust_items(inner)
+            .into_iter()
+            .flat_map(|item| {
+                let combined = if prefix.is_empty() {
+                    item.to_string()
+                } else {
+                    format!("{prefix}::{item}")
+                };
+                expand_rust_import_paths(&combined)
+            })
+            .collect();
+    }
+
+    vec![alias_free.to_string()]
+}
+
+fn push_import_reference(
+    references: &mut Vec<ReferenceRecord>,
+    import_text: &str,
+    import_node: Node,
+) {
+    let full_text = import_text.trim();
+    let name = full_text
+        .split("::")
+        .last()
+        .or_else(|| full_text.split('.').next_back())
+        .unwrap_or(full_text)
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_string();
+
+    if name.is_empty() {
+        return;
+    }
+
+    let qualified_name = if full_text.contains("::") || full_text.contains('.') {
+        Some(full_text.to_string())
+    } else {
+        None
+    };
+    let start = import_node.start_position();
+    let end = import_node.end_position();
+    references.push(ReferenceRecord {
+        name,
+        qualified_name,
+        kind: ReferenceKind::Import,
+        byte_range: (
+            import_node.start_byte() as u32,
+            import_node.end_byte() as u32,
+        ),
+        line_range: (start.row as u32, end.row as u32),
+        enclosing_symbol_index: None,
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Main extraction function
 // ---------------------------------------------------------------------------
@@ -571,37 +673,13 @@ pub fn extract_references(
         if let Some(import_node) = ref_import
             && let Ok(name_text) = import_node.utf8_text(source_bytes)
         {
-            let full_text = name_text.trim();
-            // Extract simple name from qualified paths (last segment)
-            let name = full_text
-                .split("::")
-                .last()
-                .or_else(|| full_text.split('.').next_back())
-                .unwrap_or(full_text)
-                // Strip surrounding quotes for Go import paths
-                .trim_matches('"')
-                .trim_matches('\'')
-                .to_string();
-            // Skip empty names (e.g. from wildcard imports)
-            if !name.is_empty() {
-                let qualified_name = if full_text.contains("::") || full_text.contains('.') {
-                    Some(full_text.to_string())
-                } else {
-                    None
-                };
-                let start = import_node.start_position();
-                let end = import_node.end_position();
-                references.push(ReferenceRecord {
-                    name,
-                    qualified_name,
-                    kind: ReferenceKind::Import,
-                    byte_range: (
-                        import_node.start_byte() as u32,
-                        import_node.end_byte() as u32,
-                    ),
-                    line_range: (start.row as u32, end.row as u32),
-                    enclosing_symbol_index: None,
-                });
+            let import_texts = match language {
+                LanguageId::Rust => expand_rust_import_paths(name_text),
+                _ => vec![name_text.trim().to_string()],
+            };
+
+            for import_text in import_texts {
+                push_import_reference(&mut references, &import_text, import_node);
             }
         }
 
@@ -747,6 +825,29 @@ mod tests {
         assert!(
             refs.iter().any(|r| r.kind == ReferenceKind::Import),
             "should have at least one Import ref, refs: {:?}",
+            refs
+        );
+    }
+
+    #[test]
+    fn test_rust_grouped_use_declaration_expands_imports() {
+        let (refs, _) = parse_and_extract("use crate::{daemon, other};", LanguageId::Rust);
+        assert!(
+            refs.iter().any(|r| {
+                r.kind == ReferenceKind::Import
+                    && r.name == "daemon"
+                    && r.qualified_name.as_deref() == Some("crate::daemon")
+            }),
+            "grouped Rust imports should include crate::daemon, refs: {:?}",
+            refs
+        );
+        assert!(
+            refs.iter().any(|r| {
+                r.kind == ReferenceKind::Import
+                    && r.name == "other"
+                    && r.qualified_name.as_deref() == Some("crate::other")
+            }),
+            "grouped Rust imports should include crate::other, refs: {:?}",
             refs
         );
     }

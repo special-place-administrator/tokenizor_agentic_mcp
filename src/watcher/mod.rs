@@ -5,7 +5,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use notify::{EventKind, RecommendedWatcher as NotifyRecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{
-    new_debouncer, DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache,
+    DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer,
 };
 use tracing::{debug, error, warn};
 
@@ -168,7 +168,9 @@ pub(crate) fn normalize_event_path(abs_path: &Path, repo_root: &Path) -> Option<
         clean_abs.strip_prefix(Path::new(stripped_root))
     });
 
-    relative.ok().map(|p| p.to_string_lossy().replace('\\', "/"))
+    relative
+        .ok()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
 }
 
 /// Return the `LanguageId` for a file path based on its extension.
@@ -326,9 +328,7 @@ pub(crate) fn process_events(
                 EventKind::Create(_) | EventKind::Modify(_) => {
                     // Update burst tracker for this path
                     let now = Instant::now();
-                    let tracker = burst_trackers
-                        .entry(abs_path.clone())
-                        .or_default();
+                    let tracker = burst_trackers.entry(abs_path.clone()).or_default();
                     tracker.update(now);
                     let debounce_ms = tracker.effective_debounce_ms();
 
@@ -375,7 +375,10 @@ pub async fn run_watcher(
                 if consecutive_failures >= MAX_FAILURES {
                     let mut info = watcher_info.lock().unwrap();
                     info.state = WatcherState::Degraded;
-                    error!("watcher: entering degraded mode after {} consecutive failures", MAX_FAILURES);
+                    error!(
+                        "watcher: entering degraded mode after {} consecutive failures",
+                        MAX_FAILURES
+                    );
                     break;
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -395,7 +398,10 @@ pub async fn run_watcher(
                 const RECV_TIMEOUT_MS: u64 = 50;
 
                 loop {
-                    match handle.event_rx.recv_timeout(Duration::from_millis(RECV_TIMEOUT_MS)) {
+                    match handle
+                        .event_rx
+                        .recv_timeout(Duration::from_millis(RECV_TIMEOUT_MS))
+                    {
                         Ok(Ok(events)) => {
                             process_events(
                                 events,
@@ -436,7 +442,10 @@ pub async fn run_watcher(
                 if consecutive_failures >= MAX_FAILURES {
                     let mut info = watcher_info.lock().unwrap();
                     info.state = WatcherState::Degraded;
-                    error!("watcher: entering degraded mode after {} consecutive failures", MAX_FAILURES);
+                    error!(
+                        "watcher: entering degraded mode after {} consecutive failures",
+                        MAX_FAILURES
+                    );
                     break;
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -664,9 +673,9 @@ mod tests {
     /// maybe_reindex again, and confirm the index now reflects the new call.
     #[test]
     fn test_maybe_reindex_updates_reverse_index_on_change() {
-        use std::sync::{Arc, RwLock};
-        use crate::live_index::store::IndexedFile;
         use crate::domain::LanguageId;
+        use crate::live_index::store::IndexedFile;
+        use std::sync::{Arc, RwLock};
         use tempfile::TempDir;
 
         let tmp = TempDir::new().unwrap();
@@ -711,7 +720,11 @@ mod tests {
 
         // maybe_reindex detects a hash change and re-parses.
         let result = maybe_reindex(rel_path, &rs_path, &shared, LanguageId::Rust);
-        assert_eq!(result, ReindexResult::Reindexed, "file should be re-parsed on content change");
+        assert_eq!(
+            result,
+            ReindexResult::Reindexed,
+            "file should be re-parsed on content change"
+        );
 
         // Confirm reverse index now has "new_function" and not "old_function".
         {
@@ -730,9 +743,9 @@ mod tests {
     /// Confirms that maybe_reindex returns HashSkip when content has not changed.
     #[test]
     fn test_maybe_reindex_hash_skip_on_unchanged_content() {
-        use std::sync::{Arc, RwLock};
-        use crate::live_index::store::IndexedFile;
         use crate::domain::LanguageId;
+        use crate::live_index::store::IndexedFile;
+        use std::sync::{Arc, RwLock};
         use tempfile::TempDir;
 
         let tmp = TempDir::new().unwrap();
@@ -760,6 +773,10 @@ mod tests {
 
         // File content unchanged — expect HashSkip.
         let result = maybe_reindex(rel_path, &rs_path, &shared, LanguageId::Rust);
-        assert_eq!(result, ReindexResult::HashSkip, "unchanged content should produce HashSkip");
+        assert_eq!(
+            result,
+            ReindexResult::HashSkip,
+            "unchanged content should produce HashSkip"
+        );
     }
 }

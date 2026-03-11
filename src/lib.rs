@@ -1,12 +1,12 @@
+pub mod cli;
+pub mod daemon;
+pub mod discovery;
 pub mod domain;
 pub mod error;
 pub mod hash;
+pub mod live_index;
 pub mod observability;
 pub mod parsing;
-pub mod live_index;
-pub mod discovery;
-pub mod daemon;
 pub mod protocol;
-pub mod watcher;
 pub mod sidecar;
-pub mod cli;
+pub mod watcher;

@@ -94,11 +94,7 @@ where
 }
 
 pub(super) fn next_child_depth(kind: Option<SymbolKind>, depth: u32) -> u32 {
-    if kind.is_some() {
-        depth + 1
-    } else {
-        depth
-    }
+    if kind.is_some() { depth + 1 } else { depth }
 }
 
 pub(super) fn walk_children(

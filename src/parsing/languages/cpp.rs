@@ -26,9 +26,15 @@ fn walk_node(
         _ => None,
     };
 
-    push_named_symbol(node, source, depth, sort_order, symbols, kind, |node, source, _| {
-        find_cpp_name(node, source)
-    });
+    push_named_symbol(
+        node,
+        source,
+        depth,
+        sort_order,
+        symbols,
+        kind,
+        |node, source, _| find_cpp_name(node, source),
+    );
     walk_children(node, source, depth, sort_order, symbols, kind, walk_node);
 }
 
@@ -75,7 +81,10 @@ fn find_function_name(node: &Node, source: &str) -> Option<String> {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         match child.kind() {
-            "declarator" | "pointer_declarator" | "reference_declarator" | "function_declarator" => {
+            "declarator"
+            | "pointer_declarator"
+            | "reference_declarator"
+            | "function_declarator" => {
                 if let Some(name) = extract_declarator_name(&child, source) {
                     return Some(name);
                 }
@@ -150,7 +159,11 @@ mod tests {
         let source = "int add(int a, int b) { return a + b; }";
         let symbols = parse_cpp(source);
         let func = symbols.iter().find(|s| s.kind == SymbolKind::Function);
-        assert!(func.is_some(), "should extract function, got: {:?}", symbols);
+        assert!(
+            func.is_some(),
+            "should extract function, got: {:?}",
+            symbols
+        );
         assert_eq!(func.unwrap().name, "add");
     }
 
@@ -196,7 +209,11 @@ mod tests {
         let symbols = parse_cpp(source);
         // template_declaration itself doesn't create a symbol; inner class_specifier does
         let c = symbols.iter().find(|s| s.kind == SymbolKind::Class);
-        assert!(c.is_some(), "should extract inner class from template, got: {:?}", symbols);
+        assert!(
+            c.is_some(),
+            "should extract inner class from template, got: {:?}",
+            symbols
+        );
         assert_eq!(c.unwrap().name, "Stack");
     }
 
@@ -205,18 +222,31 @@ mod tests {
         let source = "void Foo::bar(int x) { }";
         let symbols = parse_cpp(source);
         let func = symbols.iter().find(|s| s.kind == SymbolKind::Function);
-        assert!(func.is_some(), "should extract qualified method, got: {:?}", symbols);
+        assert!(
+            func.is_some(),
+            "should extract qualified method, got: {:?}",
+            symbols
+        );
         // Should extract just the method name (last segment)
         assert_eq!(func.unwrap().name, "bar");
     }
 
     #[test]
     fn test_cpp_language_process_file_returns_processed() {
-        let source = b"#include <vector>\nclass Foo { public: void bar(); };\nvoid Foo::bar() { }\n";
+        let source =
+            b"#include <vector>\nclass Foo { public: void bar(); };\nvoid Foo::bar() { }\n";
         let result = process_file("test.cpp", source, LanguageId::Cpp);
-        assert_eq!(result.outcome, FileOutcome::Processed, "outcome: {:?}", result.outcome);
+        assert_eq!(
+            result.outcome,
+            FileOutcome::Processed,
+            "outcome: {:?}",
+            result.outcome
+        );
         assert!(!result.symbols.is_empty(), "should have symbols");
-        let class = result.symbols.iter().find(|s| s.kind == SymbolKind::Class && s.name == "Foo");
+        let class = result
+            .symbols
+            .iter()
+            .find(|s| s.kind == SymbolKind::Class && s.name == "Foo");
         assert!(class.is_some(), "should have Foo class");
     }
 }

@@ -97,7 +97,12 @@ pub fn check_stale(bind_host: &str) -> bool {
     };
 
     let addr = format!("{bind_host}:{port}");
-    match TcpStream::connect_timeout(&addr.parse().unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()), Duration::from_millis(200)) {
+    match TcpStream::connect_timeout(
+        &addr
+            .parse()
+            .unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()),
+        Duration::from_millis(200),
+    ) {
         Ok(_) => false, // Connection succeeded — sidecar is still alive.
         Err(_) => {
             // Connection refused or timed out — files are stale.
@@ -148,7 +153,10 @@ mod tests {
             // Read while still inside the temp cwd so the relative path resolves correctly.
             let port_path = PathBuf::from(DIR_NAME).join(PORT_FILE);
             let bytes = std::fs::read(&port_path).unwrap();
-            assert_eq!(bytes, b"8080", "port file must contain ONLY the digits, no newline");
+            assert_eq!(
+                bytes, b"8080",
+                "port file must contain ONLY the digits, no newline"
+            );
         });
     }
 
@@ -159,13 +167,25 @@ mod tests {
             write_pid_file(12345).expect("write should succeed");
 
             let dir = PathBuf::from(DIR_NAME);
-            assert!(dir.join(PORT_FILE).exists(), "port file should exist before cleanup");
-            assert!(dir.join(PID_FILE).exists(), "pid file should exist before cleanup");
+            assert!(
+                dir.join(PORT_FILE).exists(),
+                "port file should exist before cleanup"
+            );
+            assert!(
+                dir.join(PID_FILE).exists(),
+                "pid file should exist before cleanup"
+            );
 
             cleanup_files();
 
-            assert!(!dir.join(PORT_FILE).exists(), "port file should be gone after cleanup");
-            assert!(!dir.join(PID_FILE).exists(), "pid file should be gone after cleanup");
+            assert!(
+                !dir.join(PORT_FILE).exists(),
+                "port file should be gone after cleanup"
+            );
+            assert!(
+                !dir.join(PID_FILE).exists(),
+                "pid file should be gone after cleanup"
+            );
         });
     }
 
@@ -181,7 +201,10 @@ mod tests {
     fn test_read_port_missing_returns_error() {
         with_temp_dir(|| {
             let result = read_port();
-            assert!(result.is_err(), "read_port should return error when file is missing");
+            assert!(
+                result.is_err(),
+                "read_port should return error when file is missing"
+            );
         });
     }
 
@@ -189,7 +212,10 @@ mod tests {
     fn test_ensure_tokenizor_dir_creates_directory() {
         with_temp_dir(|| {
             let dir = ensure_tokenizor_dir().expect("ensure_tokenizor_dir should succeed");
-            assert!(dir.exists(), ".tokenizor directory should exist after ensure_tokenizor_dir");
+            assert!(
+                dir.exists(),
+                ".tokenizor directory should exist after ensure_tokenizor_dir"
+            );
             assert!(dir.is_dir(), "path should be a directory");
         });
     }
@@ -218,11 +244,17 @@ mod tests {
             write_pid_file(99999).expect("write should succeed");
 
             let is_stale = check_stale("127.0.0.1");
-            assert!(is_stale, "port 19999 should be detected as stale (nothing listening)");
+            assert!(
+                is_stale,
+                "port 19999 should be detected as stale (nothing listening)"
+            );
 
             // Cleanup should have been called.
             let dir = PathBuf::from(DIR_NAME);
-            assert!(!dir.join(PORT_FILE).exists(), "port file cleaned up after stale detection");
+            assert!(
+                !dir.join(PORT_FILE).exists(),
+                "port file cleaned up after stale detection"
+            );
         });
     }
 }

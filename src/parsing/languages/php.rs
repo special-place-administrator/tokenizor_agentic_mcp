@@ -24,9 +24,15 @@ fn walk_node(
         _ => None,
     };
 
-    push_named_symbol(node, source, depth, sort_order, symbols, kind, |node, source, _| {
-        find_name(node, source)
-    });
+    push_named_symbol(
+        node,
+        source,
+        depth,
+        sort_order,
+        symbols,
+        kind,
+        |node, source, _| find_name(node, source),
+    );
     walk_children(node, source, depth, sort_order, symbols, kind, walk_node);
 }
 
@@ -48,12 +54,20 @@ mod tests {
         let source = b"<?php class Foo { public function bar() {} }";
         let result = process_file("test.php", source, LanguageId::Php);
         assert!(
-            matches!(result.outcome, FileOutcome::Processed | FileOutcome::PartialParse { .. }),
-            "PHP should parse successfully: {:?}", result.outcome
+            matches!(
+                result.outcome,
+                FileOutcome::Processed | FileOutcome::PartialParse { .. }
+            ),
+            "PHP should parse successfully: {:?}",
+            result.outcome
         );
         assert!(
-            result.symbols.iter().any(|s| s.kind == SymbolKind::Class && s.name == "Foo"),
-            "should extract Foo class, symbols: {:?}", result.symbols
+            result
+                .symbols
+                .iter()
+                .any(|s| s.kind == SymbolKind::Class && s.name == "Foo"),
+            "should extract Foo class, symbols: {:?}",
+            result.symbols
         );
     }
 }

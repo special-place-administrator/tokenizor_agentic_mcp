@@ -49,8 +49,7 @@ async fn run_mcp_server_async() -> anyhow::Result<()> {
     };
 
     if let Some(root) = resolved_root.clone() {
-        match daemon::connect_or_spawn_session(&root, "mcp-stdio", Some(std::process::id())).await
-        {
+        match daemon::connect_or_spawn_session(&root, "mcp-stdio", Some(std::process::id())).await {
             Ok(session) => return run_remote_mcp_server_async(session).await,
             Err(error) => {
                 tracing::warn!(
@@ -64,9 +63,7 @@ async fn run_mcp_server_async() -> anyhow::Result<()> {
     run_local_mcp_server_async(should_auto_index, resolved_root).await
 }
 
-async fn run_remote_mcp_server_async(
-    session: daemon::DaemonSessionClient,
-) -> anyhow::Result<()> {
+async fn run_remote_mcp_server_async(session: daemon::DaemonSessionClient) -> anyhow::Result<()> {
     if let Some(port) = session.port() {
         sidecar::port_file::write_port_file(port)?;
         sidecar::port_file::write_pid_file(std::process::id())?;

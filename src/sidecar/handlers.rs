@@ -14,6 +14,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::domain::ReferenceKind;
 use crate::sidecar::{SidecarState, SymbolSnapshot, build_with_budget};
 
 // ---------------------------------------------------------------------------
@@ -85,7 +86,10 @@ fn resolve_repo_root(state: &SidecarState) -> Result<std::path::PathBuf, StatusC
 pub async fn health_handler(
     State(state): State<SidecarState>,
 ) -> Result<Json<HealthResponse>, StatusCode> {
-    let guard = state.index.read().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let guard = state
+        .index
+        .read()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let file_count = guard.file_count();
     let symbol_count = guard.symbol_count();
@@ -137,7 +141,10 @@ fn outline_text(
     params: &OutlineParams,
     options: RenderOptions,
 ) -> Result<String, StatusCode> {
-    let guard = state.index.read().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let guard = state
+        .index
+        .read()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Return 404 for non-indexed files.
     let file = guard.get_file(&params.path).ok_or(StatusCode::NOT_FOUND)?;
@@ -147,7 +154,12 @@ fn outline_text(
 
     // Build symbol outline lines.
     let mut lines: Vec<String> = Vec::new();
-    lines.push(format!("── {} ({} symbols, {}) ──", params.path, file.symbols.len(), language));
+    lines.push(format!(
+        "── {} ({} symbols, {}) ──",
+        params.path,
+        file.symbols.len(),
+        language
+    ));
 
     for sym in &file.symbols {
         let indent = "  ".repeat(sym.depth as usize);
@@ -163,14 +175,15 @@ fn outline_text(
 
     // Build "Key references" section.
     // Rank symbols by caller count descending, take top 5, show up to 3 callers each.
+    let attributed_dependents = guard.find_dependents_for_file(&params.path);
     let mut symbol_callers: Vec<(String, Vec<(String, u32)>)> = Vec::new();
 
     for sym in &file.symbols {
-        let callers = guard.find_references_for_name(&sym.name, None, false);
-        // Exclude self-references from same file
-        let external_callers: Vec<(String, u32)> = callers
+        let external_callers: Vec<(String, u32)> = attributed_dependents
             .iter()
-            .filter(|(fp, _)| *fp != params.path.as_str())
+            .filter(|(_, reference)| {
+                reference.kind != ReferenceKind::Import && reference.name == sym.name
+            })
             .map(|(fp, r)| (fp.to_string(), r.line_range.0))
             .take(3)
             .collect();
@@ -237,7 +250,10 @@ pub(crate) async fn impact_tool_text(
     impact_text(state, params, TOOL_RENDER_OPTIONS).await
 }
 
-async fn impact_hook_text(state: SidecarState, params: &ImpactParams) -> Result<String, StatusCode> {
+async fn impact_hook_text(
+    state: SidecarState,
+    params: &ImpactParams,
+) -> Result<String, StatusCode> {
     impact_text(state, params, HOOK_RENDER_OPTIONS).await
 }
 
@@ -270,8 +286,7 @@ async fn handle_new_file_impact(
         .and_then(|e| e.to_str())
         .unwrap_or("");
 
-    let language = LanguageId::from_extension(extension)
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let language = LanguageId::from_extension(extension).ok_or(StatusCode::NOT_FOUND)?;
 
     // Read file from disk. The sidecar doesn't know the project root, so
     // we look up the root from the existing index as a heuristic.
@@ -283,7 +298,8 @@ async fn handle_new_file_impact(
     let result = crate::parsing::process_file(path, &bytes, language.clone());
 
     // Build symbol kind breakdown.
-    let mut kind_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut kind_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for sym in &result.symbols {
         *kind_counts.entry(sym.kind.to_string()).or_insert(0) += 1;
     }
@@ -302,13 +318,19 @@ async fn handle_new_file_impact(
     // Index the file.
     let indexed = crate::live_index::store::IndexedFile::from_parse_result(result, bytes);
     {
-        let mut write_guard = state.index.write().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let mut write_guard = state
+            .index
+            .write()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         write_guard.update_file(path.to_string(), indexed);
     }
 
     // Update symbol cache with empty pre-edit snapshot (it's new, no pre-state).
     {
-        let mut cache = state.symbol_cache.write().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let mut cache = state
+            .symbol_cache
+            .write()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         cache.insert(path.to_string(), Vec::new());
     }
 
@@ -318,8 +340,7 @@ async fn handle_new_file_impact(
 
     let text = format!(
         "Language: {:?}\nSymbols: {}\n[Indexed, 0 callers yet]",
-        language,
-        kinds_str,
+        language, kinds_str,
     );
 
     Ok(text)
@@ -334,20 +355,30 @@ async fn handle_edit_impact(
 
     // Get pre-edit symbols from cache or from current index.
     let pre_symbols: Vec<SymbolSnapshot> = {
-        let cache = state.symbol_cache.read().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let cache = state
+            .symbol_cache
+            .read()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         if let Some(cached) = cache.get(path) {
             cached.clone()
         } else {
             // No cache entry — populate from current index.
-            let guard = state.index.read().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let guard = state
+                .index
+                .read()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             if let Some(file) = guard.get_file(path) {
                 let file_bytes = file.byte_len;
-                let syms: Vec<SymbolSnapshot> = file.symbols.iter().map(|s| SymbolSnapshot {
-                    name: s.name.clone(),
-                    kind: s.kind.to_string(),
-                    line_range: s.line_range,
-                    byte_range: s.byte_range,
-                }).collect();
+                let syms: Vec<SymbolSnapshot> = file
+                    .symbols
+                    .iter()
+                    .map(|s| SymbolSnapshot {
+                        name: s.name.clone(),
+                        kind: s.kind.to_string(),
+                        line_range: s.line_range,
+                        byte_range: s.byte_range,
+                    })
+                    .collect();
                 drop(guard);
                 // Can't update cache here (have read lock on cache) — return empty pre
                 // so we get an "all Added" diff on first edit.
@@ -361,7 +392,10 @@ async fn handle_edit_impact(
 
     // Get file byte_len from index before re-indexing.
     let file_bytes_pre: u64 = {
-        let guard = state.index.read().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let guard = state
+            .index
+            .read()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         guard.get_file(path).map(|f| f.byte_len).unwrap_or(0)
     };
 
@@ -371,48 +405,76 @@ async fn handle_edit_impact(
         .and_then(|e| e.to_str())
         .unwrap_or("");
 
-    let language = LanguageId::from_extension(extension)
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let language =
+        LanguageId::from_extension(extension).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Read file from disk and re-index.
     let abs_path = resolve_repo_root(&state)?.join(path);
     let bytes = std::fs::read(&abs_path).unwrap_or_default();
     let file_bytes_new = bytes.len() as u64;
-    let file_bytes = if file_bytes_new > 0 { file_bytes_new } else { file_bytes_pre };
+    let file_bytes = if file_bytes_new > 0 {
+        file_bytes_new
+    } else {
+        file_bytes_pre
+    };
 
     let result = crate::parsing::process_file(path, &bytes, language);
-    let post_symbols: Vec<SymbolSnapshot> = result.symbols.iter().map(|s| SymbolSnapshot {
-        name: s.name.clone(),
-        kind: s.kind.to_string(),
-        line_range: s.line_range,
-        byte_range: s.byte_range,
-    }).collect();
+    let post_symbols: Vec<SymbolSnapshot> = result
+        .symbols
+        .iter()
+        .map(|s| SymbolSnapshot {
+            name: s.name.clone(),
+            kind: s.kind.to_string(),
+            line_range: s.line_range,
+            byte_range: s.byte_range,
+        })
+        .collect();
 
     let indexed = crate::live_index::store::IndexedFile::from_parse_result(result, bytes);
     {
-        let mut write_guard = state.index.write().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let mut write_guard = state
+            .index
+            .write()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         write_guard.update_file(path.to_string(), indexed);
     }
 
     // Compute symbol diff.
-    let added: Vec<&SymbolSnapshot> = post_symbols.iter()
-        .filter(|ps| !pre_symbols.iter().any(|pr| pr.name == ps.name && pr.kind == ps.kind))
+    let added: Vec<&SymbolSnapshot> = post_symbols
+        .iter()
+        .filter(|ps| {
+            !pre_symbols
+                .iter()
+                .any(|pr| pr.name == ps.name && pr.kind == ps.kind)
+        })
         .collect();
 
-    let removed: Vec<&SymbolSnapshot> = pre_symbols.iter()
-        .filter(|pr| !post_symbols.iter().any(|ps| ps.name == pr.name && ps.kind == pr.kind))
+    let removed: Vec<&SymbolSnapshot> = pre_symbols
+        .iter()
+        .filter(|pr| {
+            !post_symbols
+                .iter()
+                .any(|ps| ps.name == pr.name && ps.kind == pr.kind)
+        })
         .collect();
 
-    let changed: Vec<&SymbolSnapshot> = post_symbols.iter()
-        .filter(|ps| pre_symbols.iter().any(|pr| {
-            pr.name == ps.name && pr.kind == ps.kind
-                && (pr.line_range != ps.line_range || pr.byte_range != ps.byte_range)
-        }))
+    let changed: Vec<&SymbolSnapshot> = post_symbols
+        .iter()
+        .filter(|ps| {
+            pre_symbols.iter().any(|pr| {
+                pr.name == ps.name
+                    && pr.kind == ps.kind
+                    && (pr.line_range != ps.line_range || pr.byte_range != ps.byte_range)
+            })
+        })
         .collect();
 
     // Update cache with post-edit snapshot.
     {
-        let mut cache = state.symbol_cache.write().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let mut cache = state
+            .symbol_cache
+            .write()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         cache.insert(path.to_string(), post_symbols.clone());
     }
 
@@ -434,13 +496,18 @@ async fn handle_edit_impact(
         }
 
         // Show callers for Changed + Removed symbols.
-        let impacted: Vec<&SymbolSnapshot> = changed.iter().chain(removed.iter()).copied().collect();
+        let impacted: Vec<&SymbolSnapshot> =
+            changed.iter().chain(removed.iter()).copied().collect();
         if !impacted.is_empty() {
-            let guard = state.index.read().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let guard = state
+                .index
+                .read()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             let mut callers_lines: Vec<String> = Vec::new();
             for sym in &impacted {
                 let callers = guard.find_references_for_name(&sym.name, None, false);
-                let external: Vec<_> = callers.iter()
+                let external: Vec<_> = callers
+                    .iter()
                     .filter(|(fp, _)| *fp != path)
                     .take(5)
                     .collect();
@@ -508,7 +575,10 @@ fn symbol_context_text(
     params: &SymbolContextParams,
     options: RenderOptions,
 ) -> Result<String, StatusCode> {
-    let guard = state.index.read().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let guard = state
+        .index
+        .read()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let raw = guard.find_references_for_name(&params.name, None, false);
 
@@ -530,14 +600,12 @@ fn symbol_context_text(
             continue; // count beyond 10 but don't include
         }
 
-        let enclosing = reference
-            .enclosing_symbol_index
-            .and_then(|idx| {
-                guard
-                    .get_file(file_path)
-                    .and_then(|f| f.symbols.get(idx as usize))
-                    .map(|s| s.name.clone())
-            });
+        let enclosing = reference.enclosing_symbol_index.and_then(|idx| {
+            guard
+                .get_file(file_path)
+                .and_then(|f| f.symbols.get(idx as usize))
+                .map(|s| s.name.clone())
+        });
 
         map.entry(file_path.to_string()).or_default().push((
             reference.line_range.0,
@@ -548,7 +616,8 @@ fn symbol_context_text(
     }
 
     // Compute total bytes for savings (sum of content of all matched files).
-    let total_bytes: u64 = map.keys()
+    let total_bytes: u64 = map
+        .keys()
         .filter_map(|fp| guard.get_file(fp))
         .map(|f| f.byte_len)
         .sum();
@@ -576,7 +645,10 @@ fn symbol_context_text(
     }
 
     if total < grand_total {
-        lines.push(format!("... (showing {} of {} matches)", total, grand_total));
+        lines.push(format!(
+            "... (showing {} of {} matches)",
+            total, grand_total
+        ));
     }
 
     // Apply budget (100 tokens = 400 bytes).
@@ -601,23 +673,27 @@ fn symbol_context_text(
 /// plus a language breakdown header.
 ///
 /// Budget: 500 tokens (2000 bytes). No token savings recorded (additive, not replacement).
-pub async fn repo_map_handler(
-    State(state): State<SidecarState>,
-) -> Result<String, StatusCode> {
+pub async fn repo_map_handler(State(state): State<SidecarState>) -> Result<String, StatusCode> {
     repo_map_text(&state)
 }
 
 pub(crate) fn repo_map_text(state: &SidecarState) -> Result<String, StatusCode> {
-    let guard = state.index.read().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let guard = state
+        .index
+        .read()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let total_files = guard.file_count();
     let total_symbols = guard.symbol_count();
 
     // Collect language breakdown.
-    let mut lang_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut lang_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     // Collect per-directory stats (2-level max).
-    let mut dir_file_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut dir_symbol_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut dir_file_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut dir_symbol_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
 
     for (path, file) in guard.all_files() {
         // Language breakdown.
@@ -657,9 +733,7 @@ pub(crate) fn repo_map_text(state: &SidecarState) -> Result<String, StatusCode> 
         let sym_count = dir_symbol_counts[dir];
         lines.push(format!(
             "  {:<35}  {:>3} files   {:>5} symbols",
-            dir,
-            file_count,
-            sym_count
+            dir, file_count, sym_count
         ));
     }
 
@@ -712,11 +786,7 @@ async fn prompt_context_text(
     }
 
     if let Some(name) = find_prompt_symbol_hint(state, prompt)? {
-        return symbol_context_text(
-            state,
-            &SymbolContextParams { name, file: None },
-            options,
-        );
+        return symbol_context_text(state, &SymbolContextParams { name, file: None }, options);
     }
 
     if prompt_requests_repo_map(prompt) {
@@ -756,7 +826,10 @@ fn get_dir_2level(path: &str) -> String {
 }
 
 fn find_prompt_file_hint(state: &SidecarState, prompt: &str) -> Result<Option<String>, StatusCode> {
-    let guard = state.index.read().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let guard = state
+        .index
+        .read()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let prompt_lower = prompt.to_ascii_lowercase();
     let mut basename_match: Option<String> = None;
     let mut basename_ambiguous = false;
@@ -766,7 +839,9 @@ fn find_prompt_file_hint(state: &SidecarState, prompt: &str) -> Result<Option<St
             return Ok(Some(path.to_string()));
         }
 
-        let Some(file_name) = std::path::Path::new(path).file_name().and_then(|name| name.to_str())
+        let Some(file_name) = std::path::Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
         else {
             continue;
         };
@@ -794,7 +869,10 @@ fn find_prompt_symbol_hint(
     state: &SidecarState,
     prompt: &str,
 ) -> Result<Option<String>, StatusCode> {
-    let guard = state.index.read().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let guard = state
+        .index
+        .read()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     for token in prompt_tokens(prompt) {
         if token.len() < 3 || token.contains('/') || token.contains('.') {
             continue;
@@ -846,9 +924,7 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime};
 
     use crate::domain::{LanguageId, ReferenceKind, ReferenceRecord, SymbolKind, SymbolRecord};
-    use crate::live_index::store::{
-        CircuitBreakerState, IndexedFile, LiveIndex, ParseStatus,
-    };
+    use crate::live_index::store::{CircuitBreakerState, IndexedFile, LiveIndex, ParseStatus};
     use crate::sidecar::{SidecarState, SymbolSnapshot, TokenStats};
 
     // -----------------------------------------------------------------------
@@ -896,7 +972,9 @@ mod tests {
         }
     }
 
-    fn build_shared_index(files: Vec<(&str, IndexedFile)>) -> crate::live_index::store::SharedIndex {
+    fn build_shared_index(
+        files: Vec<(&str, IndexedFile)>,
+    ) -> crate::live_index::store::SharedIndex {
         use crate::live_index::trigram::TrigramIndex;
         let files_map: HashMap<String, IndexedFile> =
             files.into_iter().map(|(p, f)| (p.to_string(), f)).collect();
@@ -989,10 +1067,22 @@ mod tests {
             max_tokens: None,
         };
         let result = outline_handler(State(state), Query(params)).await.unwrap();
-        assert!(result.contains("alpha"), "outline should contain symbol name 'alpha'");
-        assert!(result.contains("Beta"), "outline should contain symbol name 'Beta'");
-        assert!(result.contains("src/foo.rs"), "outline should contain file path");
-        assert!(result.contains("tokens saved"), "outline should have token savings footer");
+        assert!(
+            result.contains("alpha"),
+            "outline should contain symbol name 'alpha'"
+        );
+        assert!(
+            result.contains("Beta"),
+            "outline should contain symbol name 'Beta'"
+        );
+        assert!(
+            result.contains("src/foo.rs"),
+            "outline should contain file path"
+        );
+        assert!(
+            result.contains("tokens saved"),
+            "outline should have token savings footer"
+        );
     }
 
     #[tokio::test]
@@ -1002,7 +1092,9 @@ mod tests {
             path: "nonexistent.rs".to_string(),
             max_tokens: None,
         };
-        let err = outline_handler(State(state), Query(params)).await.unwrap_err();
+        let err = outline_handler(State(state), Query(params))
+            .await
+            .unwrap_err();
         assert_eq!(err, StatusCode::NOT_FOUND);
     }
 
@@ -1010,7 +1102,14 @@ mod tests {
     async fn test_outline_handler_budget_enforced() {
         // Create a file with many symbols to trigger truncation.
         let symbols: Vec<SymbolRecord> = (0..50)
-            .map(|i| make_symbol(&format!("symbol_{:04}", i), SymbolKind::Function, i * 2, i * 2 + 1))
+            .map(|i| {
+                make_symbol(
+                    &format!("symbol_{:04}", i),
+                    SymbolKind::Function,
+                    i * 2,
+                    i * 2 + 1,
+                )
+            })
             .collect();
         let file = make_indexed_file("src/big.rs", symbols, vec![], ParseStatus::Parsed);
         let state = make_state(vec![("src/big.rs", file)]);
@@ -1023,7 +1122,8 @@ mod tests {
         // With 10-token (40 byte) budget, only the header fits. Truncation suffix should appear.
         assert!(
             result.contains("truncated") || result.len() < 500,
-            "result should be truncated or short: {}", result.len()
+            "result should be truncated or short: {}",
+            result.len()
         );
     }
 
@@ -1043,7 +1143,11 @@ mod tests {
             max_tokens: None,
         };
         let _ = outline_handler(State(state), Query(params)).await.unwrap();
-        assert_eq!(stats.summary().read_fires, 1, "read fires should be incremented");
+        assert_eq!(
+            stats.summary().read_fires,
+            1,
+            "read fires should be incremented"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1052,8 +1156,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_impact_handler_new_file_returns_language_and_symbols() {
-        use tempfile::TempDir;
         use std::io::Write;
+        use tempfile::TempDir;
 
         let tmp = TempDir::new().unwrap();
         let rs_path = tmp.path().join("new_file.rs");
@@ -1098,14 +1202,15 @@ mod tests {
         // Seed the symbol cache with pre-edit state.
         {
             let mut cache = state.symbol_cache.write().unwrap();
-            cache.insert("src/db.rs".to_string(), vec![
-                SymbolSnapshot {
+            cache.insert(
+                "src/db.rs".to_string(),
+                vec![SymbolSnapshot {
                     name: "connect".to_string(),
                     kind: "function".to_string(),
                     line_range: (1, 5), // different range = "Changed"
                     byte_range: (0, 50),
-                }
-            ]);
+                }],
+            );
         }
 
         let params = ImpactParams {
@@ -1118,7 +1223,10 @@ mod tests {
         // the important thing is it returns a string response, not an error.
         let result = impact_handler(State(state), Query(params)).await;
         // Should return Ok with some text
-        assert!(result.is_ok(), "impact_handler should return Ok even if file missing from disk");
+        assert!(
+            result.is_ok(),
+            "impact_handler should return Ok even if file missing from disk"
+        );
         let text = result.unwrap();
         assert!(text.contains("tokens saved"), "should have footer");
     }
@@ -1178,12 +1286,15 @@ mod tests {
         let match_count = result.matches("line 1").count();
         assert!(
             match_count <= 10,
-            "should show at most 10 matches, got {}: {}", match_count, result
+            "should show at most 10 matches, got {}: {}",
+            match_count,
+            result
         );
         // Should indicate there are more matches (via "showing" or "truncated").
         assert!(
             result.contains("showing") || result.contains("truncated"),
-            "should indicate truncation: {}", result
+            "should indicate truncation: {}",
+            result
         );
     }
 
@@ -1199,9 +1310,14 @@ mod tests {
             vec![],
             ParseStatus::Parsed,
         );
-        let f2 = make_indexed_file("src/lib.rs", vec![], vec![], ParseStatus::Failed {
-            error: "oops".to_string(),
-        });
+        let f2 = make_indexed_file(
+            "src/lib.rs",
+            vec![],
+            vec![],
+            ParseStatus::Failed {
+                error: "oops".to_string(),
+            },
+        );
         let state = make_state(vec![("src/main.rs", f1), ("src/lib.rs", f2)]);
 
         let result = repo_map_handler(State(state)).await.unwrap();
@@ -1214,7 +1330,10 @@ mod tests {
     async fn test_repo_map_handler_empty_index() {
         let state = make_state(vec![]);
         let result = repo_map_handler(State(state)).await.unwrap();
-        assert!(result.contains("0 files"), "empty index should show 0 files");
+        assert!(
+            result.contains("0 files"),
+            "empty index should show 0 files"
+        );
     }
 
     #[tokio::test]
@@ -1236,8 +1355,14 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(result.contains("src/main.rs"), "prompt context should target the hinted file");
-        assert!(result.contains("serve"), "prompt context should surface the file outline");
+        assert!(
+            result.contains("src/main.rs"),
+            "prompt context should target the hinted file"
+        );
+        assert!(
+            result.contains("serve"),
+            "prompt context should surface the file outline"
+        );
     }
 
     // -----------------------------------------------------------------------

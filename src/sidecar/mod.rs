@@ -7,8 +7,8 @@ pub use server::spawn_sidecar;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 
 use serde::Serialize;
 
@@ -248,7 +248,10 @@ mod tests {
         let stats = TokenStats::new();
         stats.record_read(100, 500);
         let snap = stats.summary();
-        assert_eq!(snap.read_saved_tokens, 0, "saturating_sub prevents underflow");
+        assert_eq!(
+            snap.read_saved_tokens, 0,
+            "saturating_sub prevents underflow"
+        );
     }
 
     #[test]
@@ -266,7 +269,11 @@ mod tests {
 
     #[test]
     fn test_build_with_budget_no_truncation_when_fits() {
-        let items: Vec<String> = vec!["line1".to_string(), "line2".to_string(), "line3".to_string()];
+        let items: Vec<String> = vec![
+            "line1".to_string(),
+            "line2".to_string(),
+            "line3".to_string(),
+        ];
         let (text, remaining) = build_with_budget(&items, 1000);
         assert_eq!(text, "line1\nline2\nline3");
         assert_eq!(remaining, 0, "no truncation when all items fit");
@@ -277,7 +284,11 @@ mod tests {
         // "line1\nline2\nline3" = 5+1+5+1+5 = 17 bytes
         // max_bytes=12 means line1(5+1=6) + line2(5+1=6) = 12 bytes fits,
         // but adding line3(5) would be 12+5=17 > 12
-        let items: Vec<String> = vec!["line1".to_string(), "line2".to_string(), "line3".to_string()];
+        let items: Vec<String> = vec![
+            "line1".to_string(),
+            "line2".to_string(),
+            "line3".to_string(),
+        ];
         let (text, remaining) = build_with_budget(&items, 12);
         assert!(text.contains("line1"), "line1 should be included");
         assert!(text.contains("line2"), "line2 should be included");
@@ -321,10 +332,10 @@ mod tests {
 
     #[test]
     fn test_sidecar_state_constructs() {
+        use crate::live_index::store::{CircuitBreakerState, LiveIndex};
         use std::collections::HashMap;
         use std::sync::{Arc, RwLock};
         use std::time::{Duration, Instant, SystemTime};
-        use crate::live_index::store::{CircuitBreakerState, LiveIndex};
 
         let index = Arc::new(RwLock::new(LiveIndex {
             files: HashMap::new(),

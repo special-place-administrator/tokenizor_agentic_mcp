@@ -82,10 +82,7 @@ pub fn run_init_with_context(
             paths.claude_config.display()
         );
 
-        upsert_guidance_markdown(
-            &paths.claude_memory,
-            &claude_guidance_block(),
-        )?;
+        upsert_guidance_markdown(&paths.claude_memory, &claude_guidance_block())?;
         eprintln!(
             "Claude guidance written to {}",
             paths.claude_memory.display()
@@ -100,10 +97,7 @@ pub fn run_init_with_context(
         );
 
         upsert_guidance_markdown(&paths.codex_agents, &codex_guidance_block())?;
-        eprintln!(
-            "Codex guidance written to {}",
-            paths.codex_agents.display()
-        );
+        eprintln!("Codex guidance written to {}", paths.codex_agents.display());
         eprintln!(
             "note: Codex gets MCP tools only. No documented Codex hook/session-start enrichment interface was found, so transparent enrichment remains Claude-only."
         );
@@ -367,7 +361,9 @@ fn merge_codex_project_doc_fallbacks(config: &mut DocumentMut) {
     let fallbacks = config[key]
         .as_array_mut()
         .expect("project_doc_fallback_filenames must be an array");
-    let has_claude_md = fallbacks.iter().any(|entry| entry.as_str() == Some("CLAUDE.md"));
+    let has_claude_md = fallbacks
+        .iter()
+        .any(|entry| entry.as_str() == Some("CLAUDE.md"));
     if !has_claude_md {
         fallbacks.push("CLAUDE.md");
     }

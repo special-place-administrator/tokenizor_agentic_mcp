@@ -8,8 +8,8 @@ use rayon::prelude::*;
 use tracing::{error, info, warn};
 
 use crate::domain::{
-    find_enclosing_symbol, FileOutcome, FileProcessingResult, LanguageId, ReferenceRecord,
-    SymbolRecord,
+    FileOutcome, FileProcessingResult, LanguageId, ReferenceRecord, SymbolRecord,
+    find_enclosing_symbol,
 };
 use crate::error::Result;
 use crate::{discovery, parsing};
@@ -220,7 +220,9 @@ pub enum IndexState {
     Empty,
     Loading,
     Ready,
-    CircuitBreakerTripped { summary: String },
+    CircuitBreakerTripped {
+        summary: String,
+    },
 }
 
 /// The in-memory index: file contents and parsed symbols for all discovered files.
@@ -395,7 +397,8 @@ impl LiveIndex {
 
         // 3. Build new file map with fresh circuit breaker
         let new_cb = CircuitBreakerState::from_env();
-        let mut new_files: HashMap<String, IndexedFile> = HashMap::with_capacity(parse_results.len());
+        let mut new_files: HashMap<String, IndexedFile> =
+            HashMap::with_capacity(parse_results.len());
 
         let mut cb_tripped = false;
         for (path, indexed_file) in parse_results {
@@ -494,13 +497,14 @@ impl LiveIndex {
         }
         self.reverse_index = idx;
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{FileOutcome, LanguageId, ReferenceKind, ReferenceRecord, SymbolKind, SymbolRecord};
+    use crate::domain::{
+        FileOutcome, LanguageId, ReferenceKind, ReferenceRecord, SymbolKind, SymbolRecord,
+    };
     use std::fs;
     use tempfile::TempDir;
 
@@ -547,8 +551,15 @@ mod tests {
             vec![dummy_symbol()],
         );
         let indexed = IndexedFile::from_parse_result(result, b"fn bad(".to_vec());
-        assert!(matches!(indexed.parse_status, ParseStatus::PartialParse { .. }));
-        assert_eq!(indexed.symbols.len(), 1, "symbols kept even on partial parse");
+        assert!(matches!(
+            indexed.parse_status,
+            ParseStatus::PartialParse { .. }
+        ));
+        assert_eq!(
+            indexed.symbols.len(),
+            1,
+            "symbols kept even on partial parse"
+        );
     }
 
     #[test]
@@ -563,7 +574,10 @@ mod tests {
         let indexed = IndexedFile::from_parse_result(result, content.clone());
         assert!(matches!(indexed.parse_status, ParseStatus::Failed { .. }));
         assert!(indexed.symbols.is_empty(), "failed parse has no symbols");
-        assert_eq!(indexed.content, content, "content bytes stored even on failure");
+        assert_eq!(
+            indexed.content, content,
+            "content bytes stored even on failure"
+        );
     }
 
     // --- CircuitBreakerState ---
@@ -578,7 +592,10 @@ mod tests {
         for i in 0..2 {
             cb.record_failure(&format!("file{i}.rs"), "error");
         }
-        assert!(!cb.should_abort(), "2/10 = 20% should NOT trip (threshold not exceeded)");
+        assert!(
+            !cb.should_abort(),
+            "2/10 = 20% should NOT trip (threshold not exceeded)"
+        );
     }
 
     #[test]
@@ -602,7 +619,10 @@ mod tests {
         cb.record_failure("b.rs", "err");
         cb.record_failure("c.rs", "err");
         // 3 total, all failed — but < 5 minimum threshold
-        assert!(!cb.should_abort(), "< 5 files processed: circuit breaker must not trip");
+        assert!(
+            !cb.should_abort(),
+            "< 5 files processed: circuit breaker must not trip"
+        );
     }
 
     #[test]
@@ -649,7 +669,10 @@ mod tests {
 
         let shared = LiveIndex::load(tmp.path()).unwrap();
         let index = shared.read().unwrap();
-        assert!(!index.cb_state.is_tripped(), "valid files should not trip circuit breaker");
+        assert!(
+            !index.cb_state.is_tripped(),
+            "valid files should not trip circuit breaker"
+        );
         assert_eq!(index.file_count(), 5);
     }
 
@@ -668,7 +691,10 @@ mod tests {
 
         let shared = LiveIndex::load(tmp.path()).unwrap();
         let index = shared.read().unwrap();
-        assert!(!index.cb_state.is_tripped(), "all-parseable files should not trip circuit breaker");
+        assert!(
+            !index.cb_state.is_tripped(),
+            "all-parseable files should not trip circuit breaker"
+        );
     }
 
     #[test]
@@ -740,7 +766,10 @@ mod tests {
         let shared = LiveIndex::empty();
         let mut index = shared.write().unwrap();
         let result = index.reload(Path::new("/nonexistent/path/that/does/not/exist"));
-        assert!(result.is_err(), "reload on invalid root should return error");
+        assert!(
+            result.is_err(),
+            "reload on invalid root should return error"
+        );
     }
 
     #[test]
@@ -751,7 +780,10 @@ mod tests {
         let index = shared.read().unwrap();
         let after = SystemTime::now();
         let ts = index.loaded_at_system();
-        assert!(ts >= before, "loaded_at_system should be >= before creation");
+        assert!(
+            ts >= before,
+            "loaded_at_system should be >= before creation"
+        );
         assert!(ts <= after, "loaded_at_system should be <= after creation");
     }
 
@@ -819,7 +851,10 @@ mod tests {
         index.update_file("src/new.rs".to_string(), file);
         let after = SystemTime::now();
 
-        assert!(index.get_file("src/new.rs").is_some(), "file should be inserted");
+        assert!(
+            index.get_file("src/new.rs").is_some(),
+            "file should be inserted"
+        );
         let ts = index.loaded_at_system;
         assert!(ts >= before, "loaded_at_system should be >= before update");
         assert!(ts <= after, "loaded_at_system should be <= after update");
@@ -855,7 +890,10 @@ mod tests {
         index.update_file("src/foo.rs".to_string(), file2);
 
         let retrieved = index.get_file("src/foo.rs").unwrap();
-        assert_eq!(retrieved.content_hash, "new_hash", "should have replaced the file");
+        assert_eq!(
+            retrieved.content_hash, "new_hash",
+            "should have replaced the file"
+        );
         assert_eq!(index.file_count(), 1, "should still have exactly 1 file");
     }
 
@@ -867,7 +905,11 @@ mod tests {
         let file = make_indexed_file_for_mutation("src/new.rs");
         index.add_file("src/new.rs".to_string(), file);
 
-        assert_eq!(index.file_count(), 1, "file count should increase by 1 after add_file");
+        assert_eq!(
+            index.file_count(),
+            1,
+            "file count should increase by 1 after add_file"
+        );
         assert!(index.get_file("src/new.rs").is_some());
     }
 
@@ -879,7 +921,10 @@ mod tests {
         assert_eq!(index.file_count(), 1);
 
         index.remove_file("src/to_delete.rs");
-        assert!(index.get_file("src/to_delete.rs").is_none(), "file should be removed");
+        assert!(
+            index.get_file("src/to_delete.rs").is_none(),
+            "file should be removed"
+        );
         assert_eq!(index.file_count(), 0);
     }
 
@@ -917,7 +962,11 @@ mod tests {
         assert_eq!(index.file_count(), 1);
 
         index.remove_file("nonexistent.rs");
-        assert_eq!(index.file_count(), 1, "removing nonexistent does not change count");
+        assert_eq!(
+            index.file_count(),
+            1,
+            "removing nonexistent does not change count"
+        );
     }
 
     // --- Cross-reference fields and reverse index ---
@@ -968,7 +1017,10 @@ mod tests {
         let indexed = IndexedFile::from_parse_result(result, vec![]);
         assert_eq!(indexed.references.len(), 1);
         assert_eq!(indexed.references[0].name, "foo");
-        assert_eq!(indexed.alias_map.get("Map").map(|s| s.as_str()), Some("HashMap"));
+        assert_eq!(
+            indexed.alias_map.get("Map").map(|s| s.as_str()),
+            Some("HashMap")
+        );
     }
 
     #[test]
@@ -979,19 +1031,29 @@ mod tests {
             make_ref("process", ReferenceKind::Call, 5),
             make_ref("load", ReferenceKind::Call, 10),
         ];
-        let refs_b = vec![
-            make_ref("process", ReferenceKind::Call, 3),
-        ];
+        let refs_b = vec![make_ref("process", ReferenceKind::Call, 3)];
 
-        index.add_file("a.rs".to_string(), make_indexed_file_with_refs("a.rs", refs_a));
-        index.add_file("b.rs".to_string(), make_indexed_file_with_refs("b.rs", refs_b));
+        index.add_file(
+            "a.rs".to_string(),
+            make_indexed_file_with_refs("a.rs", refs_a),
+        );
+        index.add_file(
+            "b.rs".to_string(),
+            make_indexed_file_with_refs("b.rs", refs_b),
+        );
 
         // process appears in both files
-        let locs = index.reverse_index.get("process").expect("process should be in reverse index");
+        let locs = index
+            .reverse_index
+            .get("process")
+            .expect("process should be in reverse index");
         assert_eq!(locs.len(), 2, "process referenced in 2 files");
 
         // load appears only in a.rs
-        let locs_load = index.reverse_index.get("load").expect("load should be in reverse index");
+        let locs_load = index
+            .reverse_index
+            .get("load")
+            .expect("load should be in reverse index");
         assert_eq!(locs_load.len(), 1);
         assert_eq!(locs_load[0].file_path, "a.rs");
         assert_eq!(locs_load[0].reference_idx, 1);
@@ -1002,14 +1064,26 @@ mod tests {
         let mut index = make_empty_live_index();
 
         let refs_old = vec![make_ref("old_func", ReferenceKind::Call, 1)];
-        index.add_file("src.rs".to_string(), make_indexed_file_with_refs("src.rs", refs_old));
+        index.add_file(
+            "src.rs".to_string(),
+            make_indexed_file_with_refs("src.rs", refs_old),
+        );
         assert!(index.reverse_index.contains_key("old_func"));
 
         let refs_new = vec![make_ref("new_func", ReferenceKind::Call, 1)];
-        index.update_file("src.rs".to_string(), make_indexed_file_with_refs("src.rs", refs_new));
+        index.update_file(
+            "src.rs".to_string(),
+            make_indexed_file_with_refs("src.rs", refs_new),
+        );
 
-        assert!(!index.reverse_index.contains_key("old_func"), "stale entry should be gone");
-        assert!(index.reverse_index.contains_key("new_func"), "new entry should be present");
+        assert!(
+            !index.reverse_index.contains_key("old_func"),
+            "stale entry should be gone"
+        );
+        assert!(
+            index.reverse_index.contains_key("new_func"),
+            "new entry should be present"
+        );
     }
 
     #[test]
@@ -1017,11 +1091,17 @@ mod tests {
         let mut index = make_empty_live_index();
 
         let refs = vec![make_ref("target_fn", ReferenceKind::Call, 2)];
-        index.add_file("will_delete.rs".to_string(), make_indexed_file_with_refs("will_delete.rs", refs));
+        index.add_file(
+            "will_delete.rs".to_string(),
+            make_indexed_file_with_refs("will_delete.rs", refs),
+        );
         assert!(index.reverse_index.contains_key("target_fn"));
 
         index.remove_file("will_delete.rs");
-        assert!(!index.reverse_index.contains_key("target_fn"), "removed file's refs should be gone");
+        assert!(
+            !index.reverse_index.contains_key("target_fn"),
+            "removed file's refs should be gone"
+        );
     }
 
     #[test]
@@ -1037,6 +1117,9 @@ mod tests {
     #[test]
     fn test_empty_live_index_has_empty_reverse_index() {
         let index = make_empty_live_index();
-        assert!(index.reverse_index.is_empty(), "fresh index should have empty reverse index");
+        assert!(
+            index.reverse_index.is_empty(),
+            "fresh index should have empty reverse index"
+        );
     }
 }

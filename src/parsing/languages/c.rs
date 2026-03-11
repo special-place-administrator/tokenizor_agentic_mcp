@@ -22,9 +22,15 @@ fn walk_node(
         _ => None,
     };
 
-    push_named_symbol(node, source, depth, sort_order, symbols, kind, |node, source, _| {
-        find_c_name(node, source)
-    });
+    push_named_symbol(
+        node,
+        source,
+        depth,
+        sort_order,
+        symbols,
+        kind,
+        |node, source, _| find_c_name(node, source),
+    );
     // Recurse into children, but skip struct/enum bodies to avoid re-extracting nested types
     // as children of the outer specifier (they get their own entry when directly encountered)
     walk_children(node, source, depth, sort_order, symbols, kind, walk_node);
@@ -135,7 +141,11 @@ mod tests {
         let source = "int add(int a, int b) { return a + b; }";
         let symbols = parse_c(source);
         let func = symbols.iter().find(|s| s.kind == SymbolKind::Function);
-        assert!(func.is_some(), "should extract function, got: {:?}", symbols);
+        assert!(
+            func.is_some(),
+            "should extract function, got: {:?}",
+            symbols
+        );
         assert_eq!(func.unwrap().name, "add");
     }
 
@@ -171,7 +181,11 @@ mod tests {
         let source = "void *malloc_wrapper(size_t size) { return 0; }";
         let symbols = parse_c(source);
         let func = symbols.iter().find(|s| s.kind == SymbolKind::Function);
-        assert!(func.is_some(), "should extract pointer-return function, got: {:?}", symbols);
+        assert!(
+            func.is_some(),
+            "should extract pointer-return function, got: {:?}",
+            symbols
+        );
         assert_eq!(func.unwrap().name, "malloc_wrapper");
     }
 
@@ -179,9 +193,17 @@ mod tests {
     fn test_c_language_process_file_returns_processed() {
         let source = b"int main(int argc, char **argv) { return 0; }\nstruct Node { int val; };";
         let result = process_file("test.c", source, LanguageId::C);
-        assert_eq!(result.outcome, FileOutcome::Processed, "outcome: {:?}", result.outcome);
+        assert_eq!(
+            result.outcome,
+            FileOutcome::Processed,
+            "outcome: {:?}",
+            result.outcome
+        );
         assert!(!result.symbols.is_empty(), "should have symbols");
-        let func = result.symbols.iter().find(|s| s.kind == SymbolKind::Function && s.name == "main");
+        let func = result
+            .symbols
+            .iter()
+            .find(|s| s.kind == SymbolKind::Function && s.name == "main");
         assert!(func.is_some(), "should have main function");
     }
 }

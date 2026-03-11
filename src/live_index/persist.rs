@@ -11,9 +11,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::domain::{LanguageId, ReferenceRecord, SymbolRecord};
-use crate::live_index::store::{
-    CircuitBreakerState, IndexedFile, LiveIndex, ParseStatus,
-};
+use crate::live_index::store::{CircuitBreakerState, IndexedFile, LiveIndex, ParseStatus};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -176,7 +174,11 @@ pub fn snapshot_to_live_index(snapshot: IndexSnapshot) -> LiveIndex {
 /// Compares `byte_len` and `mtime_secs` stored in the snapshot against current
 /// filesystem metadata. Files with differing size or mtime are in `changed`.
 /// Files with `ENOENT` go to `deleted`. Files on disk not in the index go to `new_files`.
-pub fn stat_check_files(index: &LiveIndex, snapshot_mtimes: &HashMap<String, i64>, root: &Path) -> StatCheckResult {
+pub fn stat_check_files(
+    index: &LiveIndex,
+    snapshot_mtimes: &HashMap<String, i64>,
+    root: &Path,
+) -> StatCheckResult {
     let mut changed = Vec::new();
     let mut deleted = Vec::new();
 
@@ -219,7 +221,11 @@ pub fn stat_check_files(index: &LiveIndex, snapshot_mtimes: &HashMap<String, i64
         }
     };
 
-    StatCheckResult { changed, deleted, new_files }
+    StatCheckResult {
+        changed,
+        deleted,
+        new_files,
+    }
 }
 
 /// Select approximately `sample_pct` of files and check their content hashes.
@@ -236,15 +242,17 @@ pub fn spot_verify_sample(index: &LiveIndex, root: &Path, sample_pct: f64) -> Ve
 
     // Deterministic pseudo-random sample: every Nth file
     let total = all_paths.len();
-    let sample_size = ((total as f64 * sample_pct).ceil() as usize).max(1).min(total);
-    let step = if sample_size == 0 { 1 } else { total / sample_size };
+    let sample_size = ((total as f64 * sample_pct).ceil() as usize)
+        .max(1)
+        .min(total);
+    let step = if sample_size == 0 {
+        1
+    } else {
+        total / sample_size
+    };
     let step = step.max(1);
 
-    let sampled: HashSet<&str> = all_paths
-        .iter()
-        .step_by(step)
-        .map(|p| p.as_str())
-        .collect();
+    let sampled: HashSet<&str> = all_paths.iter().step_by(step).map(|p| p.as_str()).collect();
 
     let mut mismatches = Vec::new();
 
@@ -332,7 +340,9 @@ pub async fn background_verify(
     }
 
     // 3. Re-parse changed files
-    let to_reparse: Vec<String> = stat_result.changed.into_iter()
+    let to_reparse: Vec<String> = stat_result
+        .changed
+        .into_iter()
         .chain(stat_result.new_files.into_iter())
         .collect();
 
@@ -492,13 +502,19 @@ mod tests {
 
         // Verify
         assert_eq!(loaded.files.len(), 1);
-        let file = loaded.files.get("src/main.rs").expect("file should be present");
+        let file = loaded
+            .files
+            .get("src/main.rs")
+            .expect("file should be present");
         assert_eq!(file.content, content);
         assert_eq!(file.symbols.len(), 1);
         assert_eq!(file.symbols[0].name, "my_func");
         assert_eq!(file.references.len(), 1);
         assert_eq!(file.references[0].name, "other_func");
-        assert_eq!(file.alias_map.get("Alias").map(|s| s.as_str()), Some("Original"));
+        assert_eq!(
+            file.alias_map.get("Alias").map(|s| s.as_str()),
+            Some("Original")
+        );
     }
 
     #[test]
@@ -540,43 +556,56 @@ mod tests {
         let mut file_map = HashMap::new();
 
         // Parsed
-        file_map.insert("ok.rs".to_string(), IndexedFile {
-            relative_path: "ok.rs".to_string(),
-            language: LanguageId::Rust,
-            content: b"fn foo() {}".to_vec(),
-            symbols: vec![],
-            parse_status: ParseStatus::Parsed,
-            byte_len: 11,
-            content_hash: "hash1".to_string(),
-            references: vec![],
-            alias_map: HashMap::new(),
-        });
+        file_map.insert(
+            "ok.rs".to_string(),
+            IndexedFile {
+                relative_path: "ok.rs".to_string(),
+                language: LanguageId::Rust,
+                content: b"fn foo() {}".to_vec(),
+                symbols: vec![],
+                parse_status: ParseStatus::Parsed,
+                byte_len: 11,
+                content_hash: "hash1".to_string(),
+                references: vec![],
+                alias_map: HashMap::new(),
+            },
+        );
 
         // PartialParse
-        file_map.insert("partial.rs".to_string(), IndexedFile {
-            relative_path: "partial.rs".to_string(),
-            language: LanguageId::Rust,
-            content: b"fn bad(".to_vec(),
-            symbols: vec![],
-            parse_status: ParseStatus::PartialParse { warning: "syntax error".to_string() },
-            byte_len: 7,
-            content_hash: "hash2".to_string(),
-            references: vec![],
-            alias_map: HashMap::new(),
-        });
+        file_map.insert(
+            "partial.rs".to_string(),
+            IndexedFile {
+                relative_path: "partial.rs".to_string(),
+                language: LanguageId::Rust,
+                content: b"fn bad(".to_vec(),
+                symbols: vec![],
+                parse_status: ParseStatus::PartialParse {
+                    warning: "syntax error".to_string(),
+                },
+                byte_len: 7,
+                content_hash: "hash2".to_string(),
+                references: vec![],
+                alias_map: HashMap::new(),
+            },
+        );
 
         // Failed
-        file_map.insert("fail.rb".to_string(), IndexedFile {
-            relative_path: "fail.rb".to_string(),
-            language: LanguageId::Ruby,
-            content: b"garbage".to_vec(),
-            symbols: vec![],
-            parse_status: ParseStatus::Failed { error: "parse error".to_string() },
-            byte_len: 7,
-            content_hash: "hash3".to_string(),
-            references: vec![],
-            alias_map: HashMap::new(),
-        });
+        file_map.insert(
+            "fail.rb".to_string(),
+            IndexedFile {
+                relative_path: "fail.rb".to_string(),
+                language: LanguageId::Ruby,
+                content: b"garbage".to_vec(),
+                symbols: vec![],
+                parse_status: ParseStatus::Failed {
+                    error: "parse error".to_string(),
+                },
+                byte_len: 7,
+                content_hash: "hash3".to_string(),
+                references: vec![],
+                alias_map: HashMap::new(),
+            },
+        );
 
         let trigram_index = crate::live_index::trigram::TrigramIndex::build_from_files(&file_map);
         let mut index = LiveIndex {
@@ -595,7 +624,10 @@ mod tests {
         let snapshot = load_snapshot(tmp.path()).expect("load should succeed");
         let loaded = snapshot_to_live_index(snapshot);
 
-        assert_eq!(loaded.files.get("ok.rs").unwrap().parse_status, ParseStatus::Parsed);
+        assert_eq!(
+            loaded.files.get("ok.rs").unwrap().parse_status,
+            ParseStatus::Parsed
+        );
         assert!(matches!(
             loaded.files.get("partial.rs").unwrap().parse_status,
             ParseStatus::PartialParse { .. }
@@ -634,10 +666,17 @@ mod tests {
         // Write random garbage
         let dir = tmp.path().join(".tokenizor");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("index.bin"), b"not valid postcard data xyzzy 12345").unwrap();
+        std::fs::write(
+            dir.join("index.bin"),
+            b"not valid postcard data xyzzy 12345",
+        )
+        .unwrap();
 
         let result = load_snapshot(tmp.path());
-        assert!(result.is_none(), "corrupt bytes must return None, not panic");
+        assert!(
+            result.is_none(),
+            "corrupt bytes must return None, not panic"
+        );
     }
 
     #[test]
@@ -654,7 +693,10 @@ mod tests {
         std::fs::write(&bin_path, truncated).unwrap();
 
         let result = load_snapshot(tmp.path());
-        assert!(result.is_none(), "truncated bytes must return None, not panic");
+        assert!(
+            result.is_none(),
+            "truncated bytes must return None, not panic"
+        );
     }
 
     #[test]
@@ -675,17 +717,20 @@ mod tests {
 
         // Build index with wrong byte_len to simulate a changed file
         let mut file_map = HashMap::new();
-        file_map.insert("a.rs".to_string(), IndexedFile {
-            relative_path: "a.rs".to_string(),
-            language: LanguageId::Rust,
-            content: b"fn foo() {}".to_vec(),
-            symbols: vec![],
-            parse_status: ParseStatus::Parsed,
-            byte_len: 999, // wrong size — simulates change
-            content_hash: "old_hash".to_string(),
-            references: vec![],
-            alias_map: HashMap::new(),
-        });
+        file_map.insert(
+            "a.rs".to_string(),
+            IndexedFile {
+                relative_path: "a.rs".to_string(),
+                language: LanguageId::Rust,
+                content: b"fn foo() {}".to_vec(),
+                symbols: vec![],
+                parse_status: ParseStatus::Parsed,
+                byte_len: 999, // wrong size — simulates change
+                content_hash: "old_hash".to_string(),
+                references: vec![],
+                alias_map: HashMap::new(),
+            },
+        );
         let trigram_index = crate::live_index::trigram::TrigramIndex::build_from_files(&file_map);
         let mut index = LiveIndex {
             files: file_map,
@@ -700,15 +745,21 @@ mod tests {
         index.rebuild_reverse_index();
 
         // mtime from disk
-        let mtime = std::fs::metadata(&file_path).unwrap()
-            .modified().unwrap()
-            .duration_since(UNIX_EPOCH).unwrap()
+        let mtime = std::fs::metadata(&file_path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
             .as_secs() as i64;
         let mut mtimes = HashMap::new();
         mtimes.insert("a.rs".to_string(), mtime);
 
         let result = stat_check_files(&index, &mtimes, tmp.path());
-        assert!(result.changed.contains(&"a.rs".to_string()), "changed by size mismatch");
+        assert!(
+            result.changed.contains(&"a.rs".to_string()),
+            "changed by size mismatch"
+        );
         assert!(result.deleted.is_empty());
     }
 
@@ -718,17 +769,20 @@ mod tests {
 
         // Index has a file that doesn't exist on disk
         let mut file_map = HashMap::new();
-        file_map.insert("ghost.rs".to_string(), IndexedFile {
-            relative_path: "ghost.rs".to_string(),
-            language: LanguageId::Rust,
-            content: b"fn ghost() {}".to_vec(),
-            symbols: vec![],
-            parse_status: ParseStatus::Parsed,
-            byte_len: 13,
-            content_hash: "hash".to_string(),
-            references: vec![],
-            alias_map: HashMap::new(),
-        });
+        file_map.insert(
+            "ghost.rs".to_string(),
+            IndexedFile {
+                relative_path: "ghost.rs".to_string(),
+                language: LanguageId::Rust,
+                content: b"fn ghost() {}".to_vec(),
+                symbols: vec![],
+                parse_status: ParseStatus::Parsed,
+                byte_len: 13,
+                content_hash: "hash".to_string(),
+                references: vec![],
+                alias_map: HashMap::new(),
+            },
+        );
         let trigram_index = crate::live_index::trigram::TrigramIndex::build_from_files(&file_map);
         let mut index = LiveIndex {
             files: file_map,
@@ -743,7 +797,10 @@ mod tests {
         index.rebuild_reverse_index();
 
         let result = stat_check_files(&index, &HashMap::new(), tmp.path());
-        assert!(result.deleted.contains(&"ghost.rs".to_string()), "missing file should be in deleted");
+        assert!(
+            result.deleted.contains(&"ghost.rs".to_string()),
+            "missing file should be in deleted"
+        );
     }
 
     #[test]
@@ -756,7 +813,10 @@ mod tests {
         let index = make_live_index_with_files(vec![]);
 
         let result = stat_check_files(&index, &HashMap::new(), tmp.path());
-        assert!(result.new_files.contains(&"new.rs".to_string()), "new file should be detected");
+        assert!(
+            result.new_files.contains(&"new.rs".to_string()),
+            "new file should be detected"
+        );
     }
 
     // ── spot_verify_sample tests ──────────────────────────────────────────────
@@ -769,17 +829,20 @@ mod tests {
         std::fs::write(&file_path, b"fn modified() {}").unwrap();
 
         let mut file_map = HashMap::new();
-        file_map.insert("a.rs".to_string(), IndexedFile {
-            relative_path: "a.rs".to_string(),
-            language: LanguageId::Rust,
-            content: b"fn original() {}".to_vec(), // old content
-            symbols: vec![],
-            parse_status: ParseStatus::Parsed,
-            byte_len: 16,
-            content_hash: crate::hash::digest_hex(b"fn original() {}"), // stale hash
-            references: vec![],
-            alias_map: HashMap::new(),
-        });
+        file_map.insert(
+            "a.rs".to_string(),
+            IndexedFile {
+                relative_path: "a.rs".to_string(),
+                language: LanguageId::Rust,
+                content: b"fn original() {}".to_vec(), // old content
+                symbols: vec![],
+                parse_status: ParseStatus::Parsed,
+                byte_len: 16,
+                content_hash: crate::hash::digest_hex(b"fn original() {}"), // stale hash
+                references: vec![],
+                alias_map: HashMap::new(),
+            },
+        );
         let trigram_index = crate::live_index::trigram::TrigramIndex::build_from_files(&file_map);
         let mut index = LiveIndex {
             files: file_map,
@@ -810,17 +873,20 @@ mod tests {
 
         let hash = crate::hash::digest_hex(content);
         let mut file_map = HashMap::new();
-        file_map.insert("a.rs".to_string(), IndexedFile {
-            relative_path: "a.rs".to_string(),
-            language: LanguageId::Rust,
-            content: content.to_vec(),
-            symbols: vec![],
-            parse_status: ParseStatus::Parsed,
-            byte_len: content.len() as u64,
-            content_hash: hash,
-            references: vec![],
-            alias_map: HashMap::new(),
-        });
+        file_map.insert(
+            "a.rs".to_string(),
+            IndexedFile {
+                relative_path: "a.rs".to_string(),
+                language: LanguageId::Rust,
+                content: content.to_vec(),
+                symbols: vec![],
+                parse_status: ParseStatus::Parsed,
+                byte_len: content.len() as u64,
+                content_hash: hash,
+                references: vec![],
+                alias_map: HashMap::new(),
+            },
+        );
         let trigram_index = crate::live_index::trigram::TrigramIndex::build_from_files(&file_map);
         let mut index = LiveIndex {
             files: file_map,
@@ -855,8 +921,10 @@ mod tests {
 
         serialize_index(&index, tmp.path()).expect("serialize should succeed");
 
-        assert!(tmp.path().join(".tokenizor").join("index.bin").exists(),
-            ".tokenizor/index.bin should be created");
+        assert!(
+            tmp.path().join(".tokenizor").join("index.bin").exists(),
+            ".tokenizor/index.bin should be created"
+        );
     }
 
     #[test]

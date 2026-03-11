@@ -170,7 +170,10 @@ pub fn event_name_for(subcommand: &HookSubcommand) -> &'static str {
 /// The `input` carries the file path and search pattern extracted from the
 /// Claude Code PostToolUse payload. When `subcommand` is `None` (unknown
 /// tool_name), returns fail-open empty values.
-pub(crate) fn endpoint_for(subcommand: Option<&HookSubcommand>, input: &HookInput) -> (&'static str, String) {
+pub(crate) fn endpoint_for(
+    subcommand: Option<&HookSubcommand>,
+    input: &HookInput,
+) -> (&'static str, String) {
     let cwd = input.cwd.as_deref().unwrap_or("");
 
     match subcommand {
@@ -232,9 +235,7 @@ pub(crate) fn endpoint_for(subcommand: Option<&HookSubcommand>, input: &HookInpu
 
 /// Returns the fail-open JSON: empty `additionalContext`.
 pub fn fail_open_json(event_name: &str) -> String {
-    format!(
-        r#"{{"hookSpecificOutput":{{"hookEventName":"{event_name}","additionalContext":""}}}}"#
-    )
+    format!(r#"{{"hookSpecificOutput":{{"hookEventName":"{event_name}","additionalContext":""}}}}"#)
 }
 
 /// Returns the success JSON with `context` as the `additionalContext` value.
@@ -336,15 +337,9 @@ fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~'
-            | b'/'
-            | b':' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' | b':' => {
+                out.push(b as char)
+            }
             b => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -382,8 +377,7 @@ mod tests {
     #[test]
     fn test_fail_open_json_is_valid() {
         let json = fail_open_json("PostToolUse");
-        let v: Value = serde_json::from_str(&json)
-            .expect("fail_open_json must produce valid JSON");
+        let v: Value = serde_json::from_str(&json).expect("fail_open_json must produce valid JSON");
 
         let output = &v["hookSpecificOutput"];
         assert_eq!(output["hookEventName"], "PostToolUse");
@@ -402,8 +396,7 @@ mod tests {
     #[test]
     fn test_success_json_is_valid() {
         let json = success_json("PostToolUse", "hello world");
-        let v: Value = serde_json::from_str(&json)
-            .expect("success_json must produce valid JSON");
+        let v: Value = serde_json::from_str(&json).expect("success_json must produce valid JSON");
 
         let output = &v["hookSpecificOutput"];
         assert_eq!(output["hookEventName"], "PostToolUse");
@@ -438,11 +431,15 @@ mod tests {
 
     #[test]
     fn test_parse_stdin_deserializes_read_payload() {
-        let json = r#"{"tool_name":"Read","tool_input":{"file_path":"/abs/src/foo.rs"},"cwd":"/abs"}"#;
+        let json =
+            r#"{"tool_name":"Read","tool_input":{"file_path":"/abs/src/foo.rs"},"cwd":"/abs"}"#;
         let result: HookInput = serde_json::from_str(json).unwrap_or_default();
         assert_eq!(result.tool_name.as_deref(), Some("Read"));
         assert_eq!(
-            result.tool_input.as_ref().and_then(|ti| ti.file_path.as_deref()),
+            result
+                .tool_input
+                .as_ref()
+                .and_then(|ti| ti.file_path.as_deref()),
             Some("/abs/src/foo.rs")
         );
         assert_eq!(result.cwd.as_deref(), Some("/abs"));
@@ -478,13 +475,12 @@ mod tests {
         // Path::strip_prefix is platform-aware, but we test the string normalization.
         // On Windows the actual separator is backslash; strip_prefix handles it.
         // We simulate by using a path that has a clear prefix relationship.
-        let rel = relative_path(
-            "C:/Users/dev/project/src/foo.rs",
-            "C:/Users/dev/project",
-        );
+        let rel = relative_path("C:/Users/dev/project/src/foo.rs", "C:/Users/dev/project");
         // After strip_prefix the result should use forward slashes.
-        assert!(rel.contains("src/foo.rs") || rel == "C:/Users/dev/project/src/foo.rs",
-            "got: {rel}");
+        assert!(
+            rel.contains("src/foo.rs") || rel == "C:/Users/dev/project/src/foo.rs",
+            "got: {rel}"
+        );
     }
 
     #[test]
@@ -502,7 +498,10 @@ mod tests {
             "C:\\Users\\dev\\project",
         );
         // Must not contain backslashes in result.
-        assert!(!rel.contains('\\'), "backslashes must be normalized to forward slashes; got: {rel}");
+        assert!(
+            !rel.contains('\\'),
+            "backslashes must be normalized to forward slashes; got: {rel}"
+        );
     }
 
     // --- endpoint_for (stdin-routing) ---
@@ -512,7 +511,10 @@ mod tests {
         let input = make_input("Read", Some("/abs/src/foo.rs"), None, "/abs");
         let (path, query) = endpoint_for(Some(&HookSubcommand::Read), &input);
         assert_eq!(path, "/outline");
-        assert!(query.contains("src/foo.rs"), "query must include relative path; got: {query}");
+        assert!(
+            query.contains("src/foo.rs"),
+            "query must include relative path; got: {query}"
+        );
     }
 
     #[test]
@@ -520,7 +522,10 @@ mod tests {
         let input = make_input("Edit", Some("/abs/src/bar.rs"), None, "/abs");
         let (path, query) = endpoint_for(Some(&HookSubcommand::Edit), &input);
         assert_eq!(path, "/impact");
-        assert!(query.contains("src/bar.rs"), "query must include relative path; got: {query}");
+        assert!(
+            query.contains("src/bar.rs"),
+            "query must include relative path; got: {query}"
+        );
     }
 
     #[test]
@@ -528,8 +533,14 @@ mod tests {
         let input = make_input("Write", Some("/abs/src/new.rs"), None, "/abs");
         let (path, query) = endpoint_for(Some(&HookSubcommand::Write), &input);
         assert_eq!(path, "/impact");
-        assert!(query.contains("new_file=true"), "Write must set new_file=true; got: {query}");
-        assert!(query.contains("src/new.rs"), "Write must include file path; got: {query}");
+        assert!(
+            query.contains("new_file=true"),
+            "Write must set new_file=true; got: {query}"
+        );
+        assert!(
+            query.contains("src/new.rs"),
+            "Write must include file path; got: {query}"
+        );
     }
 
     #[test]
@@ -538,7 +549,10 @@ mod tests {
         let input: HookInput = serde_json::from_str(json).unwrap_or_default();
         let (path, query) = endpoint_for(Some(&HookSubcommand::Grep), &input);
         assert_eq!(path, "/symbol-context");
-        assert!(query.contains("TODO"), "Grep query must include pattern; got: {query}");
+        assert!(
+            query.contains("TODO"),
+            "Grep query must include pattern; got: {query}"
+        );
     }
 
     #[test]
@@ -591,12 +605,18 @@ mod tests {
 
     #[test]
     fn test_event_name_for_session_start() {
-        assert_eq!(event_name_for(&HookSubcommand::SessionStart), "SessionStart");
+        assert_eq!(
+            event_name_for(&HookSubcommand::SessionStart),
+            "SessionStart"
+        );
     }
 
     #[test]
     fn test_event_name_for_prompt_submit() {
-        assert_eq!(event_name_for(&HookSubcommand::PromptSubmit), "UserPromptSubmit");
+        assert_eq!(
+            event_name_for(&HookSubcommand::PromptSubmit),
+            "UserPromptSubmit"
+        );
     }
 
     #[test]
@@ -661,19 +681,34 @@ mod tests {
 
     #[test]
     fn test_resolve_subcommand_read() {
-        let input = HookInput { tool_name: Some("Read".to_string()), ..Default::default() };
-        assert!(matches!(resolve_subcommand_from_input(&input), Some(HookSubcommand::Read)));
+        let input = HookInput {
+            tool_name: Some("Read".to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            resolve_subcommand_from_input(&input),
+            Some(HookSubcommand::Read)
+        ));
     }
 
     #[test]
     fn test_resolve_subcommand_write() {
-        let input = HookInput { tool_name: Some("Write".to_string()), ..Default::default() };
-        assert!(matches!(resolve_subcommand_from_input(&input), Some(HookSubcommand::Write)));
+        let input = HookInput {
+            tool_name: Some("Write".to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            resolve_subcommand_from_input(&input),
+            Some(HookSubcommand::Write)
+        ));
     }
 
     #[test]
     fn test_resolve_subcommand_unknown_returns_none() {
-        let input = HookInput { tool_name: Some("Bash".to_string()), ..Default::default() };
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            ..Default::default()
+        };
         assert!(resolve_subcommand_from_input(&input).is_none());
     }
 

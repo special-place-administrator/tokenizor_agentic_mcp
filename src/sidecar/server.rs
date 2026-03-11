@@ -9,8 +9,8 @@ use std::sync::{Arc, RwLock};
 use tokio::net::TcpListener;
 use tracing::info;
 
-use crate::live_index::store::SharedIndex;
 use super::{SidecarHandle, SidecarState, TokenStats, port_file, router};
+use crate::live_index::store::SharedIndex;
 
 /// Spawn the HTTP sidecar.
 ///
@@ -23,13 +23,10 @@ use super::{SidecarHandle, SidecarState, TokenStats, port_file, router};
 /// 7. Spawns `axum::serve` with graceful shutdown wired to a oneshot channel.
 /// 8. After the server completes, calls `port_file::cleanup_files()`.
 /// 9. Returns `SidecarHandle { port, shutdown_tx }`.
-pub async fn spawn_sidecar(
-    index: SharedIndex,
-    bind_host: &str,
-) -> anyhow::Result<SidecarHandle> {
+pub async fn spawn_sidecar(index: SharedIndex, bind_host: &str) -> anyhow::Result<SidecarHandle> {
     // Allow overriding bind host via env var.
-    let resolved_host = std::env::var("TOKENIZOR_SIDECAR_BIND")
-        .unwrap_or_else(|_| bind_host.to_string());
+    let resolved_host =
+        std::env::var("TOKENIZOR_SIDECAR_BIND").unwrap_or_else(|_| bind_host.to_string());
 
     // Clean up stale files from a previous crashed sidecar.
     port_file::check_stale(&resolved_host);
@@ -82,5 +79,9 @@ pub async fn spawn_sidecar(
         tracing::info!("sidecar shut down, port/PID files cleaned up");
     });
 
-    Ok(SidecarHandle { port, shutdown_tx, token_stats })
+    Ok(SidecarHandle {
+        port,
+        shutdown_tx,
+        token_stats,
+    })
 }

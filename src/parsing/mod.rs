@@ -74,10 +74,7 @@ pub fn process_file(
     }
 }
 
-fn parse_source(
-    source: &str,
-    language: &LanguageId,
-) -> Result<ParseSourceOutput, String> {
+fn parse_source(source: &str, language: &LanguageId) -> Result<ParseSourceOutput, String> {
     let mut parser = Parser::new();
 
     let ts_language = match language {
@@ -231,6 +228,9 @@ mod tests {
         let source = b"def hello\n  puts 'hi'\nend";
         let result = process_file("app.rb", source, LanguageId::Ruby);
         assert_eq!(result.outcome, FileOutcome::Processed);
-        assert!(!result.symbols.is_empty(), "should have symbols for Ruby source");
+        assert!(
+            !result.symbols.is_empty(),
+            "should have symbols for Ruby source"
+        );
     }
 }

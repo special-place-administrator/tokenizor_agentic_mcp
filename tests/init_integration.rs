@@ -93,10 +93,7 @@ fn test_init_writes_hooks() {
         .flat_map(|e| e["hooks"].as_array().unwrap())
         .filter_map(|h| h["command"].as_str())
         .any(|c| c.ends_with("hook prompt-submit"));
-    assert!(
-        has_prompt_submit,
-        "UserPromptSubmit hook must be present"
-    );
+    assert!(has_prompt_submit, "UserPromptSubmit hook must be present");
 }
 
 // ---------------------------------------------------------------------------

@@ -19,12 +19,12 @@ use std::time::Duration;
 
 use once_cell::sync::Lazy;
 use tempfile::TempDir;
-use tokio::sync::Mutex;
 use tokenizor_agentic_mcp::{
     domain::{LanguageId, ReferenceKind, ReferenceRecord, SymbolKind, SymbolRecord},
     live_index::{IndexedFile, LiveIndex, ParseStatus, SharedIndex},
     sidecar::spawn_sidecar,
 };
+use tokio::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Serialize all tests that manipulate process cwd.
@@ -112,7 +112,11 @@ fn build_shared_index(files: Vec<IndexedFile>) -> SharedIndex {
 
 /// Make a synchronous raw HTTP GET request to `127.0.0.1:{port}{path}?{query}`.
 /// Returns (status_code_line, body).
-fn raw_http_get_with_status(port: u16, path: &str, query: &str) -> anyhow::Result<(String, String)> {
+fn raw_http_get_with_status(
+    port: u16,
+    path: &str,
+    query: &str,
+) -> anyhow::Result<(String, String)> {
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse()?;
     let timeout = Duration::from_millis(1000);
     let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
@@ -133,11 +137,7 @@ fn raw_http_get_with_status(port: u16, path: &str, query: &str) -> anyhow::Resul
     let mut response = String::new();
     stream.read_to_string(&mut response)?;
 
-    let status_line = response
-        .lines()
-        .next()
-        .unwrap_or("")
-        .to_string();
+    let status_line = response.lines().next().unwrap_or("").to_string();
 
     let body = response
         .split_once("\r\n\r\n")
@@ -191,9 +191,18 @@ async fn test_read_hook_returns_formatted_outline() {
     );
 
     // Must contain symbol names.
-    assert!(body.contains("alpha"), "outline must contain 'alpha'; body: {body}");
-    assert!(body.contains("Beta"), "outline must contain 'Beta'; body: {body}");
-    assert!(body.contains("gamma"), "outline must contain 'gamma'; body: {body}");
+    assert!(
+        body.contains("alpha"),
+        "outline must contain 'alpha'; body: {body}"
+    );
+    assert!(
+        body.contains("Beta"),
+        "outline must contain 'Beta'; body: {body}"
+    );
+    assert!(
+        body.contains("gamma"),
+        "outline must contain 'gamma'; body: {body}"
+    );
 
     let _ = handle.shutdown_tx.send(());
     std::env::set_current_dir(&original).unwrap();
@@ -301,10 +310,8 @@ async fn test_edit_hook_impact_diff() {
     std::fs::write(&rs_path, b"fn renamed() {}").unwrap();
 
     // Index with "before edit" symbol.
-    let file = make_rust_file_with_symbols(
-        "src/edit_test.rs",
-        vec![("original", SymbolKind::Function)],
-    );
+    let file =
+        make_rust_file_with_symbols("src/edit_test.rs", vec![("original", SymbolKind::Function)]);
     let index = build_shared_index(vec![file]);
     let handle = spawn_sidecar(Arc::clone(&index), "127.0.0.1")
         .await
@@ -347,10 +354,8 @@ async fn test_edit_hook_shows_callers() {
     std::fs::write(src_dir.join("a.rs"), b"fn helper_func() {}").unwrap();
 
     // File a.rs defines helper_func; file b.rs references it.
-    let file_a = make_rust_file_with_symbols(
-        "src/a.rs",
-        vec![("helper_func", SymbolKind::Function)],
-    );
+    let file_a =
+        make_rust_file_with_symbols("src/a.rs", vec![("helper_func", SymbolKind::Function)]);
     let file_b = make_rust_file_with_refs(
         "src/b.rs",
         vec![("some_caller", SymbolKind::Function)],
@@ -366,8 +371,8 @@ async fn test_edit_hook_shows_callers() {
 
     // Trigger impact for a.rs — helper_func is in its pre-state.
     // The handler will re-read a.rs from disk and compare.
-    let body = raw_http_get(handle.port, "/impact", "path=src/a.rs")
-        .expect("GET /impact must succeed");
+    let body =
+        raw_http_get(handle.port, "/impact", "path=src/a.rs").expect("GET /impact must succeed");
 
     // Response should contain reference to b.rs as a caller (or show no callers if no diff).
     // The key assertion is that the response is formatted text.
@@ -415,8 +420,12 @@ async fn test_write_hook_confirms_index() {
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let body = raw_http_get(handle.port, "/impact", "path=src/new_module.rs&new_file=true")
-        .expect("GET /impact?new_file=true must succeed");
+    let body = raw_http_get(
+        handle.port,
+        "/impact",
+        "path=src/new_module.rs&new_file=true",
+    )
+    .expect("GET /impact?new_file=true must succeed");
 
     // Response must confirm indexing.
     assert!(
@@ -447,10 +456,7 @@ async fn test_grep_hook_annotates_matches() {
 
     // Create a file with a reference to "helper" inside a known function.
     let file = {
-        let mut f = make_rust_file_with_symbols(
-            "src/main.rs",
-            vec![("run", SymbolKind::Function)],
-        );
+        let mut f = make_rust_file_with_symbols("src/main.rs", vec![("run", SymbolKind::Function)]);
         // Add a reference with an enclosing symbol index pointing to "run" (index 0).
         f.references = vec![ReferenceRecord {
             name: "helper".to_string(),
@@ -481,7 +487,10 @@ async fn test_grep_hook_annotates_matches() {
     );
 
     // Must contain the file path.
-    assert!(body.contains("src/main.rs"), "must mention the file; body: {body}");
+    assert!(
+        body.contains("src/main.rs"),
+        "must mention the file; body: {body}"
+    );
 
     // Must contain the enclosing function annotation.
     assert!(
@@ -549,7 +558,13 @@ async fn test_session_start_repo_map() {
 
     let files = vec![
         make_rust_file_with_symbols("src/main.rs", vec![("main", SymbolKind::Function)]),
-        make_rust_file_with_symbols("src/lib.rs", vec![("run", SymbolKind::Function), ("stop", SymbolKind::Function)]),
+        make_rust_file_with_symbols(
+            "src/lib.rs",
+            vec![
+                ("run", SymbolKind::Function),
+                ("stop", SymbolKind::Function),
+            ],
+        ),
         make_rust_file_with_symbols("tests/basic.rs", vec![("test_one", SymbolKind::Function)]),
     ];
     let index = build_shared_index(files);
@@ -569,10 +584,16 @@ async fn test_session_start_repo_map() {
     );
 
     // Must mention directory paths with file counts.
-    assert!(body.contains("src"), "repo-map must contain 'src' directory; body: {body}");
+    assert!(
+        body.contains("src"),
+        "repo-map must contain 'src' directory; body: {body}"
+    );
 
     // Must mention symbols.
-    assert!(body.contains("symbols"), "repo-map must mention symbol counts; body: {body}");
+    assert!(
+        body.contains("symbols"),
+        "repo-map must mention symbol counts; body: {body}"
+    );
 
     let _ = handle.shutdown_tx.send(());
     std::env::set_current_dir(&original).unwrap();
@@ -670,8 +691,14 @@ async fn test_token_stats_after_hooks() {
         .as_u64()
         .expect("edit_fires must be a number");
 
-    assert!(read_fires >= 1, "read_fires must be >= 1 after /outline call; got {read_fires}");
-    assert!(edit_fires >= 1, "edit_fires must be >= 1 after /impact call; got {edit_fires}");
+    assert!(
+        read_fires >= 1,
+        "read_fires must be >= 1 after /outline call; got {read_fires}"
+    );
+    assert!(
+        edit_fires >= 1,
+        "edit_fires must be >= 1 after /impact call; got {edit_fires}"
+    );
 
     let _ = handle.shutdown_tx.send(());
     std::env::set_current_dir(&original).unwrap();

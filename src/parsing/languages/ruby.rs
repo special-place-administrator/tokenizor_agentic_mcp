@@ -22,9 +22,15 @@ fn walk_node(
         _ => None,
     };
 
-    push_named_symbol(node, source, depth, sort_order, symbols, kind, |node, source, _| {
-        find_name(node, source)
-    });
+    push_named_symbol(
+        node,
+        source,
+        depth,
+        sort_order,
+        symbols,
+        kind,
+        |node, source, _| find_name(node, source),
+    );
     walk_children(node, source, depth, sort_order, symbols, kind, walk_node);
 }
 
@@ -82,7 +88,12 @@ mod tests {
     fn test_ruby_process_file_returns_processed() {
         let source = b"class Foo\n  def bar\n  end\nend";
         let result = process_file("test.rb", source, LanguageId::Ruby);
-        assert_eq!(result.outcome, FileOutcome::Processed, "outcome: {:?}", result.outcome);
+        assert_eq!(
+            result.outcome,
+            FileOutcome::Processed,
+            "outcome: {:?}",
+            result.outcome
+        );
         assert!(!result.symbols.is_empty(), "should have symbols");
     }
 }

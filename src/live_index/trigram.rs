@@ -62,10 +62,8 @@ impl TrigramIndex {
         let trigrams = extract_trigrams(query);
 
         // Collect posting lists for each trigram in the query
-        let mut posting_lists: Vec<&Vec<u32>> = trigrams
-            .iter()
-            .filter_map(|t| self.map.get(t))
-            .collect();
+        let mut posting_lists: Vec<&Vec<u32>> =
+            trigrams.iter().filter_map(|t| self.map.get(t)).collect();
 
         if posting_lists.is_empty() {
             // A trigram from the query has no matches at all
@@ -91,7 +89,11 @@ impl TrigramIndex {
                 let path = self.id_to_path.get(&id)?;
                 let file = files.get(path)?;
                 // Case-insensitive byte-level containment check
-                let content_lower: Vec<u8> = file.content.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let content_lower: Vec<u8> = file
+                    .content
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
                 let query_lower: Vec<u8> = query.iter().map(|b| b.to_ascii_lowercase()).collect();
                 if contains_bytes(&content_lower, &query_lower) {
                     Some(path.clone())
@@ -143,8 +145,11 @@ impl TrigramIndex {
         files
             .iter()
             .filter_map(|(path, file)| {
-                let content_lower: Vec<u8> =
-                    file.content.iter().map(|b| b.to_ascii_lowercase()).collect();
+                let content_lower: Vec<u8> = file
+                    .content
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
                 if contains_bytes(&content_lower, &query_lower) {
                     Some(path.clone())
                 } else {
@@ -208,10 +213,7 @@ fn extract_trigrams(bytes: &[u8]) -> HashSet<[u8; 3]> {
     if bytes_lower.len() < 3 {
         return HashSet::new();
     }
-    bytes_lower
-        .windows(3)
-        .map(|w| [w[0], w[1], w[2]])
-        .collect()
+    bytes_lower.windows(3).map(|w| [w[0], w[1], w[2]]).collect()
 }
 
 /// Check whether `haystack` contains `needle` as a contiguous subsequence.
@@ -268,7 +270,10 @@ mod tests {
         assert_eq!(idx.path_to_id.len(), 2);
         // The trigram "par" from "parse" must be in the index
         let par: [u8; 3] = [b'p', b'a', b'r'];
-        assert!(idx.map.contains_key(&par), "trigram 'par' must be indexed from 'parse'");
+        assert!(
+            idx.map.contains_key(&par),
+            "trigram 'par' must be indexed from 'parse'"
+        );
     }
 
     // ── search: correct file matches ─────────────────────────────────────────
@@ -281,49 +286,61 @@ mod tests {
         ]);
         let idx = TrigramIndex::build_from_files(&files);
         let results = idx.search(b"parse", &files);
-        assert!(results.contains(&"parser.rs".to_string()), "parser.rs should match 'parse'");
-        assert!(!results.contains(&"render.rs".to_string()), "render.rs should not match 'parse'");
+        assert!(
+            results.contains(&"parser.rs".to_string()),
+            "parser.rs should match 'parse'"
+        );
+        assert!(
+            !results.contains(&"render.rs".to_string()),
+            "render.rs should not match 'parse'"
+        );
     }
 
     #[test]
     fn test_search_returns_empty_for_trigram_not_in_any_file() {
-        let files = make_files(&[
-            ("a.rs", b"fn alpha() {}"),
-            ("b.rs", b"fn beta() {}"),
-        ]);
+        let files = make_files(&[("a.rs", b"fn alpha() {}"), ("b.rs", b"fn beta() {}")]);
         let idx = TrigramIndex::build_from_files(&files);
         // "zzz" cannot appear in the files above
         let results = idx.search(b"zzz", &files);
-        assert!(results.is_empty(), "should return empty vec for unknown trigram");
+        assert!(
+            results.is_empty(),
+            "should return empty vec for unknown trigram"
+        );
     }
 
     // ── search: short query fallback ─────────────────────────────────────────
 
     #[test]
     fn test_search_short_query_falls_back_to_linear_scan() {
-        let files = make_files(&[
-            ("foo.rs", b"fn abc() {}"),
-            ("bar.rs", b"fn xyz() {}"),
-        ]);
+        let files = make_files(&[("foo.rs", b"fn abc() {}"), ("bar.rs", b"fn xyz() {}")]);
         let idx = TrigramIndex::build_from_files(&files);
 
         // 1-char query — must use linear scan
         let results = idx.search(b"a", &files);
-        assert!(results.contains(&"foo.rs".to_string()), "linear scan: 'a' matches 'abc'");
-        assert!(!results.contains(&"bar.rs".to_string()), "linear scan: 'a' does not match 'xyz'");
+        assert!(
+            results.contains(&"foo.rs".to_string()),
+            "linear scan: 'a' matches 'abc'"
+        );
+        assert!(
+            !results.contains(&"bar.rs".to_string()),
+            "linear scan: 'a' does not match 'xyz'"
+        );
     }
 
     #[test]
     fn test_search_two_char_query_falls_back_to_linear_scan() {
-        let files = make_files(&[
-            ("a.rs", b"fn fn_alpha() {}"),
-            ("b.rs", b"fn fn_beta() {}"),
-        ]);
+        let files = make_files(&[("a.rs", b"fn fn_alpha() {}"), ("b.rs", b"fn fn_beta() {}")]);
         let idx = TrigramIndex::build_from_files(&files);
 
         let results = idx.search(b"al", &files);
-        assert!(results.contains(&"a.rs".to_string()), "linear scan: 'al' in fn_alpha");
-        assert!(!results.contains(&"b.rs".to_string()), "linear scan: 'al' not in fn_beta");
+        assert!(
+            results.contains(&"a.rs".to_string()),
+            "linear scan: 'al' in fn_alpha"
+        );
+        assert!(
+            !results.contains(&"b.rs".to_string()),
+            "linear scan: 'al' not in fn_beta"
+        );
     }
 
     // ── search: empty query ───────────────────────────────────────────────────
@@ -391,11 +408,17 @@ mod tests {
 
         // Old content no longer searchable
         let old_results = idx.search(b"old_function", &new_files);
-        assert!(!old_results.contains(&"src/main.rs".to_string()), "old trigrams must be removed");
+        assert!(
+            !old_results.contains(&"src/main.rs".to_string()),
+            "old trigrams must be removed"
+        );
 
         // New content is searchable
         let new_results = idx.search(b"new_function", &new_files);
-        assert!(new_results.contains(&"src/main.rs".to_string()), "new trigrams must be indexed");
+        assert!(
+            new_results.contains(&"src/main.rs".to_string()),
+            "new trigrams must be indexed"
+        );
     }
 
     #[test]
@@ -407,7 +430,10 @@ mod tests {
         idx.update_file("src/lib.rs", b"fn beta() {}");
         let id_after = *idx.path_to_id.get("src/lib.rs").unwrap();
 
-        assert_eq!(id_before, id_after, "update_file should reuse the existing file_id");
+        assert_eq!(
+            id_before, id_after,
+            "update_file should reuse the existing file_id"
+        );
     }
 
     // ── remove_file ───────────────────────────────────────────────────────────
@@ -423,15 +449,24 @@ mod tests {
         idx.remove_file("remove.rs");
 
         // "remove.rs" path should be gone from mappings
-        assert!(!idx.path_to_id.contains_key("remove.rs"), "path_to_id should not contain removed file");
+        assert!(
+            !idx.path_to_id.contains_key("remove.rs"),
+            "path_to_id should not contain removed file"
+        );
 
         // Trigrams unique to "remove.rs" must not point to any file_id anymore
         let remove_results = idx.search(b"remove_me", &files);
-        assert!(!remove_results.contains(&"remove.rs".to_string()), "removed file should not appear in search");
+        assert!(
+            !remove_results.contains(&"remove.rs".to_string()),
+            "removed file should not appear in search"
+        );
 
         // "keep.rs" should still be searchable
         let keep_results = idx.search(b"keep_me", &files);
-        assert!(keep_results.contains(&"keep.rs".to_string()), "other files should still be searchable");
+        assert!(
+            keep_results.contains(&"keep.rs".to_string()),
+            "other files should still be searchable"
+        );
     }
 
     #[test]
@@ -459,7 +494,13 @@ mod tests {
 
     #[test]
     fn test_extract_trigrams_short_bytes_empty() {
-        assert!(extract_trigrams(b"ab").is_empty(), "< 3 bytes yields no trigrams");
-        assert!(extract_trigrams(b"").is_empty(), "empty bytes yields no trigrams");
+        assert!(
+            extract_trigrams(b"ab").is_empty(),
+            "< 3 bytes yields no trigrams"
+        );
+        assert!(
+            extract_trigrams(b"").is_empty(),
+            "empty bytes yields no trigrams"
+        );
     }
 }

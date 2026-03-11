@@ -22,7 +22,8 @@ pub struct DiscoveredFile {
 pub fn discover_files(root: &Path) -> Result<Vec<DiscoveredFile>> {
     use ignore::WalkBuilder;
 
-    let mut files: Vec<DiscoveredFile> = WalkBuilder::new(root).build()
+    let mut files: Vec<DiscoveredFile> = WalkBuilder::new(root)
+        .build()
         .filter_map(|entry_result| {
             let entry = entry_result.ok()?;
             let path = entry.path().to_path_buf();
@@ -120,9 +121,20 @@ fn is_forbidden_root(path: &Path) -> bool {
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
         let lower = name.to_lowercase();
         let forbidden_names = [
-            "windows", "system32", "program files", "program files (x86)",
-            "programdata", "appdata", "node_modules", ".npm", ".cargo",
-            "users", "home", "tmp", "temp", "var",
+            "windows",
+            "system32",
+            "program files",
+            "program files (x86)",
+            "programdata",
+            "appdata",
+            "node_modules",
+            ".npm",
+            ".cargo",
+            "users",
+            "home",
+            "tmp",
+            "temp",
+            "var",
         ];
         if forbidden_names.contains(&lower.as_str()) {
             return true;
@@ -133,7 +145,9 @@ fn is_forbidden_root(path: &Path) -> bool {
     if let Some(home) = home_dir() {
         let home = home.canonicalize().unwrap_or(home);
         if let Some(parent) = home.parent() {
-            let parent = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
+            let parent = parent
+                .canonicalize()
+                .unwrap_or_else(|_| parent.to_path_buf());
             if path == parent {
                 return true;
             }
@@ -234,7 +248,11 @@ mod tests {
         let files = discover_files(tmp.path()).unwrap();
         assert_eq!(files.len(), 1);
         // Must use forward slashes regardless of OS
-        assert!(!files[0].relative_path.contains('\\'), "should have no backslashes: {:?}", files[0].relative_path);
+        assert!(
+            !files[0].relative_path.contains('\\'),
+            "should have no backslashes: {:?}",
+            files[0].relative_path
+        );
         assert!(files[0].relative_path.contains('/') || files[0].relative_path == "src/lib.rs");
     }
 
@@ -253,7 +271,10 @@ mod tests {
         let lower: Vec<String> = names.iter().map(|n| n.to_lowercase()).collect();
         let mut sorted = lower.clone();
         sorted.sort();
-        assert_eq!(lower, sorted, "files should be in case-insensitive sorted order");
+        assert_eq!(
+            lower, sorted,
+            "files should be in case-insensitive sorted order"
+        );
     }
 
     #[test]
@@ -302,6 +323,9 @@ mod tests {
     #[test]
     fn test_is_forbidden_root_allows_project_dirs() {
         let tmp = TempDir::new().unwrap();
-        assert!(!is_forbidden_root(tmp.path()), "temp project dir should be allowed");
+        assert!(
+            !is_forbidden_root(tmp.path()),
+            "temp project dir should be allowed"
+        );
     }
 }

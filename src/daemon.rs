@@ -171,7 +171,12 @@ impl DaemonState {
         let canonical_root = canonical_project_root(Path::new(&request.project_root))?;
         let project_id = project_key(&canonical_root);
 
-        if !self.projects.read().expect("lock poisoned").contains_key(&project_id) {
+        if !self
+            .projects
+            .read()
+            .expect("lock poisoned")
+            .contains_key(&project_id)
+        {
             let project = ProjectInstance::load(&canonical_root)?;
             let mut projects = self.projects.write().expect("lock poisoned");
             projects.entry(project_id.clone()).or_insert(project);
@@ -360,7 +365,12 @@ impl DaemonState {
                 target_project.session_ids.insert(session_id.to_string());
             }
 
-            if let Some(session) = self.sessions.write().expect("lock poisoned").get_mut(session_id) {
+            if let Some(session) = self
+                .sessions
+                .write()
+                .expect("lock poisoned")
+                .get_mut(session_id)
+            {
                 session.project_id = target_project_id.clone();
                 session.last_seen_at = SystemTime::now();
             }
@@ -369,9 +379,7 @@ impl DaemonState {
                 .get(&current_project_id)
                 .map(|project| project.session_ids.is_empty())
                 .unwrap_or(false);
-            if should_remove_old
-                && let Some(removed) = projects.remove(&current_project_id)
-            {
+            if should_remove_old && let Some(removed) = projects.remove(&current_project_id) {
                 let mut watcher_task = removed.watcher_task;
                 abort_watcher_task(&mut watcher_task);
             }
@@ -381,7 +389,10 @@ impl DaemonState {
             .get_mut(&target_project_id)
             .ok_or_else(|| anyhow::anyhow!("missing target project after reload"))?;
         let (file_count, symbol_count) = target_project.reload(&target_root)?;
-        Ok(format!("Indexed {} files, {} symbols.", file_count, symbol_count))
+        Ok(format!(
+            "Indexed {} files, {} symbols.",
+            file_count, symbol_count
+        ))
     }
 
     fn session_runtime(&self, session_id: &str) -> Option<SessionRuntime> {
@@ -417,12 +428,7 @@ impl Default for DaemonState {
 }
 
 impl DaemonSessionClient {
-    fn new(
-        base_url: String,
-        project_id: String,
-        session_id: String,
-        project_name: String,
-    ) -> Self {
+    fn new(base_url: String, project_id: String, session_id: String, project_name: String) -> Self {
         Self {
             http_client: reqwest::Client::new(),
             base_url,
@@ -647,7 +653,9 @@ fn spawn_daemon_process() -> anyhow::Result<()> {
         command.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
     }
 
-    command.spawn().context("spawning detached tokenizor daemon")?;
+    command
+        .spawn()
+        .context("spawning detached tokenizor daemon")?;
     Ok(())
 }
 
@@ -731,31 +739,58 @@ pub fn build_router(state: SharedDaemonState) -> Router {
     Router::new()
         .route("/health", get(daemon_health_handler))
         .route("/v1/projects", get(list_projects_handler))
-        .route("/v1/projects/{project_id}/health", get(project_health_handler))
-        .route("/v1/projects/{project_id}/sessions", get(list_sessions_handler))
+        .route(
+            "/v1/projects/{project_id}/health",
+            get(project_health_handler),
+        )
+        .route(
+            "/v1/projects/{project_id}/sessions",
+            get(list_sessions_handler),
+        )
         .route("/v1/sessions/open", post(open_project_session_handler))
-        .route("/v1/sessions/{session_id}/tools/{tool_name}", post(call_tool_handler))
-        .route("/v1/sessions/{session_id}/sidecar/health", get(sidecar_health_handler))
-        .route("/v1/sessions/{session_id}/sidecar/outline", get(sidecar_outline_handler))
-        .route("/v1/sessions/{session_id}/sidecar/impact", get(sidecar_impact_handler))
+        .route(
+            "/v1/sessions/{session_id}/tools/{tool_name}",
+            post(call_tool_handler),
+        )
+        .route(
+            "/v1/sessions/{session_id}/sidecar/health",
+            get(sidecar_health_handler),
+        )
+        .route(
+            "/v1/sessions/{session_id}/sidecar/outline",
+            get(sidecar_outline_handler),
+        )
+        .route(
+            "/v1/sessions/{session_id}/sidecar/impact",
+            get(sidecar_impact_handler),
+        )
         .route(
             "/v1/sessions/{session_id}/sidecar/symbol-context",
             get(sidecar_symbol_context_handler),
         )
-        .route("/v1/sessions/{session_id}/sidecar/repo-map", get(sidecar_repo_map_handler))
+        .route(
+            "/v1/sessions/{session_id}/sidecar/repo-map",
+            get(sidecar_repo_map_handler),
+        )
         .route(
             "/v1/sessions/{session_id}/sidecar/prompt-context",
             get(sidecar_prompt_context_handler),
         )
-        .route("/v1/sessions/{session_id}/sidecar/stats", get(sidecar_stats_handler))
-        .route("/v1/sessions/{session_id}/heartbeat", post(heartbeat_handler))
+        .route(
+            "/v1/sessions/{session_id}/sidecar/stats",
+            get(sidecar_stats_handler),
+        )
+        .route(
+            "/v1/sessions/{session_id}/heartbeat",
+            post(heartbeat_handler),
+        )
         .route("/v1/sessions/{session_id}", delete(close_session_handler))
         .with_state(state)
 }
 
 pub async fn spawn_daemon(bind_host: &str) -> anyhow::Result<DaemonHandle> {
-    let resolved_host = std::env::var("TOKENIZOR_DAEMON_BIND")
-        .unwrap_or_else(|_| bind_host.to_string());
+    let resolved_host =
+        std::env::var("TOKENIZOR_DAEMON_BIND").unwrap_or_else(|_| bind_host.to_string());
     cleanup_daemon_files();
 
     let listener = TcpListener::bind(format!("{resolved_host}:0")).await?;
@@ -832,10 +867,11 @@ async fn open_project_session_handler(
     Json(request): Json<OpenProjectRequest>,
 ) -> Result<Json<OpenProjectResponse>, (axum::http::StatusCode, String)> {
     let state_for_load = Arc::clone(&state);
-    let response = tokio::task::spawn_blocking(move || state_for_load.open_project_session(request))
-        .await
-        .map_err(internal_error)?
-        .map_err(bad_request)?;
+    let response =
+        tokio::task::spawn_blocking(move || state_for_load.open_project_session(request))
+            .await
+            .map_err(internal_error)?
+            .map_err(bad_request)?;
     Ok(Json(response))
 }
 
@@ -851,14 +887,12 @@ async fn call_tool_handler(
             .map_err(bad_request);
     }
 
-    let runtime = state
-        .session_runtime(&session_id)
-        .ok_or_else(|| {
-            (
-                axum::http::StatusCode::NOT_FOUND,
-                format!("unknown session '{session_id}'"),
-            )
-        })?;
+    let runtime = state.session_runtime(&session_id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            format!("unknown session '{session_id}'"),
+        )
+    })?;
 
     execute_tool_call(runtime, &tool_name, params)
         .await
@@ -1077,7 +1111,10 @@ fn project_key(root: &Path) -> String {
     } else {
         normalized
     };
-    format!("project-{}", crate::hash::digest_hex(stable_path.as_bytes()))
+    format!(
+        "project-{}",
+        crate::hash::digest_hex(stable_path.as_bytes())
+    )
 }
 
 fn normalized_path_string(path: &Path) -> String {
@@ -1350,8 +1387,16 @@ mod tests {
             .expect("session list should exist");
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].project_id, first.project_id);
-        assert!(sessions.iter().any(|session| session.client_name == "claude"));
-        assert!(sessions.iter().any(|session| session.client_name == "codex"));
+        assert!(
+            sessions
+                .iter()
+                .any(|session| session.client_name == "claude")
+        );
+        assert!(
+            sessions
+                .iter()
+                .any(|session| session.client_name == "codex")
+        );
         assert!(sessions.iter().any(|session| session.pid == Some(111)));
         assert!(sessions.iter().any(|session| session.pid == Some(222)));
         assert_ne!(first.session_id, second.session_id);
@@ -1657,10 +1702,16 @@ mod tests {
         let _env_guard = EnvVarGuard::set("TOKENIZOR_HOME", daemon_home.path());
         let project_a = project_dir("tokenizor-daemon-a");
         let project_b = project_dir("tokenizor-daemon-b");
-        std::fs::write(project_a.path().join("src").join("old.rs"), "fn old_fn() {}\n")
-            .expect("write source a");
-        std::fs::write(project_b.path().join("src").join("new.rs"), "fn new_fn() {}\n")
-            .expect("write source b");
+        std::fs::write(
+            project_a.path().join("src").join("old.rs"),
+            "fn old_fn() {}\n",
+        )
+        .expect("write source a");
+        std::fs::write(
+            project_b.path().join("src").join("new.rs"),
+            "fn new_fn() {}\n",
+        )
+        .expect("write source b");
 
         let handle = spawn_daemon("127.0.0.1").await.expect("spawn daemon");
         let client = reqwest::Client::new();
@@ -1733,7 +1784,10 @@ mod tests {
             .text()
             .await
             .expect("outline body");
-        assert!(outline.contains("new.rs"), "rebound session should see new root: {outline}");
+        assert!(
+            outline.contains("new.rs"),
+            "rebound session should see new root: {outline}"
+        );
         assert!(
             !outline.contains("old.rs"),
             "rebound session should no longer point at old root: {outline}"

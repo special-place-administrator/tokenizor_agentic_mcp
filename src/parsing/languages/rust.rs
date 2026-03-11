@@ -1,8 +1,6 @@
 use tree_sitter::Node;
 
-use super::{
-    collect_symbols, find_first_named_child, push_named_symbol, walk_children,
-};
+use super::{collect_symbols, find_first_named_child, push_named_symbol, walk_children};
 use crate::domain::{SymbolKind, SymbolRecord};
 
 pub fn extract_symbols(node: &Node, source: &str) -> Vec<SymbolRecord> {
@@ -29,9 +27,15 @@ fn walk_node(
         _ => None,
     };
 
-    push_named_symbol(node, source, depth, sort_order, symbols, kind, |node, source, _| {
-        find_name(node, source)
-    });
+    push_named_symbol(
+        node,
+        source,
+        depth,
+        sort_order,
+        symbols,
+        kind,
+        |node, source, _| find_name(node, source),
+    );
     walk_children(node, source, depth, sort_order, symbols, kind, walk_node);
 }
 
@@ -71,9 +75,7 @@ fn extract_impl_name(node: &Node, source: &str) -> Option<String> {
         }
     }
 
-    if found_for
-        && let (Some(tr), Some(ty)) = (&trait_name, &type_name)
-    {
+    if found_for && let (Some(tr), Some(ty)) = (&trait_name, &type_name) {
         return Some(format!("impl {tr} for {ty}"));
     }
 

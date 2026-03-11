@@ -38,7 +38,9 @@ fn write_file(dir: &Path, name: &str, content: &str) {
 /// Build a populated LiveIndex from a temp directory with the given files.
 ///
 /// Returns the tempdir (to keep it alive) and the shared index.
-fn build_index(files: &[(&str, &str)]) -> (TempDir, tokenizor_agentic_mcp::live_index::SharedIndex) {
+fn build_index(
+    files: &[(&str, &str)],
+) -> (TempDir, tokenizor_agentic_mcp::live_index::SharedIndex) {
     let dir = TempDir::new().expect("failed to create tempdir");
     for (name, content) in files {
         write_file(dir.path(), name, content);
@@ -107,9 +109,7 @@ def run():
 
     // Verify Call references exist (os.path.join or join)
     let all_refs = index.find_references_for_name("join", None, false);
-    let has_call = all_refs
-        .iter()
-        .any(|(_, r)| r.kind == ReferenceKind::Call);
+    let has_call = all_refs.iter().any(|(_, r)| r.kind == ReferenceKind::Call);
     // join is a call site — either direct or qualified
     // If not found under "join", check qualified
     if !has_call {
@@ -211,8 +211,8 @@ fn build_map() -> Map<String, i32> {
     let file = index.get_file(&file_path).unwrap();
 
     // Check the alias map was populated
-    let has_alias = file.alias_map.contains_key("Map")
-        || file.alias_map.values().any(|v| v == "HashMap");
+    let has_alias =
+        file.alias_map.contains_key("Map") || file.alias_map.values().any(|v| v == "HashMap");
 
     if has_alias {
         // If alias map was populated, find_references_for_name("HashMap") should find "Map" refs
@@ -224,7 +224,9 @@ fn build_map() -> Map<String, i32> {
         // Alias extraction may not have fired for this exact pattern — at minimum
         // verify the file was indexed and references were extracted
         assert!(
-            file.references.iter().any(|r| r.kind == ReferenceKind::Import),
+            file.references
+                .iter()
+                .any(|r| r.kind == ReferenceKind::Import),
             "src.rs should have at least one Import reference for use statement"
         );
     }

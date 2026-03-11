@@ -1,6 +1,6 @@
-use tree_sitter::Parser;
 use tokenizor_agentic_mcp::domain::{FileOutcome, LanguageId, SymbolKind};
 use tokenizor_agentic_mcp::parsing::process_file;
+use tree_sitter::Parser;
 
 #[test]
 fn test_rust_grammar_loads_and_parses() {
@@ -84,18 +84,29 @@ fn test_c_grammar_loads_and_parses() {
     let source = "struct Point { int x; int y; };\nint add(int a, int b) { return a + b; }";
     let tree = parser.parse(source, None).expect("parse returned None");
     assert!(!tree.root_node().kind().is_empty());
-    assert!(!tree.root_node().has_error(), "C source should parse without syntax errors");
+    assert!(
+        !tree.root_node().has_error(),
+        "C source should parse without syntax errors"
+    );
 
     // Verify symbols extracted via process_file
     let result = process_file("test.c", source.as_bytes(), LanguageId::C);
     assert_eq!(result.outcome, FileOutcome::Processed);
     assert!(
-        result.symbols.iter().any(|s| s.kind == SymbolKind::Struct && s.name == "Point"),
-        "should extract Point struct, symbols: {:?}", result.symbols
+        result
+            .symbols
+            .iter()
+            .any(|s| s.kind == SymbolKind::Struct && s.name == "Point"),
+        "should extract Point struct, symbols: {:?}",
+        result.symbols
     );
     assert!(
-        result.symbols.iter().any(|s| s.kind == SymbolKind::Function && s.name == "add"),
-        "should extract add function, symbols: {:?}", result.symbols
+        result
+            .symbols
+            .iter()
+            .any(|s| s.kind == SymbolKind::Function && s.name == "add"),
+        "should extract add function, symbols: {:?}",
+        result.symbols
     );
 }
 
@@ -108,18 +119,29 @@ fn test_cpp_grammar_loads_and_parses() {
     let source = "namespace myns {\n  class Foo { public: void bar(); };\n  void Foo::bar() { }\n}";
     let tree = parser.parse(source, None).expect("parse returned None");
     assert!(!tree.root_node().kind().is_empty());
-    assert!(!tree.root_node().has_error(), "C++ source should parse without syntax errors");
+    assert!(
+        !tree.root_node().has_error(),
+        "C++ source should parse without syntax errors"
+    );
 
     // Verify symbols extracted via process_file
     let result = process_file("test.cpp", source.as_bytes(), LanguageId::Cpp);
     assert_eq!(result.outcome, FileOutcome::Processed);
     assert!(
-        result.symbols.iter().any(|s| s.kind == SymbolKind::Module && s.name == "myns"),
-        "should extract myns namespace, symbols: {:?}", result.symbols
+        result
+            .symbols
+            .iter()
+            .any(|s| s.kind == SymbolKind::Module && s.name == "myns"),
+        "should extract myns namespace, symbols: {:?}",
+        result.symbols
     );
     assert!(
-        result.symbols.iter().any(|s| s.kind == SymbolKind::Class && s.name == "Foo"),
-        "should extract Foo class, symbols: {:?}", result.symbols
+        result
+            .symbols
+            .iter()
+            .any(|s| s.kind == SymbolKind::Class && s.name == "Foo"),
+        "should extract Foo class, symbols: {:?}",
+        result.symbols
     );
 }
 
@@ -138,8 +160,12 @@ fn test_csharp_grammar_loads_and_parses() {
     let result = process_file("test.cs", source.as_bytes(), LanguageId::CSharp);
     assert_eq!(result.outcome, FileOutcome::Processed);
     assert!(
-        result.symbols.iter().any(|s| s.kind == SymbolKind::Class && s.name == "Greeter"),
-        "should extract Greeter class, symbols: {:?}", result.symbols
+        result
+            .symbols
+            .iter()
+            .any(|s| s.kind == SymbolKind::Class && s.name == "Greeter"),
+        "should extract Greeter class, symbols: {:?}",
+        result.symbols
     );
 }
 
@@ -156,12 +182,20 @@ fn test_ruby_grammar_loads_and_parses() {
     let result = process_file("test.rb", source.as_bytes(), LanguageId::Ruby);
     assert_eq!(result.outcome, FileOutcome::Processed);
     assert!(
-        result.symbols.iter().any(|s| s.kind == SymbolKind::Class && s.name == "Animal"),
-        "should extract Animal class, symbols: {:?}", result.symbols
+        result
+            .symbols
+            .iter()
+            .any(|s| s.kind == SymbolKind::Class && s.name == "Animal"),
+        "should extract Animal class, symbols: {:?}",
+        result.symbols
     );
     assert!(
-        result.symbols.iter().any(|s| s.kind == SymbolKind::Function && s.name == "speak"),
-        "should extract speak method, symbols: {:?}", result.symbols
+        result
+            .symbols
+            .iter()
+            .any(|s| s.kind == SymbolKind::Function && s.name == "speak"),
+        "should extract speak method, symbols: {:?}",
+        result.symbols
     );
 }
 
@@ -177,12 +211,17 @@ fn test_kotlin_grammar_loads_and_parses() {
 
     let result = process_file("test.kt", source.as_bytes(), LanguageId::Kotlin);
     assert!(
-        matches!(result.outcome, FileOutcome::Processed | FileOutcome::PartialParse { .. }),
-        "Kotlin should be Processed or PartialParse, got: {:?}", result.outcome
+        matches!(
+            result.outcome,
+            FileOutcome::Processed | FileOutcome::PartialParse { .. }
+        ),
+        "Kotlin should be Processed or PartialParse, got: {:?}",
+        result.outcome
     );
     assert!(
         result.symbols.iter().any(|s| s.name == "Greeter"),
-        "should extract Greeter, symbols: {:?}", result.symbols
+        "should extract Greeter, symbols: {:?}",
+        result.symbols
     );
 }
 
@@ -199,8 +238,12 @@ fn test_dart_grammar_loads_and_parses() {
     let result = process_file("test.dart", source.as_bytes(), LanguageId::Dart);
     assert_eq!(result.outcome, FileOutcome::Processed);
     assert!(
-        result.symbols.iter().any(|s| s.kind == SymbolKind::Class && s.name == "Animal"),
-        "should extract Animal class, symbols: {:?}", result.symbols
+        result
+            .symbols
+            .iter()
+            .any(|s| s.kind == SymbolKind::Class && s.name == "Animal"),
+        "should extract Animal class, symbols: {:?}",
+        result.symbols
     );
 }
 
@@ -217,8 +260,12 @@ fn test_elixir_grammar_loads_and_parses() {
     let result = process_file("test.ex", source.as_bytes(), LanguageId::Elixir);
     assert_eq!(result.outcome, FileOutcome::Processed);
     assert!(
-        result.symbols.iter().any(|s| s.kind == SymbolKind::Module && s.name == "Greeter"),
-        "should extract Greeter module, symbols: {:?}", result.symbols
+        result
+            .symbols
+            .iter()
+            .any(|s| s.kind == SymbolKind::Module && s.name == "Greeter"),
+        "should extract Greeter module, symbols: {:?}",
+        result.symbols
     );
 }
 
@@ -234,12 +281,20 @@ fn test_php_grammar_loads_and_parses() {
 
     let result = process_file("test.php", source.as_bytes(), LanguageId::Php);
     assert!(
-        matches!(result.outcome, FileOutcome::Processed | FileOutcome::PartialParse { .. }),
-        "PHP should parse successfully: {:?}", result.outcome
+        matches!(
+            result.outcome,
+            FileOutcome::Processed | FileOutcome::PartialParse { .. }
+        ),
+        "PHP should parse successfully: {:?}",
+        result.outcome
     );
     assert!(
-        result.symbols.iter().any(|s| s.kind == SymbolKind::Class && s.name == "Foo"),
-        "should extract Foo class, symbols: {:?}", result.symbols
+        result
+            .symbols
+            .iter()
+            .any(|s| s.kind == SymbolKind::Class && s.name == "Foo"),
+        "should extract Foo class, symbols: {:?}",
+        result.symbols
     );
 }
 
@@ -255,12 +310,20 @@ fn test_swift_grammar_loads_and_parses() {
 
     let result = process_file("test.swift", source.as_bytes(), LanguageId::Swift);
     assert!(
-        matches!(result.outcome, FileOutcome::Processed | FileOutcome::PartialParse { .. }),
-        "Swift should parse successfully: {:?}", result.outcome
+        matches!(
+            result.outcome,
+            FileOutcome::Processed | FileOutcome::PartialParse { .. }
+        ),
+        "Swift should parse successfully: {:?}",
+        result.outcome
     );
     assert!(
-        result.symbols.iter().any(|s| s.kind == SymbolKind::Class && s.name == "Foo"),
-        "should extract Foo class, symbols: {:?}", result.symbols
+        result
+            .symbols
+            .iter()
+            .any(|s| s.kind == SymbolKind::Class && s.name == "Foo"),
+        "should extract Foo class, symbols: {:?}",
+        result.symbols
     );
 }
 
@@ -276,11 +339,19 @@ fn test_perl_grammar_loads_and_parses() {
 
     let result = process_file("test.pl", source.as_bytes(), LanguageId::Perl);
     assert!(
-        matches!(result.outcome, FileOutcome::Processed | FileOutcome::PartialParse { .. }),
-        "Perl should parse successfully: {:?}", result.outcome
+        matches!(
+            result.outcome,
+            FileOutcome::Processed | FileOutcome::PartialParse { .. }
+        ),
+        "Perl should parse successfully: {:?}",
+        result.outcome
     );
     assert!(
-        result.symbols.iter().any(|s| s.kind == SymbolKind::Function && s.name == "greet"),
-        "should extract greet subroutine, symbols: {:?}", result.symbols
+        result
+            .symbols
+            .iter()
+            .any(|s| s.kind == SymbolKind::Function && s.name == "greet"),
+        "should extract greet subroutine, symbols: {:?}",
+        result.symbols
     );
 }

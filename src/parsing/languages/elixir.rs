@@ -64,7 +64,10 @@ fn extract_elixir_def(node: &Node, source: &str) -> Option<(SymbolKind, String)>
                             let mut c2 = arg.walk();
                             for grandchild in arg.children(&mut c2) {
                                 if grandchild.kind() == "identifier" {
-                                    name_text = grandchild.utf8_text(source_bytes).ok().map(|s| s.to_string());
+                                    name_text = grandchild
+                                        .utf8_text(source_bytes)
+                                        .ok()
+                                        .map(|s| s.to_string());
                                     break;
                                 }
                             }
@@ -72,7 +75,10 @@ fn extract_elixir_def(node: &Node, source: &str) -> Option<(SymbolKind, String)>
                         }
                         "alias" => {
                             // defmodule MyApp.Module — alias is the module name
-                            name_text = arg.utf8_text(source_bytes).ok().map(|s| s.trim().to_string());
+                            name_text = arg
+                                .utf8_text(source_bytes)
+                                .ok()
+                                .map(|s| s.trim().to_string());
                             break;
                         }
                         _ => {}
@@ -120,7 +126,11 @@ mod tests {
         let source = "def greet do\n  IO.puts(\"hello\")\nend";
         let symbols = parse_elixir(source);
         let func = symbols.iter().find(|s| s.kind == SymbolKind::Function);
-        assert!(func.is_some(), "should extract def function, got: {:?}", symbols);
+        assert!(
+            func.is_some(),
+            "should extract def function, got: {:?}",
+            symbols
+        );
         assert_eq!(func.unwrap().name, "greet");
     }
 
@@ -137,7 +147,12 @@ mod tests {
     fn test_elixir_process_file_returns_processed() {
         let source = b"defmodule Foo do\n  def bar do\n    :ok\n  end\nend";
         let result = process_file("test.ex", source, LanguageId::Elixir);
-        assert_eq!(result.outcome, FileOutcome::Processed, "outcome: {:?}", result.outcome);
+        assert_eq!(
+            result.outcome,
+            FileOutcome::Processed,
+            "outcome: {:?}",
+            result.outcome
+        );
         assert!(!result.symbols.is_empty(), "should have symbols");
     }
 }

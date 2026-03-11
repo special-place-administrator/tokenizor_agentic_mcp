@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::fmt;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum LanguageId {
     Rust,
     Python,

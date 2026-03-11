@@ -82,8 +82,9 @@ impl TokenizorServer {
             ));
         }
 
-        GetPromptResult::new(messages)
-            .with_description("Map repository architecture using Tokenizor resources and cross-reference tools.")
+        GetPromptResult::new(messages).with_description(
+            "Map repository architecture using Tokenizor resources and cross-reference tools.",
+        )
     }
 
     #[prompt(
@@ -111,8 +112,9 @@ impl TokenizorServer {
             ));
         }
 
-        GetPromptResult::new(messages)
-            .with_description("Triage failures using Tokenizor runtime health, changed files, and local context.")
+        GetPromptResult::new(messages).with_description(
+            "Triage failures using Tokenizor runtime health, changed files, and local context.",
+        )
     }
 }
 
@@ -143,7 +145,10 @@ fn build_architecture_map_instructions(project_name: &str, area: Option<&str>) -
     text
 }
 
-fn build_failure_triage_instructions(project_name: &str, input: &FailureTriagePromptInput) -> String {
+fn build_failure_triage_instructions(
+    project_name: &str,
+    input: &FailureTriagePromptInput,
+) -> String {
     let mut text = format!(
         "Triage a problem in project '{project_name}'. Symptom: {}. Build a root-cause-first investigation plan using current health, changed files, and the smallest set of targeted lookups needed.",
         input.symptom
@@ -208,25 +213,19 @@ mod tests {
             .await;
 
         assert!(
-            result
-                .messages
-                .iter()
-                .any(|message| matches!(
-                    &message.content,
-                    rmcp::model::PromptMessageContent::ResourceLink { link }
-                        if link.uri == REPO_HEALTH_URI
-                )),
+            result.messages.iter().any(|message| matches!(
+                &message.content,
+                rmcp::model::PromptMessageContent::ResourceLink { link }
+                    if link.uri == REPO_HEALTH_URI
+            )),
             "code-review prompt should link repo health"
         );
         assert!(
-            result
-                .messages
-                .iter()
-                .any(|message| matches!(
-                    &message.content,
-                    rmcp::model::PromptMessageContent::ResourceLink { link }
-                        if link.uri.contains("tokenizor://file/context")
-                )),
+            result.messages.iter().any(|message| matches!(
+                &message.content,
+                rmcp::model::PromptMessageContent::ResourceLink { link }
+                    if link.uri.contains("tokenizor://file/context")
+            )),
             "code-review prompt should link file context"
         );
     }

@@ -23,9 +23,15 @@ fn walk_node(
         _ => None,
     };
 
-    push_named_symbol(node, source, depth, sort_order, symbols, kind, |node, source, _| {
-        find_name(node, source)
-    });
+    push_named_symbol(
+        node,
+        source,
+        depth,
+        sort_order,
+        symbols,
+        kind,
+        |node, source, _| find_name(node, source),
+    );
     walk_children(node, source, depth, sort_order, symbols, kind, walk_node);
 }
 
@@ -57,7 +63,11 @@ mod tests {
         let source = "fun greet() { println(\"hello\") }";
         let symbols = parse_kotlin(source);
         let func = symbols.iter().find(|s| s.kind == SymbolKind::Function);
-        assert!(func.is_some(), "should extract function, got: {:?}", symbols);
+        assert!(
+            func.is_some(),
+            "should extract function, got: {:?}",
+            symbols
+        );
         assert_eq!(func.unwrap().name, "greet");
     }
 
@@ -67,8 +77,14 @@ mod tests {
         let source = "class Animal { fun speak() { } }";
         let symbols = parse_kotlin(source);
         // Grammar may report has_error for some constructs but still extracts symbols
-        let cls = symbols.iter().find(|s| s.kind == SymbolKind::Class && s.name == "Animal");
-        assert!(cls.is_some(), "should extract Animal class, got: {:?}", symbols);
+        let cls = symbols
+            .iter()
+            .find(|s| s.kind == SymbolKind::Class && s.name == "Animal");
+        assert!(
+            cls.is_some(),
+            "should extract Animal class, got: {:?}",
+            symbols
+        );
     }
 
     #[test]
@@ -77,8 +93,14 @@ mod tests {
         let source = "interface Runnable { fun run() }";
         let symbols = parse_kotlin(source);
         // Interface maps to Class kind in this grammar
-        let cls = symbols.iter().find(|s| s.kind == SymbolKind::Class && s.name == "Runnable");
-        assert!(cls.is_some(), "should extract Runnable as Class, got: {:?}", symbols);
+        let cls = symbols
+            .iter()
+            .find(|s| s.kind == SymbolKind::Class && s.name == "Runnable");
+        assert!(
+            cls.is_some(),
+            "should extract Runnable as Class, got: {:?}",
+            symbols
+        );
     }
 
     #[test]
@@ -88,9 +110,17 @@ mod tests {
         let source = b"class Foo { fun bar() { } }";
         let result = process_file("test.kt", source, LanguageId::Kotlin);
         assert!(
-            matches!(result.outcome, FileOutcome::Processed | FileOutcome::PartialParse { .. }),
-            "should be Processed or PartialParse, got: {:?}", result.outcome
+            matches!(
+                result.outcome,
+                FileOutcome::Processed | FileOutcome::PartialParse { .. }
+            ),
+            "should be Processed or PartialParse, got: {:?}",
+            result.outcome
         );
-        assert!(!result.symbols.is_empty(), "should have symbols, got: {:?}", result.symbols);
+        assert!(
+            !result.symbols.is_empty(),
+            "should have symbols, got: {:?}",
+            result.symbols
+        );
     }
 }

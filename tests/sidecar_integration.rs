@@ -18,14 +18,14 @@ use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
 use tempfile::TempDir;
-use tokio::sync::Mutex;
 use tokenizor_agentic_mcp::{
-    cli::hook::{event_name_for, fail_open_json, run_hook, success_json},
     cli::HookSubcommand,
+    cli::hook::{event_name_for, fail_open_json, run_hook, success_json},
     domain::{LanguageId, SymbolKind, SymbolRecord},
     live_index::{IndexedFile, LiveIndex, ParseStatus, SharedIndex},
     sidecar::spawn_sidecar,
 };
+use tokio::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Serialize all cwd-manipulating tests.
@@ -136,7 +136,10 @@ async fn test_sidecar_binds_ephemeral_port() {
     let port_file = tmp.path().join(".tokenizor/sidecar.port");
     assert!(port_file.exists(), "sidecar.port file must exist");
     let content = std::fs::read_to_string(&port_file).unwrap();
-    let file_port: u16 = content.trim().parse().expect("port file must contain a valid u16");
+    let file_port: u16 = content
+        .trim()
+        .parse()
+        .expect("port file must contain a valid u16");
     assert_eq!(file_port, handle.port, "port file must match handle port");
 
     let pid_file = tmp.path().join(".tokenizor/sidecar.pid");
@@ -146,8 +149,14 @@ async fn test_sidecar_binds_ephemeral_port() {
     let _ = handle.shutdown_tx.send(());
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    assert!(!port_file.exists(), "sidecar.port file must be cleaned up after shutdown");
-    assert!(!pid_file.exists(), "sidecar.pid file must be cleaned up after shutdown");
+    assert!(
+        !port_file.exists(),
+        "sidecar.port file must be cleaned up after shutdown"
+    );
+    assert!(
+        !pid_file.exists(),
+        "sidecar.pid file must be cleaned up after shutdown"
+    );
 
     restore_cwd(&original);
 }
@@ -185,8 +194,14 @@ async fn test_health_endpoint_responds() {
 
     let parsed: serde_json::Value =
         serde_json::from_str(&body).expect("health response must be valid JSON");
-    assert!(parsed.get("file_count").is_some(), "health response must contain 'file_count'");
-    assert!(parsed.get("symbol_count").is_some(), "health response must contain 'symbol_count'");
+    assert!(
+        parsed.get("file_count").is_some(),
+        "health response must contain 'file_count'"
+    );
+    assert!(
+        parsed.get("symbol_count").is_some(),
+        "health response must contain 'symbol_count'"
+    );
     assert_eq!(parsed["file_count"], 2, "file_count must match index");
 
     let _ = handle.shutdown_tx.send(());
@@ -214,8 +229,14 @@ async fn test_outline_endpoint() {
     let body = raw_http_get(handle.port, "/outline", "path=src/foo.rs")
         .expect("GET /outline must succeed");
 
-    assert!(body.contains("src/foo.rs"), "outline should mention the requested file");
-    assert!(body.contains("hello"), "outline should include the symbol name");
+    assert!(
+        body.contains("src/foo.rs"),
+        "outline should mention the requested file"
+    );
+    assert!(
+        body.contains("hello"),
+        "outline should include the symbol name"
+    );
     assert!(
         body.contains("tokens saved"),
         "outline should include the token savings footer"
@@ -256,16 +277,25 @@ async fn test_shared_index_mutation() {
     }
 
     // Sidecar should now report 2 files (same Arc).
-    let body2 = raw_http_get(handle.port, "/health", "")
-        .expect("GET /health after mutation must succeed");
+    let body2 =
+        raw_http_get(handle.port, "/health", "").expect("GET /health after mutation must succeed");
     let parsed2: serde_json::Value = serde_json::from_str(&body2).unwrap();
-    assert_eq!(parsed2["file_count"], 2, "sidecar must see mutated index — file_count must be 2");
+    assert_eq!(
+        parsed2["file_count"], 2,
+        "sidecar must see mutated index — file_count must be 2"
+    );
 
     // Outline for the new file must also be visible.
     let outline = raw_http_get(handle.port, "/outline", "path=src/b.rs")
         .expect("GET /outline for new file must succeed");
-    assert!(outline.contains("src/b.rs"), "outline should mention the new file");
-    assert!(outline.contains("beta"), "new file symbol must be visible through sidecar");
+    assert!(
+        outline.contains("src/b.rs"),
+        "outline should mention the new file"
+    );
+    assert!(
+        outline.contains("beta"),
+        "new file symbol must be visible through sidecar"
+    );
 
     let _ = handle.shutdown_tx.send(());
     restore_cwd(&original);
@@ -334,7 +364,9 @@ fn test_hook_output_valid_json() {
             sub
         );
         assert!(
-            parsed["hookSpecificOutput"].get("additionalContext").is_some(),
+            parsed["hookSpecificOutput"]
+                .get("additionalContext")
+                .is_some(),
             "additionalContext must be present in fail_open output for {:?}",
             sub
         );
@@ -349,13 +381,14 @@ fn test_hook_output_valid_json() {
             sub
         );
         assert!(
-            parsed2["hookSpecificOutput"].get("additionalContext").is_some(),
+            parsed2["hookSpecificOutput"]
+                .get("additionalContext")
+                .is_some(),
             "additionalContext must be present in success output for {:?}",
             sub
         );
         assert_eq!(
-            parsed2["hookSpecificOutput"]["additionalContext"],
-            "some context data",
+            parsed2["hookSpecificOutput"]["additionalContext"], "some context data",
             "additionalContext value must match for {:?}",
             sub
         );
@@ -390,8 +423,7 @@ fn test_hook_failopen_valid_json() {
             .unwrap_or_else(|e| panic!("fail-open JSON for {:?} must be valid: {e}", sub));
 
         assert_eq!(
-            parsed["hookSpecificOutput"]["additionalContext"],
-            "",
+            parsed["hookSpecificOutput"]["additionalContext"], "",
             "fail-open additionalContext must be empty string for {:?}",
             sub
         );
@@ -425,10 +457,22 @@ async fn test_repo_map_endpoint() {
 
     let body = raw_http_get(handle.port, "/repo-map", "").expect("GET /repo-map must succeed");
 
-    assert!(body.contains("3 files"), "repo-map should summarize file count");
-    assert!(body.contains("3 symbols"), "repo-map should summarize symbol count");
-    assert!(body.contains("Rust: 3"), "repo-map should include language breakdown");
-    assert!(body.contains("src"), "repo-map should include the src directory bucket");
+    assert!(
+        body.contains("3 files"),
+        "repo-map should summarize file count"
+    );
+    assert!(
+        body.contains("3 symbols"),
+        "repo-map should summarize symbol count"
+    );
+    assert!(
+        body.contains("Rust: 3"),
+        "repo-map should include language breakdown"
+    );
+    assert!(
+        body.contains("src"),
+        "repo-map should include the src directory bucket"
+    );
 
     let _ = handle.shutdown_tx.send(());
     restore_cwd(&original);
@@ -455,8 +499,14 @@ async fn test_prompt_context_endpoint_prefers_file_hint() {
     )
     .expect("GET /prompt-context must succeed");
 
-    assert!(body.contains("src/foo.rs"), "prompt context should mention the hinted file");
-    assert!(body.contains("hello"), "prompt context should include the hinted file symbol");
+    assert!(
+        body.contains("src/foo.rs"),
+        "prompt context should mention the hinted file"
+    );
+    assert!(
+        body.contains("hello"),
+        "prompt context should include the hinted file symbol"
+    );
 
     let _ = handle.shutdown_tx.send(());
     restore_cwd(&original);

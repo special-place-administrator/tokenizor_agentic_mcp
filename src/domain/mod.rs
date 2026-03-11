@@ -1,6 +1,6 @@
 pub mod index;
 
 pub use index::{
-    find_enclosing_symbol, FileOutcome, FileProcessingResult, LanguageId, ReferenceKind,
-    ReferenceRecord, SupportTier, SymbolKind, SymbolRecord,
+    FileOutcome, FileProcessingResult, LanguageId, ReferenceKind, ReferenceRecord, SupportTier,
+    SymbolKind, SymbolRecord, find_enclosing_symbol,
 };

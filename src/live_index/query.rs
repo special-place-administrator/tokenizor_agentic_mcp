@@ -190,6 +190,63 @@ fn can_match_type_dependents(
     }
 }
 
+fn matches_target_stem(text: &str, stem: &str) -> bool {
+    text == stem
+        || text.ends_with(&format!("/{stem}"))
+        || text.ends_with(&format!("::{stem}"))
+        || text.ends_with(&format!(".{stem}"))
+        || text.contains(&format!("/{stem}/"))
+        || text.contains(&format!("::{stem}::"))
+}
+
+fn matches_target_module(language: &LanguageId, text: &str, module_path: Option<&str>) -> bool {
+    let Some(module_path) = module_path else {
+        return false;
+    };
+
+    let module_sep = match language {
+        LanguageId::Python => ".",
+        LanguageId::JavaScript | LanguageId::TypeScript => "/",
+        _ => "::",
+    };
+
+    if text == module_path || text.starts_with(&format!("{module_path}{module_sep}")) {
+        return true;
+    }
+
+    if *language == LanguageId::Rust
+        && let Some(tail) = module_path.strip_prefix("crate::")
+    {
+        return text == tail
+            || text.ends_with(&format!("::{tail}"))
+            || text.contains(&format!("::{tail}::"));
+    }
+
+    false
+}
+
+fn matches_target_import(
+    language: &LanguageId,
+    reference: &ReferenceRecord,
+    stem: &str,
+    module_path: Option<&str>,
+) -> bool {
+    if reference.kind != ReferenceKind::Import {
+        return false;
+    }
+
+    matches_target_stem(&reference.name, stem)
+        || reference
+            .qualified_name
+            .as_deref()
+            .map(|text| {
+                matches_target_stem(text, stem)
+                    || matches_target_module(language, text, module_path)
+            })
+            .unwrap_or(false)
+        || matches_target_module(language, &reference.name, module_path)
+}
+
 // ---------------------------------------------------------------------------
 // Built-in type filter lists (per-language)
 // ---------------------------------------------------------------------------
@@ -565,12 +622,6 @@ impl LiveIndex {
         // Resolve the logical module path for the target file.
         let module_path = resolve_module_path(target_path, &target_file.language);
 
-        // Module-path separator for matching (language-dependent).
-        let module_sep = match target_file.language {
-            LanguageId::Python => ".",
-            LanguageId::JavaScript | LanguageId::TypeScript => "/",
-            _ => "::",
-        };
         let target_language = target_file.language.clone();
         let target_scope = declared_scope(target_file);
         let target_symbol_names: HashSet<&str> = target_file
@@ -588,21 +639,30 @@ impl LiveIndex {
                 continue;
             }
 
+            let matching_imports: Vec<&ReferenceRecord> = file
+                .references
+                .iter()
+                .filter(|reference| {
+                    matches_target_import(&target_language, reference, stem, module_path.as_deref())
+                })
+                .collect();
+
             if !target_symbol_names.is_empty()
-                && can_match_type_dependents(file, &target_language, target_scope.as_deref())
+                && (can_match_type_dependents(file, &target_language, target_scope.as_deref())
+                    || !matching_imports.is_empty())
             {
-                let type_refs: Vec<&ReferenceRecord> = file
+                let symbol_refs: Vec<&ReferenceRecord> = file
                     .references
                     .iter()
                     .filter(|reference| {
-                        reference.kind == ReferenceKind::TypeUsage
+                        reference.kind != ReferenceKind::Import
                             && target_symbol_names.contains(reference.name.as_str())
                     })
                     .collect();
 
-                if !type_refs.is_empty() {
+                if !symbol_refs.is_empty() {
                     results.extend(
-                        type_refs
+                        symbol_refs
                             .into_iter()
                             .map(|reference| (file_path.as_str(), reference)),
                     );
@@ -610,43 +670,11 @@ impl LiveIndex {
                 }
             }
 
-            for reference in &file.references {
-                if reference.kind != ReferenceKind::Import {
-                    continue;
-                }
-
-                // Strategy 1: stem matching (original heuristic).
-                let matches_stem = |text: &str| -> bool {
-                    text == stem
-                        || text.ends_with(&format!("/{stem}"))
-                        || text.ends_with(&format!("::{stem}"))
-                        || text.ends_with(&format!(".{stem}"))
-                        || text.contains(&format!("/{stem}/"))
-                        || text.contains(&format!("::{stem}::"))
-                };
-
-                // Strategy 2: module path matching.
-                let matches_module = |text: &str| -> bool {
-                    if let Some(ref mp) = module_path {
-                        return text == mp.as_str()
-                            || text.starts_with(&format!("{mp}{module_sep}"));
-                    }
-                    false
-                };
-
-                let check = |text: &str| matches_stem(text) || matches_module(text);
-
-                let found = check(&reference.name)
-                    || reference
-                        .qualified_name
-                        .as_deref()
-                        .map(check)
-                        .unwrap_or(false);
-
-                if found {
-                    results.push((file_path.as_str(), reference));
-                }
-            }
+            results.extend(
+                matching_imports
+                    .into_iter()
+                    .map(|reference| (file_path.as_str(), reference)),
+            );
         }
 
         results.sort_by(|a, b| {
@@ -1350,6 +1378,53 @@ mod tests {
     }
 
     #[test]
+    fn test_find_dependents_rust_returns_symbol_usage_when_module_import_matches() {
+        let target = make_file_with_refs_and_content(
+            "src/daemon.rs",
+            LanguageId::Rust,
+            "pub fn connect_or_spawn_session() {}",
+            vec![],
+            vec![make_symbol("connect_or_spawn_session")],
+        );
+        let dependent = make_file_with_refs_and_content(
+            "src/main.rs",
+            LanguageId::Rust,
+            "use crate::{daemon, other}; fn main() { daemon::connect_or_spawn_session(); }",
+            vec![
+                make_ref(
+                    "daemon",
+                    Some("crate::daemon"),
+                    ReferenceKind::Import,
+                    None,
+                    0,
+                ),
+                make_ref(
+                    "connect_or_spawn_session",
+                    Some("daemon::connect_or_spawn_session"),
+                    ReferenceKind::Call,
+                    Some(0),
+                    100,
+                ),
+            ],
+            vec![make_symbol("main")],
+        );
+        let index = make_index(
+            vec![("src/daemon.rs", target), ("src/main.rs", dependent)],
+            false,
+        );
+
+        let deps = index.find_dependents_for_file("src/daemon.rs");
+        assert_eq!(
+            deps.len(),
+            1,
+            "matched Rust module imports should surface actual symbol usage, not just import stubs"
+        );
+        assert_eq!(deps[0].0, "src/main.rs");
+        assert_eq!(deps[0].1.kind, ReferenceKind::Call);
+        assert_eq!(deps[0].1.name, "connect_or_spawn_session");
+    }
+
+    #[test]
     fn test_find_dependents_python_init_via_module_path() {
         // app.py imports "utils.helpers" — __init__.py defines the utils package.
         let import_ref = make_ref("utils.helpers", None, ReferenceKind::Import, None, 0);
@@ -1573,6 +1648,55 @@ public class PacketsController {
             "src/main/java/com/acme/api/PacketsController.java"
         );
         assert_eq!(deps[0].1.kind, ReferenceKind::TypeUsage);
+    }
+
+    #[test]
+    fn test_find_dependents_typescript_prefers_type_usage_when_module_import_matches() {
+        let target = make_file_with_refs_and_content(
+            "src/service.ts",
+            LanguageId::TypeScript,
+            "export class Service {}",
+            vec![],
+            vec![SymbolRecord {
+                name: "Service".to_string(),
+                kind: SymbolKind::Class,
+                depth: 0,
+                sort_order: 0,
+                byte_range: (0, 10),
+                line_range: (0, 0),
+            }],
+        );
+        let dependent = make_file_with_refs_and_content(
+            "src/app.ts",
+            LanguageId::TypeScript,
+            "import { Service } from \"./service\";\nexport class App { constructor(private service: Service) {} }",
+            vec![
+                make_ref("service", Some("./service"), ReferenceKind::Import, None, 0),
+                make_ref("Service", None, ReferenceKind::TypeUsage, Some(0), 100),
+            ],
+            vec![SymbolRecord {
+                name: "App".to_string(),
+                kind: SymbolKind::Class,
+                depth: 0,
+                sort_order: 0,
+                byte_range: (0, 10),
+                line_range: (0, 0),
+            }],
+        );
+        let index = make_index(
+            vec![("src/service.ts", target), ("src/app.ts", dependent)],
+            false,
+        );
+
+        let deps = index.find_dependents_for_file("src/service.ts");
+        assert_eq!(
+            deps.len(),
+            1,
+            "module-backed TypeScript dependents should report type usage, not just the import"
+        );
+        assert_eq!(deps[0].0, "src/app.ts");
+        assert_eq!(deps[0].1.kind, ReferenceKind::TypeUsage);
+        assert_eq!(deps[0].1.name, "Service");
     }
 
     #[test]

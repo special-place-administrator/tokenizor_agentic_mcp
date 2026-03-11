@@ -6,6 +6,7 @@ pub mod tools;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
+use rmcp::RoleServer;
 use rmcp::handler::server::router::prompt::PromptRouter;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::model::{
@@ -13,9 +14,8 @@ use rmcp::model::{
     ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult,
     ServerCapabilities, ServerInfo,
 };
-use rmcp::{prompt_handler, tool_handler, ServerHandler};
 use rmcp::service::RequestContext;
-use rmcp::RoleServer;
+use rmcp::{ServerHandler, prompt_handler, tool_handler};
 
 use crate::live_index::store::LiveIndex;
 use crate::sidecar::TokenStats;
@@ -104,14 +104,17 @@ impl TokenizorServer {
             Err(error) => return Some(format!("Daemon proxy serialization failed: {error}")),
         };
 
-        Some(match daemon_client.call_tool_value(tool_name, value).await {
-            Ok(result) => result,
-            Err(error) => format!("Daemon proxy failed: {error}"),
-        })
+        Some(
+            match daemon_client.call_tool_value(tool_name, value).await {
+                Ok(result) => result,
+                Err(error) => format!("Daemon proxy failed: {error}"),
+            },
+        )
     }
 
     pub(crate) async fn proxy_tool_call_without_params(&self, tool_name: &str) -> Option<String> {
-        self.proxy_tool_call(tool_name, &serde_json::json!({})).await
+        self.proxy_tool_call(tool_name, &serde_json::json!({}))
+            .await
     }
 }
 
@@ -136,7 +139,8 @@ impl ServerHandler for TokenizorServer {
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ListResourcesResult, rmcp::ErrorData>> + Send + '_ {
+    ) -> impl std::future::Future<Output = Result<ListResourcesResult, rmcp::ErrorData>> + Send + '_
+    {
         std::future::ready(Ok(ListResourcesResult {
             resources: self.resource_definitions(),
             ..Default::default()
@@ -147,7 +151,9 @@ impl ServerHandler for TokenizorServer {
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ListResourceTemplatesResult, rmcp::ErrorData>> + Send + '_ {
+    ) -> impl std::future::Future<Output = Result<ListResourceTemplatesResult, rmcp::ErrorData>>
+    + Send
+    + '_ {
         std::future::ready(Ok(ListResourceTemplatesResult {
             resource_templates: self.resource_template_definitions(),
             ..Default::default()
@@ -158,7 +164,8 @@ impl ServerHandler for TokenizorServer {
         &self,
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ReadResourceResult, rmcp::ErrorData>> + Send + '_ {
+    ) -> impl std::future::Future<Output = Result<ReadResourceResult, rmcp::ErrorData>> + Send + '_
+    {
         let uri = request.uri;
         async move { self.read_resource_uri(&uri).await }
     }

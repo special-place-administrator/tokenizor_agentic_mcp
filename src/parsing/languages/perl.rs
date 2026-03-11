@@ -20,9 +20,15 @@ fn walk_node(
         _ => None,
     };
 
-    push_named_symbol(node, source, depth, sort_order, symbols, kind, |node, source, kind| {
-        find_name(node, source, kind)
-    });
+    push_named_symbol(
+        node,
+        source,
+        depth,
+        sort_order,
+        symbols,
+        kind,
+        |node, source, kind| find_name(node, source, kind),
+    );
     walk_children(node, source, depth, sort_order, symbols, kind, walk_node);
 }
 
@@ -31,7 +37,8 @@ fn find_name(node: &Node, source: &str, kind: SymbolKind) -> Option<String> {
     for child in node.children(&mut cursor) {
         // For subroutine_declaration_statement, look for identifier after 'sub'
         // For package_statement, look for package_name or identifier
-        if child.kind() == "name" || child.kind() == "identifier" || child.kind() == "package_name" {
+        if child.kind() == "name" || child.kind() == "identifier" || child.kind() == "package_name"
+        {
             return Some(child.utf8_text(source.as_bytes()).unwrap_or("").to_string());
         }
         // Some versions use 'subroutine_name' node
@@ -56,12 +63,20 @@ mod tests {
         let source = b"sub greet { print \"hello\\n\"; }";
         let result = process_file("test.pl", source, LanguageId::Perl);
         assert!(
-            matches!(result.outcome, FileOutcome::Processed | FileOutcome::PartialParse { .. }),
-            "Perl should parse successfully: {:?}", result.outcome
+            matches!(
+                result.outcome,
+                FileOutcome::Processed | FileOutcome::PartialParse { .. }
+            ),
+            "Perl should parse successfully: {:?}",
+            result.outcome
         );
         assert!(
-            result.symbols.iter().any(|s| s.kind == SymbolKind::Function && s.name == "greet"),
-            "should extract greet subroutine, symbols: {:?}", result.symbols
+            result
+                .symbols
+                .iter()
+                .any(|s| s.kind == SymbolKind::Function && s.name == "greet"),
+            "should extract greet subroutine, symbols: {:?}",
+            result.symbols
         );
     }
 }

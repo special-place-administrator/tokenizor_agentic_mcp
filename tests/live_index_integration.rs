@@ -8,8 +8,8 @@
 use std::fs;
 use std::path::Path;
 use tempfile::tempdir;
-use tokenizor_agentic_mcp::live_index::{IndexState, LiveIndex, ParseStatus};
 use tokenizor_agentic_mcp::live_index::persist;
+use tokenizor_agentic_mcp::live_index::{IndexState, LiveIndex, ParseStatus};
 
 // --------------------------------------------------------------------------
 // Helpers
@@ -36,9 +36,21 @@ fn test_startup_loads_all_files() {
 
     write_file(dir.path(), "main.rs", "fn main() {}\nfn helper() {}");
     write_file(dir.path(), "app.py", "def run(): pass\ndef stop(): pass");
-    write_file(dir.path(), "index.js", "function start() {}\nfunction end() {}");
-    write_file(dir.path(), "lib.ts", "function util(): void {}\nfunction core(): void {}");
-    write_file(dir.path(), "main.go", "package main\nfunc main() {}\nfunc run() {}");
+    write_file(
+        dir.path(),
+        "index.js",
+        "function start() {}\nfunction end() {}",
+    );
+    write_file(
+        dir.path(),
+        "lib.ts",
+        "function util(): void {}\nfunction core(): void {}",
+    );
+    write_file(
+        dir.path(),
+        "main.go",
+        "package main\nfunc main() {}\nfunc run() {}",
+    );
 
     let shared = LiveIndex::load(dir.path()).unwrap();
     let index = shared.read().unwrap();
@@ -378,9 +390,7 @@ fn test_load_perf_1000_files() {
     let dir = tempdir().unwrap();
 
     for i in 0..1000 {
-        let content = format!(
-            "fn func_{i}() {{}}\nfn helper_{i}(x: u32) -> u32 {{ x + {i} }}\n"
-        );
+        let content = format!("fn func_{i}() {{}}\nfn helper_{i}(x: u32) -> u32 {{ x + {i} }}\n");
         write_file(dir.path(), &format!("file_{i:04}.rs"), &content);
     }
 
@@ -437,11 +447,7 @@ fn test_empty_index_when_no_auto_index() {
     let empty = LiveIndex::empty();
     let index = empty.read().unwrap();
 
-    assert_eq!(
-        index.file_count(),
-        0,
-        "empty index should have 0 files"
-    );
+    assert_eq!(index.file_count(), 0, "empty index should have 0 files");
     assert_eq!(
         index.index_state(),
         IndexState::Empty,
@@ -533,7 +539,11 @@ fn test_get_symbol_returns_source_body() {
     use tokenizor_agentic_mcp::protocol::format;
 
     let dir = tempdir().unwrap();
-    write_file(dir.path(), "math.rs", "fn add(a: u32, b: u32) -> u32 { a + b }");
+    write_file(
+        dir.path(),
+        "math.rs",
+        "fn add(a: u32, b: u32) -> u32 { a + b }",
+    );
 
     let shared = LiveIndex::load(dir.path()).unwrap();
     let index = shared.read().unwrap();
@@ -563,8 +573,16 @@ fn test_search_text_finds_content() {
     use tokenizor_agentic_mcp::protocol::format;
 
     let dir = tempdir().unwrap();
-    write_file(dir.path(), "config.rs", "const MAX_RETRIES: u32 = 3;\nconst TIMEOUT: u32 = 30;");
-    write_file(dir.path(), "server.rs", "const PORT: u32 = 8080;\nconst MAX_CONN: u32 = 100;");
+    write_file(
+        dir.path(),
+        "config.rs",
+        "const MAX_RETRIES: u32 = 3;\nconst TIMEOUT: u32 = 30;",
+    );
+    write_file(
+        dir.path(),
+        "server.rs",
+        "const PORT: u32 = 8080;\nconst MAX_CONN: u32 = 100;",
+    );
 
     let shared = LiveIndex::load(dir.path()).unwrap();
     let index = shared.read().unwrap();
@@ -643,7 +661,10 @@ fn test_index_folder_reload() {
     {
         let index = shared.read().unwrap();
         assert_eq!(index.file_count(), 2, "dir A should have 2 files");
-        assert!(index.get_file("alpha.rs").is_some(), "alpha.rs should be in index");
+        assert!(
+            index.get_file("alpha.rs").is_some(),
+            "alpha.rs should be in index"
+        );
     }
 
     // Reload with dir B
@@ -655,7 +676,11 @@ fn test_index_folder_reload() {
     // Verify index now contains B's files, not A's
     {
         let index = shared.read().unwrap();
-        assert_eq!(index.file_count(), 3, "dir B should have 3 files after reload");
+        assert_eq!(
+            index.file_count(),
+            3,
+            "dir B should have 3 files after reload"
+        );
         assert!(
             index.get_file("gamma.rs").is_some(),
             "gamma.rs should be in index after reload"
@@ -737,13 +762,19 @@ fn test_persist_round_trip() {
     }
 
     // Load snapshot
-    let snapshot = persist::load_snapshot(dir.path())
-        .expect("snapshot should be loadable after serialize");
+    let snapshot =
+        persist::load_snapshot(dir.path()).expect("snapshot should be loadable after serialize");
 
     assert_eq!(snapshot.version, 1, "snapshot version should be 1");
     assert_eq!(snapshot.files.len(), 2, "snapshot should contain 2 files");
-    assert!(snapshot.files.contains_key("main.rs"), "main.rs should be in snapshot");
-    assert!(snapshot.files.contains_key("lib.rs"), "lib.rs should be in snapshot");
+    assert!(
+        snapshot.files.contains_key("main.rs"),
+        "main.rs should be in snapshot"
+    );
+    assert!(
+        snapshot.files.contains_key("lib.rs"),
+        "lib.rs should be in snapshot"
+    );
 
     // Convert snapshot back to LiveIndex and wrap in Arc<RwLock>
     use std::sync::{Arc, RwLock};
@@ -755,8 +786,14 @@ fn test_persist_round_trip() {
     assert_eq!(loaded.file_count(), 2, "loaded index should have 2 files");
 
     // Verify files are accessible by path
-    assert!(loaded.get_file("main.rs").is_some(), "main.rs should be in loaded index");
-    assert!(loaded.get_file("lib.rs").is_some(), "lib.rs should be in loaded index");
+    assert!(
+        loaded.get_file("main.rs").is_some(),
+        "main.rs should be in loaded index"
+    );
+    assert!(
+        loaded.get_file("lib.rs").is_some(),
+        "lib.rs should be in loaded index"
+    );
 
     // Verify symbols were preserved
     let symbols = loaded.symbols_for_file("main.rs");
@@ -770,8 +807,7 @@ fn test_persist_round_trip() {
     let original_content = fs::read(dir.path().join("main.rs")).unwrap();
     let main_file = loaded.get_file("main.rs").unwrap();
     assert_eq!(
-        main_file.content,
-        original_content,
+        main_file.content, original_content,
         "content bytes should be preserved through round-trip"
     );
 }
@@ -786,17 +822,28 @@ fn test_persist_corrupt_fallback() {
 
     // Write garbage bytes where index.bin should be
     fs::create_dir_all(dir.path().join(".tokenizor")).unwrap();
-    fs::write(dir.path().join(".tokenizor").join("index.bin"), b"not valid postcard data").unwrap();
+    fs::write(
+        dir.path().join(".tokenizor").join("index.bin"),
+        b"not valid postcard data",
+    )
+    .unwrap();
 
     // Must return None without panicking
     let result = persist::load_snapshot(dir.path());
-    assert!(result.is_none(), "corrupt index.bin must return None, not panic");
+    assert!(
+        result.is_none(),
+        "corrupt index.bin must return None, not panic"
+    );
 
     // Verify we can still load a real index after corrupt fallback
     write_file(dir.path(), "a.rs", "fn alpha() {}");
     let shared = LiveIndex::load(dir.path()).unwrap();
     let index = shared.read().unwrap();
-    assert_eq!(index.file_count(), 1, "full re-index should work after corrupt fallback");
+    assert_eq!(
+        index.file_count(),
+        1,
+        "full re-index should work after corrupt fallback"
+    );
 }
 
 // --------------------------------------------------------------------------
@@ -805,8 +852,8 @@ fn test_persist_corrupt_fallback() {
 
 #[test]
 fn test_persist_version_mismatch() {
-    use tokenizor_agentic_mcp::live_index::persist::IndexSnapshot;
     use std::collections::HashMap;
+    use tokenizor_agentic_mcp::live_index::persist::IndexSnapshot;
 
     let dir = tempdir().unwrap();
 
