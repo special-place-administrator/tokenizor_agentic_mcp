@@ -1,5 +1,6 @@
 /target
 /.tokenizor
+npm/*.tgz
 .env
 .tmp/
 .codex/

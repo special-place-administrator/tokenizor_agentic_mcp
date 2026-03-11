@@ -1,59 +1,67 @@
 # Tokenizor MCP
 
-In-memory code intelligence for Claude Code and Codex. Tokenizor keeps your project indexed in RAM, exposes a standard MCP server for both clients, and adds transparent hook-based context enrichment for Claude Code.
+Rust-native MCP server for local code indexing, retrieval, prompts, and resources.
 
-## What It Does
+The npm package installs the executable as `tokenizor-mcp`. In this repository, the same CLI can be run with `cargo run -- ...`.
 
-Tokenizor runs as an MCP server alongside Claude Code, Codex, and other MCP clients. On startup it indexes your project into an in-memory LiveIndex.
+## Current Scope
 
-For **Claude Code**, Tokenizor can also install hooks, so:
-
-- **Read hook** — injects a symbol outline and key references for the file you just read
-- **Edit hook** — re-indexes the file and shows callers that may need review (impact analysis)
-- **Write hook** — indexes the new file immediately
-- **Grep hook** — adds symbol context to matched lines
-- **SessionStart hook** — injects a compact repo map (~500 tokens)
-- **UserPromptSubmit hook** — refreshes context from file, symbol, or repo-map hints in your prompt before Claude answers
-
-All Claude enrichment happens in <100ms via an HTTP sidecar that shares memory with the MCP server. The model never needs to call a special tool — it gets richer context for free.
-
-For **Codex**, Tokenizor installs the MCP server entry in `~/.codex/config.toml`, tunes the server timeouts for heavier code-intelligence calls, and adds Tokenizor guidance to `~/.codex/AGENTS.md`. It also teaches Codex to fall back to project `CLAUDE.md` files when `AGENTS.md` is absent. Tokenizor does **not** install transparent post-tool/session-start enrichment for Codex, because the current Codex CLI help and OpenAI Codex docs document MCP server registration but do not document a Claude-style hook/session enrichment mechanism.
-
-To close that gap honestly, Tokenizor now exposes the same underlying context through standard MCP tools, resources, and prompts:
-- `get_repo_map`
-- `get_file_context`
-- `get_symbol_context`
-- `analyze_file_impact`
-- `tokenizor://repo/*`, `tokenizor://file/*`, and `tokenizor://symbol/*` resources
-- `code-review`, `architecture-map`, and `failure-triage` MCP prompts
+- Local same-machine use.
+- MCP over stdio.
+- Local daemon mode for shared project/session state across concurrent terminals.
+- Automated client setup for Claude Code and Codex.
+- Automatic hook-based context enrichment for Claude Code only.
+- Standard MCP tools, resources, and prompts for all clients.
 
 ## Installation
 
-**Prerequisite:** Node.js 18+. No Rust toolchain needed.
+Prerequisite for the npm package: Node.js 18 or newer.
 
-Prebuilt binaries: **Windows x64**, **Linux x64**, **macOS ARM64**, **macOS x64**.
+Supported prebuilt npm binaries:
 
-### Initialize Clients
+- Windows x64
+- Linux x64
+- macOS arm64
+- macOS x64
 
-Install once, then initialize the clients you want.
-
-**Step 1 — Install globally**
+Install globally:
 
 ```bash
 npm install -g tokenizor-mcp
 ```
 
-> **Do NOT use `npx`.** The init step writes the binary's absolute path into your Claude Code config. `npx` runs from a temporary cache directory that gets cleaned up, which silently breaks hooks. A global install gives a stable path.
+The npm installer downloads the platform binary to `~/.tokenizor/bin/tokenizor-mcp` or `~/.tokenizor/bin/tokenizor-mcp.exe`.
 
-**Step 2 — Initialize**
+If your platform is not in the list above, build from source instead.
+
+## CLI
+
+Default invocation starts the stdio MCP server.
+
+Subcommands currently exposed by the CLI:
+
+- `init`
+- `daemon`
+- `hook`
+
+Current `hook` subcommands:
+
+- `read`
+- `edit`
+- `write`
+- `grep`
+- `session-start`
+- `prompt-submit`
+
+## Client Initialization
+
+Initialize configured clients:
 
 ```bash
 tokenizor-mcp init
 ```
 
-`tokenizor-mcp init` now defaults to `--client all`.
-
-Available targets:
+Current client targets:
 
 ```bash
 tokenizor-mcp init --client claude
@@ -61,281 +69,199 @@ tokenizor-mcp init --client codex
 tokenizor-mcp init --client all
 ```
 
+`init` records the absolute path of the executable that is currently running. Run it from the installed binary you intend to keep using.
+
+`init` also creates or reuses the project-local `.tokenizor` directory in the current working directory.
+
 ### Claude Code
 
-`tokenizor-mcp init` or `tokenizor-mcp init --client claude`:
+`tokenizor-mcp init --client claude` updates:
 
-- Registers the MCP server in `~/.claude.json`
-- Installs PostToolUse, SessionStart, and UserPromptSubmit hooks into `~/.claude/settings.json`
-- Appends a bounded Tokenizor guidance block to `~/.claude/CLAUDE.md`
+- `~/.claude.json`
+- `~/.claude/settings.json`
+- `~/.claude/CLAUDE.md`
 
-**Optional — Auto-approve tools**
+The Claude setup installs:
 
-All tokenizor tools are read-only or local indexing. To skip approval prompts, add to `~/.claude/settings.json` or your project's `.claude/settings.json`:
-
-```json
-{
-  "permissions": {
-    "allow": ["mcp__tokenizor__*"]
-  }
-}
-```
-
-**Verify it works:**
-
-Start a new Claude Code session in any git repo. You should see:
-- `tokenizor` shows as connected in `/mcp`
-- When you read a file, extra symbol context appears after the file contents
-
-If hooks aren't firing, run `tokenizor-mcp init --client claude` again.
+- MCP server registration
+- hook entries for `read`, `edit`, `write`, `grep`, `session-start`, and `prompt-submit`
+- a bounded Tokenizor guidance block in `~/.claude/CLAUDE.md`
 
 ### Codex
 
-`tokenizor-mcp init` or `tokenizor-mcp init --client codex`:
+`tokenizor-mcp init --client codex` updates:
 
-- Registers the MCP server in `~/.codex/config.toml` under `[mcp_servers.tokenizor]`
-- Sets `startup_timeout_sec = 30` and `tool_timeout_sec = 120` for Tokenizor
-- Merges `CLAUDE.md` into `project_doc_fallback_filenames` so Codex can reuse Claude-oriented project docs when needed
-- Appends a bounded Tokenizor guidance block to `~/.codex/AGENTS.md`
-- Preserves unrelated Codex config
-- Uses the absolute native binary path, so `codex mcp list` and `codex mcp get tokenizor` see the same entry Codex would write itself
+- `~/.codex/config.toml`
+- `~/.codex/AGENTS.md`
 
-Verify it works:
+The Codex setup writes or updates:
 
-```bash
-codex mcp list
-codex mcp get tokenizor
-```
+- `[mcp_servers.tokenizor]`
+- `startup_timeout_sec = 30`
+- `tool_timeout_sec = 120`
+- `project_doc_fallback_filenames` to ensure `CLAUDE.md` is included
+- a bounded Tokenizor guidance block in `~/.codex/AGENTS.md`
 
-Expected result:
-- `tokenizor` shows as `enabled`
-- `codex mcp get tokenizor` shows the installed binary path
+The repo does not currently install hook-based transparent enrichment for Codex. Codex uses the same backend through MCP tools, resources, prompts, and AGENTS guidance.
 
-Current limitation:
-- Codex gets the same shared context through explicit MCP tools, resources, prompts, and AGENTS guidance
-- Claude-only transparent hook enrichment remains unavailable in Codex until OpenAI documents an equivalent supported integration point
+### Idempotency
 
-### Shared Daemon
+The init flow is tested for repeated runs and for preserving unrelated existing Claude and Codex config.
 
-Tokenizor now has a local daemon entry point:
+## Runtime Model
+
+### Stdio startup
+
+When the stdio server starts:
+
+1. If `TOKENIZOR_AUTO_INDEX` is not `false`, Tokenizor tries to discover a project root.
+2. If a project root is found, Tokenizor tries to connect to or start a local daemon-backed session for that project.
+3. If daemon connection fails, Tokenizor falls back to local in-process mode.
+4. If auto-indexing is disabled or no project root is found, Tokenizor starts with an empty index.
+
+### Local daemon
+
+The local daemon is started with:
 
 ```bash
 tokenizor-mcp daemon
 ```
 
-What it does today:
-- Tracks shared project instances by canonical project root
-- Tracks multiple client sessions per project across concurrent terminals and MCP clients
-- Owns the authoritative project runtime for daemon-backed sessions:
-  - one shared LiveIndex per project
-  - one shared watcher per project
-  - shared hook token stats and symbol cache per project
-- Proxies stdio MCP tool calls through session-scoped daemon routes, so Claude, Codex, and other stdio MCP clients in the same project hit the same backend instance
-- Routes Claude hook traffic through session-scoped daemon endpoints when the stdio session is daemon-backed
-- Exposes local HTTP daemon endpoints for project health and session inspection
-- Uses stable, URL-safe project ids derived from the canonical root
+Current daemon behavior:
 
-How it behaves:
-- Starting a stdio MCP session in a project now prefers the shared daemon automatically
-- If no daemon is running, Tokenizor starts one locally and opens a project session
-- Multiple terminals in the same project share one project instance instead of building duplicate indexes
-- Different projects stay isolated by canonical project root
+- binds to local loopback
+- tracks projects by canonical project root
+- tracks multiple sessions per project
+- serves shared project state across concurrent terminals and clients
+- persists daemon metadata under the Tokenizor home directory
 
-Current limitations:
-- The daemon is intentionally local loopback-only for same-machine CLI clients
-- Claude hook enrichment still depends on Claude's documented hook system; Codex uses the same backend intelligence through explicit MCP tools instead of transparent hook/session enrichment
-- Prompt and resource reads share the same daemon-backed runtime as tools, so all connected clients stay project/session scoped on one backend instance
+Current daemon metadata files:
 
-### Cursor
+- `daemon.port`
+- `daemon.pid`
 
-Add to `.cursor/mcp.json`:
+`TOKENIZOR_HOME` overrides the default Tokenizor home directory used for daemon metadata.
 
-```json
-{
-  "mcpServers": {
-    "tokenizor": {
-      "command": "npx",
-      "args": ["-y", "tokenizor-mcp"]
-    }
-  }
-}
-```
+### Local sidecar files
 
-On Windows, use `"command": "cmd"` and `"args": ["/c", "npx", "-y", "tokenizor-mcp"]`.
+Hook and sidecar coordination uses project-local files under `.tokenizor`:
 
-`npx` is fine for Cursor — MCP servers are launched fresh each session, so there are no persisted hook paths to break.
+- `sidecar.port`
+- `sidecar.pid`
+- `sidecar.session`
 
-### Other MCP clients
+### Persistence
 
-Standard stdio MCP server:
-- **Command:** `tokenizor-mcp` (if installed globally) or `npx -y tokenizor-mcp`
-- No environment variables required
-- Auto-indexes on startup when `.git` is present in the working directory
+The local runtime can load and save a serialized index snapshot at `.tokenizor/index.bin`.
 
-### Updating
+## MCP Surface
 
-```bash
-npm update -g tokenizor-mcp
-tokenizor-mcp init          # re-run to refresh Claude and Codex config if the binary moved
-```
+The server currently exposes tools, prompts, and resources.
 
-### Uninstalling
+### Tools
 
-```bash
-npm uninstall -g tokenizor-mcp
-```
+Registered tool names:
 
-Then remove the tokenizor entries from `~/.claude/settings.json` (any hook whose command contains `tokenizor`) and run `claude mcp remove tokenizor`.
+- `health`
+- `index_folder`
+- `get_file_outline`
+- `get_repo_outline`
+- `get_repo_map`
+- `get_file_context`
+- `get_symbol_context`
+- `analyze_file_impact`
+- `get_file_tree`
+- `get_symbol`
+- `get_symbols`
+- `get_file_content`
+- `search_symbols`
+- `search_text`
+- `find_references`
+- `find_dependents`
+- `get_context_bundle`
+- `what_changed`
 
-For Codex, remove `[mcp_servers.tokenizor]` from `~/.codex/config.toml` or run:
+### Prompts
 
-```bash
-codex mcp remove tokenizor
-```
+Registered prompt names:
 
-## Claude vs Codex
+- `code-review`
+- `architecture-map`
+- `failure-triage`
 
-| Client | MCP tools | Transparent context enrichment |
-|------|-------------|--------------------------------|
-| Claude Code | Yes, plus MCP prompts/resources and CLAUDE.md guidance | Yes, via PostToolUse, SessionStart, and UserPromptSubmit hooks |
-| Codex | Yes, plus MCP prompts/resources, AGENTS guidance, Codex timeout tuning, and `CLAUDE.md` fallback discovery | No documented Claude-style hook/session enrichment API found |
+### Static resources
 
-Migration note:
-- If you already used `tokenizor-mcp init` for Claude, rerun `tokenizor-mcp init` once on the new build to add Codex automatically.
-- If you previously added Tokenizor to Codex manually with `codex mcp add tokenizor -- ...`, rerunning `tokenizor-mcp init --client codex` is safe and idempotent.
-
-## MCP Tools (18)
-
-| Tool | Description |
-|------|-------------|
-| `health` | LiveIndex stats, watcher status, token savings |
-| `index_folder` | Trigger full reload of the index |
-| `get_file_outline` | Symbol list for a file |
-| `get_repo_outline` | File list with coverage stats |
-| `get_repo_map` | Compact repo map used for session-start style orientation |
-| `get_file_context` | File outline plus key external references |
-| `get_symbol_context` | Grouped references for a symbol with enclosing-symbol annotations |
-| `analyze_file_impact` | Re-read a file from disk, update the index, and report symbol impact |
-| `get_file_tree` | Directory tree with symbol counts |
-| `get_symbol` | Lookup symbol by file + name |
-| `get_symbols` | Batch lookup (symbols and code slices) |
-| `get_file_content` | Serve file from memory with optional line range |
-| `search_symbols` | Substring search with Exact > Prefix > Substring ranking and optional kind filter |
-| `search_text` | Full-text search with literal, multi-term OR, and regex modes |
-| `find_references` | All call sites for a symbol with context |
-| `find_dependents` | Files that import or type-depend on a given file, including C#/Java namespace/package heuristics |
-| `get_context_bundle` | Full context: symbol + callers + callees + type usages |
-| `what_changed` | Files changed since a timestamp, relative to a git ref, or in the current uncommitted worktree |
-
-### Query Examples
-
-```json
-{"query":"MinioService","kind":"class"}
-```
-
-```json
-{"terms":["TODO","FIXME","HACK"]}
-```
-
-```json
-{"query":"TODO|FIXME|HACK","regex":true}
-```
-
-```json
-{}
-```
-
-```json
-{"git_ref":"HEAD~5"}
-```
-
-Notes:
-- `search_symbols` kind filters use the displayed symbol kinds such as `fn`, `class`, `struct`, or `interface`.
-- `search_text` with `terms` uses OR semantics across all provided terms.
-- `what_changed` with `{}` defaults to uncommitted git changes when Tokenizor knows the repo root.
-- If git-based change detection is unavailable, pass `{"since": 1700000000}` to use timestamp mode explicitly.
-
-## MCP Prompts (3)
-
-| Prompt | Description |
-|------|-------------|
-| `code-review` | Reviews a target path with Tokenizor repo health, repo map, and optional file context resources attached |
-| `architecture-map` | Starts architecture exploration with repo outline and repo map resources |
-| `failure-triage` | Starts debugging/triage with repo health, repo changes, and optional file context resources |
-
-## MCP Resources
-
-Static resources:
 - `tokenizor://repo/health`
 - `tokenizor://repo/outline`
 - `tokenizor://repo/map`
 - `tokenizor://repo/changes/uncommitted`
 
-Resource templates:
+### Resource templates
+
 - `tokenizor://file/context?path={path}&max_tokens={max_tokens}`
 - `tokenizor://file/content?path={path}&start_line={start_line}&end_line={end_line}`
 - `tokenizor://symbol/detail?path={path}&name={name}&kind={kind}`
 - `tokenizor://symbol/context?name={name}&file={file}`
 
-## Languages (16)
+## Tool Notes
 
-Full symbol extraction + cross-references:
+Current query behavior implemented in the server:
 
-Rust, Python, JavaScript, TypeScript, Go, Java, C, C++, C#, Ruby, PHP, Swift, Perl, Kotlin, Dart, Elixir
+- `search_symbols` supports substring matching and an optional `kind` filter.
+- `search_text` supports literal search, multi-term OR via `terms`, and regex mode.
+- `find_references` and `find_dependents` include C# and Java type-usage heuristics.
+- `get_context_bundle` returns symbol source plus caller, callee, and type-usage context.
+- `what_changed` supports uncommitted git changes, git-ref comparisons, and explicit timestamp mode.
 
-## How It Works
+## Supported Languages
 
-```
-┌─────────────┐     stdio      ┌──────────────────┐
-│ Claude Code  │◄──────────────►│  MCP Server      │
-│             │                │  (18 tools +      │
-│             │                │   prompts/resources)│
-│  Read file  │                │       │           │
-│      │      │                │  ┌────▼────┐      │
-│      ▼      │   HTTP <100ms  │  │LiveIndex│      │
-│ PostToolUse ├───────────────►│  │  (RAM)  │      │
-│   hook      │                │  └────┬────┘      │
-│      │      │                │       │           │
-│      ▼      │                │  ┌────▼────┐      │
-│ +context    │                │  │ Watcher │      │
-│ injected    │                │  │ (notify)│      │
-└─────────────┘                └──┴─────────┴──────┘
-```
+Current language extractor modules exist for:
 
-1. **Startup**: LiveIndex loads all source files into RAM using tree-sitter parsing. If a serialized snapshot exists, loads from disk in <100ms instead of re-parsing.
-2. **File watcher**: notify crate detects changes within 200ms. Content-hash skip prevents redundant reparse.
-3. **MCP tools**: Query the LiveIndex with O(1) lookups. All responses are compact human-readable text.
-4. **HTTP sidecar**: axum server on ephemeral port, shares `Arc<LiveIndex>` with MCP tools.
-5. **Hooks**: Rust binary reads stdin JSON, calls sidecar over sync HTTP (<50ms), returns enrichment as `additionalContext`.
-6. **Persistence**: On shutdown, serializes index to disk via postcard. On restart, loads snapshot and verifies in background.
+- Rust
+- Python
+- JavaScript
+- TypeScript
+- Go
+- Java
+- C
+- C++
+- C#
+- Ruby
+- PHP
+- Swift
+- Perl
+- Kotlin
+- Dart
+- Elixir
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TOKENIZOR_AUTO_INDEX` | `true` | Auto-index on startup when .git exists |
-| `TOKENIZOR_CB_THRESHOLD` | `20` | Circuit breaker: abort if >N% of files fail parsing |
-| `TOKENIZOR_SIDECAR_BIND` | `127.0.0.1` | Sidecar bind address |
+| Variable | Default | Current effect |
+| --- | --- | --- |
+| `TOKENIZOR_AUTO_INDEX` | `true` | Enables project discovery and startup indexing unless set to `false`. |
+| `TOKENIZOR_CB_THRESHOLD` | `20` | Sets the parse-failure circuit-breaker threshold as a percentage. |
+| `TOKENIZOR_SIDECAR_BIND` | `127.0.0.1` | Sets the sidecar bind host for local in-process mode. |
+| `TOKENIZOR_HOME` | `~/.tokenizor` | Overrides the Tokenizor home directory used by daemon metadata. |
 
-## Building from Source
+## Build From Source
 
-Requires [Rust toolchain](https://rustup.rs) (edition 2024).
+Rust toolchain required.
+
+Build and test:
 
 ```bash
 cargo build --release
 cargo test
 ```
 
-## Tech Stack
+The Cargo package name in this repository is `tokenizor_agentic_mcp`.
 
-- **Rust** (edition 2024) — core engine
-- **tree-sitter** 0.26 — parsing and cross-reference extraction for 16 languages
-- **rmcp** 1.1 — MCP protocol over stdio
-- **tokio** — async runtime
-- **axum** 0.8 — HTTP sidecar
-- **notify** 8 — file watching with debouncing
-- **postcard** 1.1 — index serialization (safe, no RUSTSEC advisories)
-- **std RwLock + HashMap** — concurrent LiveIndex (via `Arc<RwLock<LiveIndex>>`)
+## Limitations
+
+- Automated client setup is implemented only for Claude Code and Codex.
+- Automatic transparent hook enrichment is implemented only for Claude Code.
+- The daemon is local-only; this repo does not implement a multi-machine deployment mode.
+- The npm installer ships prebuilt binaries only for the platform list in this README.
 
 ## License
 

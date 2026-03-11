@@ -9,7 +9,45 @@ permissions:
   contents: write
 
 jobs:
+  validate-release-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.versions.outputs.version }}
+      npm_tarball: ${{ steps.versions.outputs.npm_tarball }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - id: versions
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          NPM_VERSION="$(node -p "require('./npm/package.json').version")"
+
+          if [[ -z "$TAG_VERSION" ]]; then
+            echo "::error::Unable to derive version from tag '${GITHUB_REF_NAME}'."
+            exit 1
+          fi
+
+          if [[ "$TAG_VERSION" != "$CARGO_VERSION" ]]; then
+            echo "::error::Tag version '$TAG_VERSION' does not match Cargo.toml version '$CARGO_VERSION'."
+            exit 1
+          fi
+
+          if [[ "$TAG_VERSION" != "$NPM_VERSION" ]]; then
+            echo "::error::Tag version '$TAG_VERSION' does not match npm/package.json version '$NPM_VERSION'."
+            exit 1
+          fi
+
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+          echo "npm_tarball=tokenizor-mcp-$TAG_VERSION.tgz" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: validate-release-version
     strategy:
       matrix:
         include:
@@ -51,9 +89,33 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+  build-npm-package:
+    needs: validate-release-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build npm tarball
+        working-directory: npm
+        run: npm pack
+
+      - name: Upload npm package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: npm/${{ needs.validate-release-version.outputs.npm_tarball }}
+          if-no-files-found: error
 
   release:
-    needs: build
+    needs:
+      - build
+      - build-npm-package
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -71,24 +133,24 @@ jobs:
           generate_release_notes: true
 
   npm-publish:
-    needs: release
+    needs:
+      - validate-release-version
+      - build-npm-package
+      - release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           registry-url: https://registry.npmjs.org
 
-      - name: Set version from tag
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          cd npm
-          node -e "const p=require('./package.json'); p.version='$VERSION'; require('fs').writeFileSync('package.json', JSON.stringify(p, null, 2)+'\n')"
+      - name: Download npm package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+          path: dist
 
       - name: Publish to npm
-        working-directory: npm
-        run: npm publish --access public
+        run: npm publish "dist/${{ needs.validate-release-version.outputs.npm_tarball }}" --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
