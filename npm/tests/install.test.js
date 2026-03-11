@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
+const winPath = path.win32;
 
 const { createInstaller } = require("../scripts/install.js");
 
@@ -42,7 +43,7 @@ function createFs({ binPath, pendingPath, installDir, binFailuresBeforeSuccess =
   };
 }
 
-function createInstallerForTest({ fsOverrides, execFileSync, sleep }) {
+function createInstallerForTest({ fsOverrides, execFileSync, sleep, installDir }) {
   const logs = [];
   const errors = [];
   const processMock = {
@@ -64,11 +65,12 @@ function createInstallerForTest({ fsOverrides, execFileSync, sleep }) {
 
   const installer = createInstaller({
     fs: fsOverrides,
-    path,
+    path: winPath,
     os: { homedir: () => "C:\\Users\\tester" },
     process: processMock,
     console: consoleMock,
     packageJson: { version: "0.3.9" },
+    installDir,
     execSync: () => "tokenizor 0.3.8",
     execFileSync,
     sleep: sleep || (async () => {}),
@@ -79,9 +81,9 @@ function createInstallerForTest({ fsOverrides, execFileSync, sleep }) {
 }
 
 test("locked Windows binary is replaced after stopping running Tokenizor processes", async () => {
-  const installDir = "C:\\Users\\tester\\.tokenizor\\bin";
-  const binPath = path.join(installDir, "tokenizor-mcp.exe");
-  const pendingPath = path.join(installDir, "tokenizor-mcp.pending.exe");
+  const installDir = winPath.join("C:\\Users\\tester", ".tokenizor", "bin");
+  const binPath = winPath.join(installDir, "tokenizor-mcp.exe");
+  const pendingPath = winPath.join(installDir, "tokenizor-mcp.pending.exe");
   const fsOverrides = createFs({
     binPath,
     pendingPath,
@@ -91,6 +93,7 @@ test("locked Windows binary is replaced after stopping running Tokenizor process
   const execCalls = [];
   const { installer, logs } = createInstallerForTest({
     fsOverrides,
+    installDir,
     execFileSync(command, args, options) {
       execCalls.push({ command, args, options });
       return "[101,202]";
@@ -114,9 +117,9 @@ test("locked Windows binary is replaced after stopping running Tokenizor process
 });
 
 test("installer stages a pending binary when the executable is still locked after stopping processes", async () => {
-  const installDir = "C:\\Users\\tester\\.tokenizor\\bin";
-  const binPath = path.join(installDir, "tokenizor-mcp.exe");
-  const pendingPath = path.join(installDir, "tokenizor-mcp.pending.exe");
+  const installDir = winPath.join("C:\\Users\\tester", ".tokenizor", "bin");
+  const binPath = winPath.join(installDir, "tokenizor-mcp.exe");
+  const pendingPath = winPath.join(installDir, "tokenizor-mcp.pending.exe");
   const fsOverrides = createFs({
     binPath,
     pendingPath,
@@ -125,6 +128,7 @@ test("installer stages a pending binary when the executable is still locked afte
   });
   const { installer, logs } = createInstallerForTest({
     fsOverrides,
+    installDir,
     execFileSync() {
       return "[404]";
     },

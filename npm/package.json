@@ -1,6 +1,6 @@
 {
   "name": "tokenizor-mcp",
-  "version": "0.3.9",
+  "version": "0.3.10",
   "description": "Tokenizor MCP — in-memory code intelligence for Claude Code and Codex",
   "license": "MIT",
   "repository": {
