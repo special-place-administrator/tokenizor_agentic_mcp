@@ -23,7 +23,7 @@ Set `npm/package.json` `version` to match the current Rust package version and c
 
 Run: `node -p "require('./npm/package.json').version"`
 
-Expected: `0.3.6`
+Expected: `0.3.7`
 
 ### Task 2: Validate release tag/manifests in CI
 
@@ -81,7 +81,7 @@ Run:
 
 Run: `cd npm && npm pack`
 
-Expected: a `tokenizor-mcp-0.3.6.tgz` tarball is created successfully.
+Expected: a `tokenizor-mcp-0.3.7.tgz` tarball is created successfully.
 
 **Step 3: Run the Rust test suite**
 
