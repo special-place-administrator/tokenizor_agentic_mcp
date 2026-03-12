@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 import version_sync
@@ -10,7 +10,10 @@ import version_sync
 
 class VersionSyncTests(unittest.TestCase):
     def make_repo(self) -> Path:
-        root = Path(tempfile.mkdtemp())
+        temp_root = Path(__file__).resolve().parent.parent / ".tmp" / "execution-tests"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        root = temp_root / f"repo-{uuid.uuid4().hex}"
+        root.mkdir()
         (root / ".github").mkdir()
         (root / "npm").mkdir()
         (root / ".github" / ".release-please-manifest.json").write_text(

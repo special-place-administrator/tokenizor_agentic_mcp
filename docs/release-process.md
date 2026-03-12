@@ -75,6 +75,19 @@ GitHub repository prerequisites:
 
 `python execution/release_ops.py status` now prints the detected GitHub repository slug and, when `gh` is authenticated, the current workflow-permission state so a fresh terminal can verify the prerequisite without guessing.
 
+## Hotfix Validation Loop
+
+For important runtime or installer fixes, do not stop at a green repo test run.
+
+Use this loop:
+
+1. ship the next patch release immediately
+2. install that published package version
+3. restart the MCP client session
+4. retest through the installed MCP, not only the source checkout
+
+That is the fastest way to catch wrapper, install-path, daemon-reuse, and stdio-surface regressions that repo-local tests can miss.
+
 ## Installed Runtime Self-Healing
 
 The release pipeline is only half of the problem. Installed machines also need safe runtime convergence.
