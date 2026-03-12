@@ -9,7 +9,8 @@ pub use query::{
     ContextBundleView, DependentFileView, DependentLineView, FileContentView, FileOutlineView,
     FindDependentsView, FindReferencesView, HealthStats, ReferenceContextLineView,
     ReferenceFileView, ReferenceHitView, RepoOutlineFileView, RepoOutlineView, ResolvePathView,
-    SearchFilesHit, SearchFilesTier, SearchFilesView, SymbolDetailView, WhatChangedTimestampView,
+    SearchFilesHit, SearchFilesTier, SearchFilesView, SymbolDetailView, TypeDependencyView,
+    WhatChangedTimestampView,
 };
 pub use store::{
     CircuitBreakerState, IndexLoadSource, IndexState, IndexedFile, LiveIndex, ParseStatus,

@@ -33,7 +33,7 @@ use crate::live_index::{
     ContextBundleSectionView, ContextBundleView, FileContentView, FileOutlineView,
     FindDependentsView, FindReferencesView, HealthStats, IndexedFile, LiveIndex,
     PublishedIndexState, RepoOutlineFileView, RepoOutlineView, ResolvePathView, SearchFilesTier,
-    SearchFilesView, SymbolDetailView, WhatChangedTimestampView, search,
+    SearchFilesView, SymbolDetailView, TypeDependencyView, WhatChangedTimestampView, search,
 };
 
 /// Format the file outline for a given path.
@@ -1501,6 +1501,9 @@ pub fn context_bundle_result_view(view: &ContextBundleView) -> String {
                 "Type usages",
                 &view.type_usages,
             ));
+            if !view.dependencies.is_empty() {
+                output.push_str(&format_type_dependencies(&view.dependencies));
+            }
             output
         }
     }
@@ -1532,6 +1535,28 @@ fn format_context_bundle_section(title: &str, section: &ContextBundleSectionView
     }
 
     lines.join("\n")
+}
+
+fn format_type_dependencies(deps: &[TypeDependencyView]) -> String {
+    let mut output = format!("\nDependencies ({}):", deps.len());
+    for dep in deps {
+        let depth_marker = if dep.depth > 0 {
+            format!(" (depth {})", dep.depth)
+        } else {
+            String::new()
+        };
+        output.push_str(&format!(
+            "\n── {} [{}, {}:{}-{}{}] ──\n{}",
+            dep.name,
+            dep.kind_label,
+            dep.file_path,
+            dep.line_range.0,
+            dep.line_range.1,
+            depth_marker,
+            dep.body
+        ));
+    }
+    output
 }
 
 /// "Index is loading... try again shortly."
@@ -3585,6 +3610,50 @@ mod tests {
         assert!(
             result.contains("0 files") || result.contains("No source files"),
             "got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_format_type_dependencies_renders_bodies_and_depth() {
+        let deps = vec![
+            TypeDependencyView {
+                name: "UserConfig".to_string(),
+                kind_label: "struct".to_string(),
+                file_path: "src/config.rs".to_string(),
+                line_range: (0, 2),
+                body: "pub struct UserConfig {\n    pub name: String,\n}".to_string(),
+                depth: 0,
+            },
+            TypeDependencyView {
+                name: "Address".to_string(),
+                kind_label: "struct".to_string(),
+                file_path: "src/address.rs".to_string(),
+                line_range: (0, 1),
+                body: "pub struct Address {\n    pub city: String,\n}".to_string(),
+                depth: 1,
+            },
+        ];
+        let result = format_type_dependencies(&deps);
+        assert!(
+            result.contains("Dependencies (2):"),
+            "header missing, got: {result}"
+        );
+        assert!(
+            result.contains("── UserConfig [struct, src/config.rs:0-2] ──"),
+            "UserConfig entry missing, got: {result}"
+        );
+        assert!(
+            result.contains("pub struct UserConfig"),
+            "UserConfig body missing, got: {result}"
+        );
+        assert!(
+            result.contains("(depth 1)"),
+            "depth marker missing for Address, got: {result}"
+        );
+        // Direct dependency (depth 0) should NOT have depth marker.
+        assert!(
+            !result.contains("(depth 0)"),
+            "depth 0 should have no marker, got: {result}"
         );
     }
 }

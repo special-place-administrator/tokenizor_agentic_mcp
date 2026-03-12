@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use crate::domain::{LanguageId, ReferenceKind, ReferenceRecord, SymbolRecord};
+use crate::domain::{LanguageId, ReferenceKind, ReferenceRecord, SymbolKind, SymbolRecord};
 use crate::watcher::{WatcherInfo, WatcherState};
 
 use super::search::PathScope;
@@ -674,6 +674,23 @@ pub struct ContextBundleSectionView {
     pub entries: Vec<ContextBundleReferenceView>,
 }
 
+/// A resolved type definition included as a dependency of a context bundle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeDependencyView {
+    /// Type name (e.g. "UserConfig").
+    pub name: String,
+    /// Kind label (e.g. "struct", "enum", "trait").
+    pub kind_label: String,
+    /// File where the type is defined.
+    pub file_path: String,
+    /// Line range of the definition.
+    pub line_range: (u32, u32),
+    /// Source code body of the definition.
+    pub body: String,
+    /// Recursion depth at which this dependency was discovered (0 = direct, 1 = transitive).
+    pub depth: u8,
+}
+
 /// Owned definition-and-sections view for `get_context_bundle`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextBundleFoundView {
@@ -684,6 +701,8 @@ pub struct ContextBundleFoundView {
     pub callers: ContextBundleSectionView,
     pub callees: ContextBundleSectionView,
     pub type_usages: ContextBundleSectionView,
+    /// Resolved type definitions used by this symbol (recursive, depth-limited).
+    pub dependencies: Vec<TypeDependencyView>,
 }
 
 /// Owned result view for `get_context_bundle`.
@@ -1310,6 +1329,17 @@ impl LiveIndex {
         let type_usages =
             self.collect_exact_symbol_references(path, file, name, Some(ReferenceKind::TypeUsage));
 
+        // Resolve type dependencies: collect type names referenced within this symbol,
+        // then find their definitions across the index (recursive, depth-limited to 2).
+        let type_refs = self.type_refs_for_symbol(path, sym_idx);
+        let type_names: Vec<&str> = type_refs
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        let dependencies = self.resolve_type_dependencies(&type_names, 2);
+
         ContextBundleView::Found(ContextBundleFoundView {
             body,
             kind_label: sym_rec.kind.to_string(),
@@ -1318,6 +1348,7 @@ impl LiveIndex {
             callers: capture_section(&callers),
             callees: capture_section(&callee_pairs),
             type_usages: capture_section(&type_usages),
+            dependencies,
         })
     }
 
@@ -1676,6 +1707,120 @@ impl LiveIndex {
                     .collect()
             }
         }
+    }
+
+    /// Returns all `TypeUsage` references inside the given symbol's line range.
+    pub fn type_refs_for_symbol(
+        &self,
+        file_path: &str,
+        symbol_index: usize,
+    ) -> Vec<&ReferenceRecord> {
+        match self.files.get(file_path) {
+            None => vec![],
+            Some(file) => {
+                let symbol_range = file
+                    .symbols
+                    .get(symbol_index)
+                    .map(|symbol| symbol.line_range);
+                file.references
+                    .iter()
+                    .filter(|reference| {
+                        if reference.kind != ReferenceKind::TypeUsage {
+                            return false;
+                        }
+                        if let Some((start_line, end_line)) = symbol_range {
+                            reference.line_range.0 >= start_line
+                                && reference.line_range.1 <= end_line
+                        } else {
+                            reference.enclosing_symbol_index == Some(symbol_index as u32)
+                        }
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Resolve type names to their definitions across the index.
+    ///
+    /// Returns definitions for custom types found in the index, excluding
+    /// built-in/primitive types. Recurses up to `max_depth` levels to include
+    /// transitive type dependencies.
+    pub fn resolve_type_dependencies(
+        &self,
+        type_names: &[&str],
+        max_depth: u8,
+    ) -> Vec<TypeDependencyView> {
+        const TYPE_DEF_KINDS: &[SymbolKind] = &[
+            SymbolKind::Struct,
+            SymbolKind::Enum,
+            SymbolKind::Type,
+            SymbolKind::Interface,
+            SymbolKind::Class,
+            SymbolKind::Trait,
+        ];
+        const MAX_DEPENDENCIES: usize = 15;
+
+        let mut resolved: Vec<TypeDependencyView> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut queue: Vec<(String, u8)> = type_names
+            .iter()
+            .filter(|n| !is_filtered_name(n))
+            .map(|n| (n.to_string(), 0u8))
+            .collect();
+
+        while let Some((name, depth)) = queue.pop() {
+            if seen.contains(&name) || resolved.len() >= MAX_DEPENDENCIES {
+                continue;
+            }
+            seen.insert(name.clone());
+
+            // Search all files for a matching type definition.
+            let mut found = false;
+            for file in self.files.values() {
+                for sym in &file.symbols {
+                    if sym.name == name && TYPE_DEF_KINDS.contains(&sym.kind) && sym.depth == 0 {
+                        let start = sym.byte_range.0 as usize;
+                        let end = sym.byte_range.1 as usize;
+                        let body = if end <= file.content.len() {
+                            String::from_utf8_lossy(&file.content[start..end]).into_owned()
+                        } else {
+                            continue;
+                        };
+
+                        // If recursion budget remains, extract type refs from this definition.
+                        if depth < max_depth {
+                            for reference in &file.references {
+                                if reference.kind == ReferenceKind::TypeUsage
+                                    && reference.line_range.0 >= sym.line_range.0
+                                    && reference.line_range.1 <= sym.line_range.1
+                                    && !is_filtered_name(&reference.name)
+                                    && !seen.contains(&reference.name)
+                                {
+                                    queue.push((reference.name.clone(), depth + 1));
+                                }
+                            }
+                        }
+
+                        resolved.push(TypeDependencyView {
+                            name: name.clone(),
+                            kind_label: sym.kind.to_string(),
+                            file_path: file.relative_path.clone(),
+                            line_range: sym.line_range,
+                            body,
+                            depth,
+                        });
+                        found = true;
+                        break;
+                    }
+                }
+                if found {
+                    break;
+                }
+            }
+        }
+
+        resolved.sort_by(|a, b| a.depth.cmp(&b.depth).then(a.name.cmp(&b.name)));
+        resolved
     }
 }
 
@@ -3702,6 +3847,181 @@ public class PacketsController {
         assert!(
             !is_filtered_name("Key"),
             "Key is not a single-letter generic"
+        );
+    }
+
+    #[test]
+    fn test_type_refs_for_symbol_returns_type_usages_within_symbol() {
+        let refs = vec![
+            make_ref("UserConfig", None, ReferenceKind::TypeUsage, Some(0), 0),
+            make_ref("helper", None, ReferenceKind::Call, Some(0), 50),
+            make_ref("Address", None, ReferenceKind::TypeUsage, Some(1), 100),
+        ];
+        let file = make_file_with_refs_and_content(
+            "src/main.rs",
+            LanguageId::Rust,
+            "fn process(cfg: UserConfig) { helper(); }\nfn other(a: Address) {}",
+            refs,
+            vec![
+                SymbolRecord {
+                    name: "process".to_string(),
+                    kind: SymbolKind::Function,
+                    depth: 0,
+                    sort_order: 0,
+                    byte_range: (0, 40),
+                    line_range: (0, 0),
+                },
+                SymbolRecord {
+                    name: "other".to_string(),
+                    kind: SymbolKind::Function,
+                    depth: 0,
+                    sort_order: 1,
+                    byte_range: (41, 65),
+                    line_range: (1, 1),
+                },
+            ],
+        );
+        let index = make_index(vec![("src/main.rs", file)], false);
+
+        let type_refs = index.type_refs_for_symbol("src/main.rs", 0);
+        assert_eq!(type_refs.len(), 1, "only TypeUsage within symbol 0");
+        assert_eq!(type_refs[0].name, "UserConfig");
+    }
+
+    #[test]
+    fn test_resolve_type_dependencies_finds_struct_definitions() {
+        let config_body = "pub struct UserConfig {\n    pub name: String,\n}";
+        let config_file = make_file_with_refs_and_content(
+            "src/config.rs",
+            LanguageId::Rust,
+            config_body,
+            vec![],
+            vec![SymbolRecord {
+                name: "UserConfig".to_string(),
+                kind: SymbolKind::Struct,
+                depth: 0,
+                sort_order: 0,
+                byte_range: (0, config_body.len() as u32),
+                line_range: (0, 2),
+            }],
+        );
+        let index = make_index(vec![("src/config.rs", config_file)], false);
+
+        let deps = index.resolve_type_dependencies(&["UserConfig", "String", "T"], 0);
+        assert_eq!(deps.len(), 1, "String and T should be filtered out");
+        assert_eq!(deps[0].name, "UserConfig");
+        assert_eq!(deps[0].kind_label, "struct");
+        assert_eq!(deps[0].file_path, "src/config.rs");
+        assert!(deps[0].body.contains("pub struct UserConfig"));
+    }
+
+    #[test]
+    fn test_resolve_type_dependencies_recurses_to_depth() {
+        let addr_body = "pub struct Address {\n    pub city: String,\n}";
+        let config_body = "pub struct UserConfig {\n    pub addr: Address,\n}";
+        let config_file = make_file_with_refs_and_content(
+            "src/config.rs",
+            LanguageId::Rust,
+            config_body,
+            vec![ReferenceRecord {
+                name: "Address".to_string(),
+                qualified_name: None,
+                kind: ReferenceKind::TypeUsage,
+                byte_range: (30, 37),
+                line_range: (1, 1),
+                enclosing_symbol_index: Some(0),
+            }],
+            vec![SymbolRecord {
+                name: "UserConfig".to_string(),
+                kind: SymbolKind::Struct,
+                depth: 0,
+                sort_order: 0,
+                byte_range: (0, config_body.len() as u32),
+                line_range: (0, 1),
+            }],
+        );
+        let addr_file = make_file_with_refs_and_content(
+            "src/address.rs",
+            LanguageId::Rust,
+            addr_body,
+            vec![],
+            vec![SymbolRecord {
+                name: "Address".to_string(),
+                kind: SymbolKind::Struct,
+                depth: 0,
+                sort_order: 0,
+                byte_range: (0, addr_body.len() as u32),
+                line_range: (0, 1),
+            }],
+        );
+        let index = make_index(
+            vec![
+                ("src/config.rs", config_file),
+                ("src/address.rs", addr_file),
+            ],
+            false,
+        );
+
+        // Depth 0: only UserConfig, no recursion.
+        let deps_d0 = index.resolve_type_dependencies(&["UserConfig"], 0);
+        assert_eq!(deps_d0.len(), 1, "depth 0 should only find UserConfig");
+
+        // Depth 1: UserConfig + Address (found transitively).
+        let deps_d1 = index.resolve_type_dependencies(&["UserConfig"], 1);
+        assert_eq!(
+            deps_d1.len(),
+            2,
+            "depth 1 should find UserConfig and Address"
+        );
+        let names: Vec<&str> = deps_d1.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"UserConfig"));
+        assert!(names.contains(&"Address"));
+        // Verify depth markers.
+        let uc = deps_d1.iter().find(|d| d.name == "UserConfig").unwrap();
+        let ad = deps_d1.iter().find(|d| d.name == "Address").unwrap();
+        assert_eq!(uc.depth, 0);
+        assert_eq!(ad.depth, 1);
+    }
+
+    #[test]
+    fn test_resolve_type_dependencies_respects_max_cap() {
+        // Create 20 distinct struct types — should be capped at 15.
+        let files: Vec<(&str, IndexedFile)> = (0..20)
+            .map(|i| {
+                let name = format!("Type{i}");
+                let body = format!("pub struct {name} {{}}");
+                let leaked_path: &'static str = Box::leak(format!("src/t{i}.rs").into_boxed_str());
+                let leaked_body: &'static str = Box::leak(body.into_boxed_str());
+                let f = make_file_with_refs_and_content(
+                    leaked_path,
+                    LanguageId::Rust,
+                    leaked_body,
+                    vec![],
+                    vec![SymbolRecord {
+                        name: name.clone(),
+                        kind: SymbolKind::Struct,
+                        depth: 0,
+                        sort_order: 0,
+                        byte_range: (0, leaked_body.len() as u32),
+                        line_range: (0, 0),
+                    }],
+                );
+                (leaked_path, f)
+            })
+            .collect();
+        let index = make_index(files, false);
+
+        let type_names: Vec<&str> = (0..20)
+            .map(|i| {
+                let s: &'static str = Box::leak(format!("Type{i}").into_boxed_str());
+                s
+            })
+            .collect();
+        let deps = index.resolve_type_dependencies(&type_names, 0);
+        assert!(
+            deps.len() <= 15,
+            "should be capped at MAX_DEPENDENCIES=15, got {}",
+            deps.len()
         );
     }
 }
