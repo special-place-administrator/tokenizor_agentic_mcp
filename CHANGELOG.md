@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.5.0...v0.6.0) (2026-03-12)
+
+
+### Features
+
+* add recursive type resolution to get_context_bundle ([d2caaca](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/d2caaca004c764d7593f69a2dce25ddf542e9324))
+
 ## [0.5.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.4.2...v0.5.0) (2026-03-12)
 
 
