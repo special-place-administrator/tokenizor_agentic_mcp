@@ -1176,10 +1176,8 @@ impl TokenizorServer {
                 Ok(guard.capture_find_references_view(&input.name, input.kind.as_deref()))
             }
         };
-        let limits = format::OutputLimits::new(
-            input.limit.unwrap_or(20),
-            input.max_per_file.unwrap_or(10),
-        );
+        let limits =
+            format::OutputLimits::new(input.limit.unwrap_or(20), input.max_per_file.unwrap_or(10));
         match result {
             Ok(view) => format::find_references_result_view(&view, &input.name, &limits),
             Err(error) => error,
@@ -1198,10 +1196,8 @@ impl TokenizorServer {
             loading_guard!(guard);
             guard.capture_find_dependents_view(&input.path)
         };
-        let limits = format::OutputLimits::new(
-            input.limit.unwrap_or(20),
-            input.max_per_file.unwrap_or(10),
-        );
+        let limits =
+            format::OutputLimits::new(input.limit.unwrap_or(20), input.max_per_file.unwrap_or(10));
         format::find_dependents_result_view(&view, &input.path, &limits)
     }
 

@@ -446,9 +446,7 @@ async fn handle_edit_impact(
             .iter()
             .enumerate()
             .filter(|(i, pr)| !matched_pre[*i] && pr.name == ps.name && pr.kind == ps.kind)
-            .min_by_key(|(_, pr)| {
-                (pr.line_range.0 as i64 - ps.line_range.0 as i64).unsigned_abs()
-            });
+            .min_by_key(|(_, pr)| (pr.line_range.0 as i64 - ps.line_range.0 as i64).unsigned_abs());
         if let Some((pri, pr)) = best {
             matched_pre[pri] = true;
             matched_post[pi] = true;
@@ -472,10 +470,7 @@ async fn handle_edit_impact(
         .map(|(_, s)| s)
         .collect();
 
-    let changed: Vec<&SymbolSnapshot> = changed_post
-        .iter()
-        .map(|&i| &post_symbols[i])
-        .collect();
+    let changed: Vec<&SymbolSnapshot> = changed_post.iter().map(|&i| &post_symbols[i]).collect();
 
     // Update cache with post-edit snapshot.
     {
