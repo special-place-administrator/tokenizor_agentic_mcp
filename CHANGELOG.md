@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.8.0...v0.9.0) (2026-03-12)
+
+
+### Features
+
+* daemon resilience and zero-touch install ([0d3bd80](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/0d3bd80614c720233ffb188ef1827500e83dbbc6))
+
 ## [0.8.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.7.0...v0.8.0) (2026-03-12)
 
 
