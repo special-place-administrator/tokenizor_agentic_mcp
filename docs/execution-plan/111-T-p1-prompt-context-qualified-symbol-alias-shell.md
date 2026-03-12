@@ -2,11 +2,11 @@
 doc_type: task
 task_id: 111
 title: P1 prompt_context qualified symbol alias shell
-status: in_progress
+status: done
 sprint: tokenizor-upgrade-foundation
 parent_plan: 05-P-validation-and-backlog.md
 prev_task: 110-T-p1-prompt-context-qualified-symbol-alias-contract-research.md
-next_task: 
+next_task: 112-T-p1-prompt-context-dotted-qualified-symbol-alias-contract-research.md
 created: 2026-03-12
 updated: 2026-03-12
 ---
@@ -45,20 +45,22 @@ updated: 2026-03-12
 
 ## Completion Notes
 
-- pending
+- prompt-context now accepts exact qualified symbol aliases like `crate::db::connect` and routes them into the exact file+symbol selector lane
+- exact qualified symbol aliases can also carry direct `:line` hints like `crate::db::connect:2`
+- continued qualified paths like `crate::db::connect::helper` stay on the fallback path instead of collapsing to one exact file
 
 ## Carry Forward To Next Task
 
 Next task:
 
-- `TBD`
+- `112-T-p1-prompt-context-dotted-qualified-symbol-alias-contract-research.md`
 
 Carry forward:
 
 - keep qualified symbol aliases exact and boundary-aware
 - preserve current file/module-hint fallbacks
-- avoid broadening this slice into fuzzy namespace guessing
+- avoid broadening this slice into fuzzy namespace guessing or generic property-chain parsing
 
 Open points:
 
-- OPEN: whether later slices should explicitly support additional non-Rust qualified symbol forms
+- whether later slices should explicitly support additional non-Rust qualified symbol forms
