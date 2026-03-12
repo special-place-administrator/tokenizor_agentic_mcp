@@ -1112,6 +1112,142 @@ async fn test_prompt_context_endpoint_slash_module_alias_without_line_prefers_ex
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_prompt_context_endpoint_slash_module_alias_line_hint_disambiguates_exact_selector()
+{
+    let tmp = TempDir::new().unwrap();
+    let _guard = CWD_LOCK.lock().await;
+    let original = stable_cwd();
+    std::env::set_current_dir(tmp.path()).unwrap();
+
+    let target = IndexedFile {
+        relative_path: "src/utils/index.ts".to_string(),
+        language: LanguageId::TypeScript,
+        classification: tokenizor_agentic_mcp::domain::FileClassification::for_code_path(
+            "src/utils/index.ts",
+        ),
+        content: b"export function connect() {}\n\nexport function connect() {}\n".to_vec(),
+        symbols: vec![
+            SymbolRecord {
+                name: "connect".to_string(),
+                kind: SymbolKind::Function,
+                depth: 0,
+                sort_order: 0,
+                byte_range: (0, 24),
+                line_range: (1, 1),
+            },
+            SymbolRecord {
+                name: "connect".to_string(),
+                kind: SymbolKind::Function,
+                depth: 0,
+                sort_order: 1,
+                byte_range: (28, 52),
+                line_range: (3, 3),
+            },
+        ],
+        parse_status: ParseStatus::Parsed,
+        byte_len: 57,
+        content_hash: "utils-ts-lines".to_string(),
+        references: vec![],
+        alias_map: HashMap::new(),
+    };
+    let dependent = IndexedFile {
+        relative_path: "src/app.ts".to_string(),
+        language: LanguageId::TypeScript,
+        classification: tokenizor_agentic_mcp::domain::FileClassification::for_code_path(
+            "src/app.ts",
+        ),
+        content: b"import { connect } from 'src/utils';\nconnect();\n".to_vec(),
+        symbols: vec![SymbolRecord {
+            name: "run".to_string(),
+            kind: SymbolKind::Function,
+            depth: 0,
+            sort_order: 0,
+            byte_range: (36, 46),
+            line_range: (2, 2),
+        }],
+        parse_status: ParseStatus::Parsed,
+        byte_len: 49,
+        content_hash: "app-ts".to_string(),
+        references: vec![
+            ReferenceRecord {
+                name: "utils".to_string(),
+                qualified_name: Some("src/utils".to_string()),
+                kind: ReferenceKind::Import,
+                byte_range: (24, 33),
+                line_range: (0, 0),
+                enclosing_symbol_index: None,
+            },
+            ReferenceRecord {
+                name: "connect".to_string(),
+                qualified_name: Some("src/utils/connect".to_string()),
+                kind: ReferenceKind::Call,
+                byte_range: (36, 42),
+                line_range: (1, 1),
+                enclosing_symbol_index: Some(0),
+            },
+        ],
+        alias_map: HashMap::new(),
+    };
+    let unrelated = IndexedFile {
+        relative_path: "src/other.ts".to_string(),
+        language: LanguageId::TypeScript,
+        classification: tokenizor_agentic_mcp::domain::FileClassification::for_code_path(
+            "src/other.ts",
+        ),
+        content: b"connect();\n".to_vec(),
+        symbols: vec![SymbolRecord {
+            name: "run".to_string(),
+            kind: SymbolKind::Function,
+            depth: 0,
+            sort_order: 0,
+            byte_range: (0, 9),
+            line_range: (1, 1),
+        }],
+        parse_status: ParseStatus::Parsed,
+        byte_len: 10,
+        content_hash: "other-ts".to_string(),
+        references: vec![ReferenceRecord {
+            name: "connect".to_string(),
+            qualified_name: None,
+            kind: ReferenceKind::Call,
+            byte_range: (0, 6),
+            line_range: (0, 0),
+            enclosing_symbol_index: Some(0),
+        }],
+        alias_map: HashMap::new(),
+    };
+    let index = build_shared_index(vec![target, dependent, unrelated]);
+    let handle = spawn_sidecar(Arc::clone(&index), "127.0.0.1")
+        .await
+        .expect("spawn_sidecar should succeed");
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let body = raw_http_get(
+        handle.port,
+        "/prompt-context",
+        "text=inspect%20src%2Futils%3A3%20connect",
+    )
+    .expect("GET /prompt-context must succeed");
+
+    assert!(
+        !body.contains("Ambiguous symbol selector"),
+        "slash module aliases should allow direct line-hint disambiguation: {body}"
+    );
+    assert!(
+        body.contains("src/app.ts"),
+        "slash module aliases with line hints should keep exact-selector matches: {body}"
+    );
+    assert!(
+        !body.contains("src/other.ts"),
+        "slash module aliases with line hints should drop unrelated same-name hits: {body}"
+    );
+
+    let _ = handle.shutdown_tx.send(());
+    restore_cwd(&original);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_prompt_context_endpoint_qualified_symbol_alias_prefers_exact_selector() {
     let tmp = TempDir::new().unwrap();
     let _guard = CWD_LOCK.lock().await;

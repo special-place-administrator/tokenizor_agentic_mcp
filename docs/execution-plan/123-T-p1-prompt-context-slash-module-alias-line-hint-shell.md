@@ -2,11 +2,11 @@
 doc_type: task
 task_id: 123
 title: P1 prompt_context slash module alias line hint shell
-status: in_progress
+status: done
 sprint: tokenizor-upgrade-foundation
 parent_plan: 05-P-validation-and-backlog.md
 prev_task: 122-T-p1-prompt-context-slash-module-alias-line-hint-contract-research.md
-next_task:
+next_task: 124-T-p1-get-file-content-around-line-contract-research.md
 created: 2026-03-12
 updated: 2026-03-12
 ---
@@ -45,13 +45,16 @@ updated: 2026-03-12
 
 ## Completion Notes
 
-- pending
+- added focused handler coverage for exact slash module-alias `:line` prompts such as `src/utils:3 connect`
+- added a guardrail test that unrelated colon numbers like `build:3` do not disambiguate slash module aliases
+- added endpoint coverage for the exact slash module-alias `:line` route
+- verified the shared file-hint line parser already satisfied this contract, so the shell landed as test-only coverage
 
 ## Carry Forward To Next Task
 
 Next task:
 
-- `TBD`
+- `124-T-p1-get-file-content-around-line-contract-research.md`
 
 Carry forward:
 
@@ -61,4 +64,4 @@ Carry forward:
 
 Open points:
 
-- whether slash module alias `:line` support should remain limited to normalized JS and TS module paths
+- whether `get_file_content` should next add a centered `around_line` read mode before broader `around_match` and chunking work
