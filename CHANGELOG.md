@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.4.1...v0.4.2) (2026-03-12)
+
+
+### Bug Fixes
+
+* improve search ranking, symbol diff accuracy, test filtering, and error messages ([13ebb36](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/13ebb3637075c2e1bf6f187b5f07722c2cd9ecec))
+
 ## [0.4.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.4.0...v0.4.1) (2026-03-12)
 
 
