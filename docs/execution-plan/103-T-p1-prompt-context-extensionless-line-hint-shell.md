@@ -2,11 +2,11 @@
 doc_type: task
 task_id: 103
 title: P1 prompt_context extensionless alias line hint shell
-status: pending
+status: done
 sprint: tokenizor-upgrade-foundation
 parent_plan: 05-P-validation-and-backlog.md
 prev_task: 102-T-p1-prompt-context-extensionless-line-hint-contract-research.md
-next_task: 
+next_task: 104-T-p1-prompt-context-qualified-extensionless-path-contract-research.md
 created: 2026-03-12
 updated: 2026-03-12
 ---
@@ -45,13 +45,16 @@ updated: 2026-03-12
 
 ## Completion Notes
 
-- pending
+- extended prompt-context file-hint matching to recognize unique extensionless `stem:line` aliases such as `db:2`
+- kept exact-path, basename-derived, and explicit `line N` disambiguation behavior unchanged
+- preserved ambiguity fallback for repeated stems like `src/db.rs` and `tests/db.py`
+- added focused unit and endpoint coverage that proves the exact-selector lane excludes unrelated same-name hits
 
 ## Carry Forward To Next Task
 
 Next task:
 
-- `TBD`
+- `104-T-p1-prompt-context-qualified-extensionless-path-contract-research.md`
 
 Carry forward:
 
@@ -61,4 +64,4 @@ Carry forward:
 
 Open points:
 
-- OPEN: whether a later slice should support module-style aliases beyond file stems
+- OPEN: whether the next path should be repo-relative extensionless paths like `src/db:2` before any true module-style aliases

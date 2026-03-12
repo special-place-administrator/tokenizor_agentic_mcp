@@ -2,7 +2,7 @@
 doc_type: task
 task_id: 102
 title: P1 prompt_context extensionless alias line hint contract research
-status: in_progress
+status: done
 sprint: tokenizor-upgrade-foundation
 parent_plan: 05-P-validation-and-backlog.md
 prev_task: 101-T-p1-prompt-context-basename-line-hint-shell.md
@@ -46,7 +46,10 @@ updated: 2026-03-12
 
 ## Completion Notes
 
-- pending
+- added [102-R-p1-prompt-context-extensionless-line-hint-contract-research.md](/E:/project/tokenizor_agentic_mcp/docs/execution-plan/102-R-p1-prompt-context-extensionless-line-hint-contract-research.md)
+- narrowed extensionless alias parsing to aliases derived from the already resolved file hint
+- preserved exact-path `path:line`, basename-derived `file.rs:line`, explicit `line N`, and ambiguity-fallback behavior
+- authored the follow-on execution slice as `103-T-p1-prompt-context-extensionless-line-hint-shell.md`
 
 ## Carry Forward To Next Task
 
@@ -62,4 +65,4 @@ Carry forward:
 
 Open points:
 
-- OPEN: whether the first shell should accept only exact basename stems or also module-style aliases
+- route the first shell through the existing resolved-file hint rather than introducing a new alias resolver
