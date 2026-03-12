@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.9.0...v0.9.1) (2026-03-12)
+
+
+### Bug Fixes
+
+* keep each Where-Object filter as a single-line expression. ([e29bace](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/e29bace4e0dfa80f2a7daa6cabf3ef0936436c26))
+* PowerShell -and operator parsing in install scripts ([e29bace](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/e29bace4e0dfa80f2a7daa6cabf3ef0936436c26))
+
 ## [0.9.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.8.0...v0.9.0) (2026-03-12)
 
 
