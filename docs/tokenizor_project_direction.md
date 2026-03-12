@@ -7,7 +7,7 @@ Date: 2026-03-07
 
 This document consolidates the current architectural direction for `tokenizor_agentic_mcp` into one place.
 
-It is intended to serve as the pre-BMAD baseline:
+It is intended to serve as the current baseline:
 
 - what this project is
 - what it is not
@@ -459,7 +459,7 @@ That is the cleanest balance between:
 
 ## Immediate Next Documentation Set
 
-If this direction is accepted, the next BMAD-friendly documents should probably be:
+If this direction is accepted, the next documents should probably be:
 
 - product brief
 - technical architecture

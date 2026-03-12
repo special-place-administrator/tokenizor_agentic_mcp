@@ -232,7 +232,6 @@ Default rule:
 - use direct file reads only when exact full-file source or surrounding context is still required after tool-based narrowing
 
 Direct file reads are still appropriate for:
-- `_bmad/` workflow files, checklists, and templates
 - exact document text in `docs/` or planning artifacts when literal wording matters
 - configuration files where exact raw contents are the point of inspection
 

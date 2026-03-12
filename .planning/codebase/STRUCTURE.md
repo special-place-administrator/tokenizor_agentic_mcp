@@ -11,7 +11,7 @@ Top-level layout:
 - `docs/`: human-written product and architecture notes; useful context, but not the runtime authority.
 - `spacetime/`: early SpacetimeDB module area; currently only `spacetime/tokenizor/README.md`.
 - `.planning/codebase/`: generated codebase-map docs.
-- `_bmad/`, `.agents/`, `.codex/`, `.claude/`, `.gemini/`, `.opencode/`, `.serena/`: workflow or agent scaffolding, not core runtime code.
+- `.codex/`, `.claude/`, `.gemini/`, `.opencode/`, `.serena/`: workflow or agent scaffolding, not core runtime code.
 - `target/`: Cargo build output.
 
 `src/` ownership map:
