@@ -68,12 +68,15 @@ GitHub repository prerequisites:
 ## Standard Release Flow
 
 1. Merge normal feature and fix PRs into `main`.
-2. GitHub Actions runs `.github/workflows/release.yml` on every push to `main`.
-3. `release-please` updates or creates the release PR.
-4. Merge the release PR when the proposed version and changelog are acceptable.
-5. The same workflow run creates the GitHub release tag, builds binaries, uploads release assets, and publishes the npm tarball.
+2. Make sure at least one unreleased commit uses conventional commit syntax such as `fix:`, `fix(scope):`, or `feat:`.
+3. GitHub Actions runs `.github/workflows/release.yml` on every push to `main`.
+4. `release-please` updates or creates the release PR from releasable conventional commits.
+5. Merge the release PR when the proposed version and changelog are acceptable.
+6. The same workflow run creates the GitHub release tag, builds binaries, uploads release assets, and publishes the npm tarball.
 
 `python execution/release_ops.py status` now prints the detected GitHub repository slug and, when `gh` is authenticated, the current workflow-permission state so a fresh terminal can verify the prerequisite without guessing.
+
+If a push runs the `Release` workflow successfully but opens no release PR, check the commit subjects first. `release-please` will skip commits it cannot parse as releasable conventional commits.
 
 ## Hotfix Validation Loop
 

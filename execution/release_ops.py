@@ -50,11 +50,12 @@ Repository prerequisites:
 
 Normal publish flow:
   1. Make sure your branch is `main` and the working tree is clean.
-  2. Run `python execution/release_ops.py preflight`.
-  3. Run `python execution/release_ops.py push-main`.
-  4. Wait for the release PR opened by `release-please`.
-  5. Merge that release PR on GitHub.
-  6. GitHub Actions builds binaries, uploads release assets, and publishes npm.
+  2. Make sure at least one unreleased commit uses conventional commit syntax such as `fix:`, `fix(scope):`, or `feat:`.
+  3. Run `python execution/release_ops.py preflight`.
+  4. Run `python execution/release_ops.py push-main`.
+  5. Wait for the release PR opened by `release-please`.
+  6. Merge that release PR on GitHub.
+  7. GitHub Actions builds binaries, uploads release assets, and publishes npm.
 
 Recovery flow for an existing tag:
   python execution/release_ops.py rebuild --tag v0.3.12
