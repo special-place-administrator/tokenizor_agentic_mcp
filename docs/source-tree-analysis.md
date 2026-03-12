@@ -1,7 +1,7 @@
 # tokenizor_agentic_mcp - Source Tree Analysis
 
 > Historical note: this BMAD-generated snapshot predates the current shipped CLI and release/install workflow.
-> Treat it as historical analysis, not current operator guidance. Use [README.md](/C:/AI_STUFF/PROGRAMMING/tokenizor_agentic_mcp/README.md), [docs/release-process.md](/C:/AI_STUFF/PROGRAMMING/tokenizor_agentic_mcp/docs/release-process.md), and `python execution/release_ops.py guide` for current operations.
+> Treat it as historical analysis, not current operator guidance. Use [README.md](../README.md), [docs/release-process.md](release-process.md), and `python execution/release_ops.py guide` for current operations.
 
 **Date:** 2026-03-07
 

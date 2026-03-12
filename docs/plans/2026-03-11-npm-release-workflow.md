@@ -1,7 +1,7 @@
 # NPM Release Workflow Implementation Plan
 
 > Status: implemented and superseded.
-> Current operator guidance lives in [docs/release-process.md](/C:/AI_STUFF/PROGRAMMING/tokenizor_agentic_mcp/docs/release-process.md) and `python execution/release_ops.py guide`.
+> Current operator guidance lives in [docs/release-process.md](../release-process.md) and `python execution/release_ops.py guide`.
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 

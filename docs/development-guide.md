@@ -1,7 +1,7 @@
 # tokenizor_agentic_mcp - Development Guide
 
 > Historical note: this BMAD-generated scan predates the current install, runtime, and release operator flow.
-> For current commands use [README.md](/C:/AI_STUFF/PROGRAMMING/tokenizor_agentic_mcp/README.md), [docs/release-process.md](/C:/AI_STUFF/PROGRAMMING/tokenizor_agentic_mcp/docs/release-process.md), and `python execution/release_ops.py guide`.
+> For current commands use [README.md](../README.md), [docs/release-process.md](release-process.md), and `python execution/release_ops.py guide`.
 
 **Date:** 2026-03-07
 

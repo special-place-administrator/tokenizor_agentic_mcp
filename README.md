@@ -364,7 +364,7 @@ bash scripts/setup.sh --client all
 
 GitHub releases are now managed through `release-please` plus GitHub Actions.
 
-Operational details live in [docs/release-process.md](/C:/AI_STUFF/PROGRAMMING/tokenizor_agentic_mcp/docs/release-process.md).
+Operational details live in [docs/release-process.md](docs/release-process.md).
 
 Fresh-terminal operator entrypoint:
 
