@@ -21,10 +21,19 @@ function createInstaller(overrides = {}) {
   const sleep = overrides.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const packageJson = overrides.packageJson || require("../package.json");
 
+  function resolveInstallDir() {
+    if (overrides.installDir) {
+      return overrides.installDir;
+    }
+    if (processMod.env.TOKENIZOR_HOME) {
+      return pathMod.join(processMod.env.TOKENIZOR_HOME, "bin");
+    }
+    return pathMod.join(osMod.homedir(), ".tokenizor", "bin");
+  }
+
   // Binary lives outside node_modules so npm can update the JS wrapper
   // even while the MCP server holds a lock on the running .exe (Windows).
-  const installDir = overrides.installDir
-    || pathMod.join(osMod.homedir(), ".tokenizor", "bin");
+  const installDir = resolveInstallDir();
 
   function getPlatformArtifact() {
     const platform = processMod.platform;

@@ -188,6 +188,8 @@ npm install -g tokenizor-mcp
 
 The npm installer downloads the platform binary to `~/.tokenizor/bin/tokenizor-mcp` or `~/.tokenizor/bin/tokenizor-mcp.exe`.
 
+If `TOKENIZOR_HOME` is set, the npm wrapper and installer use `$TOKENIZOR_HOME/bin` instead of the default home path.
+
 Update the npm install the same way:
 
 ```bash
@@ -330,7 +332,7 @@ The local runtime can load and save a serialized index snapshot at `.tokenizor/i
 | `TOKENIZOR_AUTO_INDEX` | `true` | Enables project discovery and startup indexing unless set to `false`. |
 | `TOKENIZOR_CB_THRESHOLD` | `20` | Sets the parse-failure circuit-breaker threshold as a percentage. |
 | `TOKENIZOR_SIDECAR_BIND` | `127.0.0.1` | Sets the sidecar bind host for local in-process mode. |
-| `TOKENIZOR_HOME` | `~/.tokenizor` | Overrides the Tokenizor home directory used by daemon metadata. |
+| `TOKENIZOR_HOME` | `~/.tokenizor` | Overrides the Tokenizor home directory used by daemon metadata and the npm-managed binary location (`$TOKENIZOR_HOME/bin`). |
 
 ## Build From Source
 

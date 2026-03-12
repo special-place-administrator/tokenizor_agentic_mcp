@@ -18,11 +18,32 @@ function createLauncher(overrides = {}) {
   const installScriptPath = overrides.installScriptPath
     || pathMod.join(__dirname, "..", "scripts", "install.js");
 
+  function resolveInstallDir() {
+    if (overrides.installDir) {
+      return overrides.installDir;
+    }
+    if (processMod.env.TOKENIZOR_HOME) {
+      return pathMod.join(processMod.env.TOKENIZOR_HOME, "bin");
+    }
+    return pathMod.join(osMod.homedir(), ".tokenizor", "bin");
+  }
+
   const ext = processMod.platform === "win32" ? ".exe" : "";
-  const installDir = overrides.installDir
-    || pathMod.join(osMod.homedir(), ".tokenizor", "bin");
+  const installDir = resolveInstallDir();
   const binPath = pathMod.join(installDir, "tokenizor-mcp" + ext);
   const pendingPath = pathMod.join(installDir, "tokenizor-mcp.pending" + ext);
+
+  function relayInstallerOutput(output) {
+    if (!output) {
+      return;
+    }
+    const text = typeof output === "string" ? output : String(output);
+    for (const line of text.split(/\r?\n/)) {
+      if (line) {
+        consoleMod.error(line);
+      }
+    }
+  }
 
   function getInstalledVersion() {
     try {
@@ -53,7 +74,18 @@ function createLauncher(overrides = {}) {
   }
 
   function runInstaller() {
-    execFileSyncFn(processMod.execPath, [installScriptPath], { stdio: "inherit" });
+    try {
+      const stdout = execFileSyncFn(processMod.execPath, [installScriptPath], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        env: processMod.env,
+      });
+      relayInstallerOutput(stdout);
+    } catch (error) {
+      relayInstallerOutput(error.stdout);
+      relayInstallerOutput(error.stderr);
+      throw error;
+    }
   }
 
   function ensureInstalledBinary() {

@@ -35,13 +35,14 @@ function createLauncherForTest({
   spawnSync,
   installDir,
   packageVersion = "0.3.12",
+  env = {},
 }) {
   const logs = [];
   const errors = [];
   const processMock = {
     platform: "win32",
     arch: "x64",
-    env: {},
+    env,
     execPath: "C:\\node\\node.exe",
   };
   const consoleMock = {
@@ -129,4 +130,54 @@ test("launcher applies pending update before checking installed version", () => 
   assert.equal(status, 0);
   assert.equal(fsOverrides.renames.length, 1);
   assert.match(errors.join("\n"), /applied pending update/);
+});
+
+test("launcher honors TOKENIZOR_HOME for binary resolution", () => {
+  const installDir = winPath.join("D:\\sandbox", "tokenizor-home", "bin");
+  const binPath = winPath.join(installDir, "tokenizor-mcp.exe");
+  const pendingPath = winPath.join(installDir, "tokenizor-mcp.pending.exe");
+  const fsOverrides = createFs({ binPath, pendingPath, hasBinary: false, hasPending: false });
+
+  const { launcher } = createLauncherForTest({
+    fsOverrides,
+    installDir: undefined,
+    env: { TOKENIZOR_HOME: winPath.join("D:\\sandbox", "tokenizor-home") },
+    execFileSync() {
+      return "";
+    },
+    spawnSync() {
+      return { status: 0 };
+    },
+  });
+
+  assert.equal(launcher.getBinaryPath(), binPath);
+  assert.equal(launcher.getPendingPath(), pendingPath);
+});
+
+test("launcher relays installer stdout to stderr so MCP stdout stays clean", () => {
+  const installDir = winPath.join("C:\\Users\\tester", ".tokenizor", "bin");
+  const binPath = winPath.join(installDir, "tokenizor-mcp.exe");
+  const pendingPath = winPath.join(installDir, "tokenizor-mcp.pending.exe");
+  const fsOverrides = createFs({ binPath, pendingPath });
+
+  const { launcher, logs, errors } = createLauncherForTest({
+    fsOverrides,
+    installDir,
+    execFileSync(command) {
+      if (command === binPath) {
+        return "tokenizor 0.3.11";
+      }
+      return "Downloading tokenizor-mcp v0.3.12...\nInstalled: C:\\Users\\tester\\.tokenizor\\bin\\tokenizor-mcp.exe\n";
+    },
+    spawnSync() {
+      return { status: 0 };
+    },
+  });
+
+  const status = launcher.main([]);
+
+  assert.equal(status, 0);
+  assert.equal(logs.length, 0);
+  assert.match(errors.join("\n"), /Downloading tokenizor-mcp v0.3.12/);
+  assert.match(errors.join("\n"), /Installed:/);
 });

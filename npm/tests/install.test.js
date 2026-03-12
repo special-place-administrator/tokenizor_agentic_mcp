@@ -43,13 +43,13 @@ function createFs({ binPath, pendingPath, installDir, binFailuresBeforeSuccess =
   };
 }
 
-function createInstallerForTest({ fsOverrides, execFileSync, sleep, installDir }) {
+function createInstallerForTest({ fsOverrides, execFileSync, sleep, installDir, env = {} }) {
   const logs = [];
   const errors = [];
   const processMock = {
     platform: "win32",
     arch: "x64",
-    env: {},
+    env,
     exit(code) {
       throw new Error(`unexpected exit ${code}`);
     },
@@ -142,4 +142,24 @@ test("installer stages a pending binary when the executable is still locked afte
   );
   assert.match(logs.join("\n"), /Staged update at:/);
   assert.match(logs.join("\n"), /Update will apply automatically on next launch/);
+});
+
+test("installer honors TOKENIZOR_HOME for binary resolution", () => {
+  const tokenizorHome = winPath.join("D:\\sandbox", "tokenizor-home");
+  const installDir = winPath.join(tokenizorHome, "bin");
+  const binPath = winPath.join(installDir, "tokenizor-mcp.exe");
+  const pendingPath = winPath.join(installDir, "tokenizor-mcp.pending.exe");
+  const fsOverrides = createFs({ binPath, pendingPath, installDir });
+
+  const { installer } = createInstallerForTest({
+    fsOverrides,
+    installDir: undefined,
+    env: { TOKENIZOR_HOME: tokenizorHome },
+    execFileSync() {
+      return "[]";
+    },
+  });
+
+  assert.equal(installer.getBinaryPath(), binPath);
+  assert.equal(installer.getPendingPath(), pendingPath);
 });
