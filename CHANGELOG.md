@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.4.2...v0.5.0) (2026-03-12)
+
+
+### Features
+
+* add Mermaid and DOT graph output for find_dependents ([127fed2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/127fed25b4ff07ce48f82fabc03750c53d98f58b))
+
 ## [0.4.2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.4.1...v0.4.2) (2026-03-12)
 
 
