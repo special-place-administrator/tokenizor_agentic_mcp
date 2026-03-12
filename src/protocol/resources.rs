@@ -153,6 +153,7 @@ impl TokenizorServer {
                     start_line,
                     end_line,
                     around_line: None,
+                    around_match: None,
                     context_lines: None,
                 }))
                 .await

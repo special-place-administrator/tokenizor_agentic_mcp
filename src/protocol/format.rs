@@ -854,6 +854,16 @@ pub fn file_content_from_indexed_file_with_context(
     file: &IndexedFile,
     context: search::ContentContext,
 ) -> String {
+    if let Some(around_match) = context.around_match.as_deref() {
+        return render_numbered_around_match_excerpt(
+            file,
+            around_match,
+            context
+                .context_lines
+                .unwrap_or(DEFAULT_AROUND_LINE_CONTEXT_LINES),
+        );
+    }
+
     render_file_content_bytes(&file.content, context)
 }
 
@@ -909,6 +919,30 @@ fn render_file_content_bytes(content: &[u8], context: search::ContentContext) ->
     }
 }
 
+fn render_numbered_around_match_excerpt(
+    file: &IndexedFile,
+    around_match: &str,
+    context_lines: u32,
+) -> String {
+    let content = String::from_utf8_lossy(&file.content);
+    let lines: Vec<&str> = content.lines().collect();
+
+    let Some(around_line) = find_first_case_insensitive_match_line(&lines, around_match) else {
+        return not_found_file_match(&file.relative_path, around_match);
+    };
+
+    render_numbered_around_line_excerpt(&lines, around_line, context_lines)
+}
+
+fn find_first_case_insensitive_match_line(lines: &[&str], around_match: &str) -> Option<u32> {
+    let needle = around_match.to_lowercase();
+
+    lines
+        .iter()
+        .position(|line| line.to_lowercase().contains(&needle))
+        .map(|index| (index + 1) as u32)
+}
+
 fn render_numbered_around_line_excerpt(
     lines: &[&str],
     around_line: u32,
@@ -936,6 +970,11 @@ fn render_numbered_around_line_excerpt(
 /// "File not found: {path}"
 pub fn not_found_file(path: &str) -> String {
     format!("File not found: {path}")
+}
+
+/// "No matches for '{query}' in {path}"
+pub fn not_found_file_match(path: &str, query: &str) -> String {
+    format!("No matches for '{query}' in {path}")
 }
 
 /// "No symbol {name} in {path}. Symbols in that file: {comma-separated list}"
@@ -2138,6 +2177,20 @@ mod tests {
         );
 
         assert_eq!(result, "2: line 2\n3: line 3\n4: line 4");
+    }
+
+    #[test]
+    fn test_file_content_from_indexed_file_with_context_renders_numbered_around_match_excerpt() {
+        let content = b"line 1\nTODO first\nline 3\nTODO second\nline 5";
+        let (key, file) = make_file("src/main.rs", content, vec![]);
+        let index = make_index(vec![(key, file)]);
+
+        let result = file_content_from_indexed_file_with_context(
+            index.capture_shared_file("src/main.rs").unwrap().as_ref(),
+            search::ContentContext::around_match("todo", Some(1)),
+        );
+
+        assert_eq!(result, "1: line 1\n2: TODO first\n3: line 3");
     }
 
     // --- guard messages ---

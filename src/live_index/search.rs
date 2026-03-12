@@ -117,11 +117,12 @@ impl Default for ResultLimit {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentContext {
     pub start_line: Option<u32>,
     pub end_line: Option<u32>,
     pub around_line: Option<u32>,
+    pub around_match: Option<String>,
     pub context_lines: Option<u32>,
 }
 
@@ -131,6 +132,7 @@ impl ContentContext {
             start_line,
             end_line,
             around_line: None,
+            around_match: None,
             context_lines: None,
         }
     }
@@ -140,6 +142,17 @@ impl ContentContext {
             start_line: None,
             end_line: None,
             around_line: Some(around_line),
+            around_match: None,
+            context_lines,
+        }
+    }
+
+    pub fn around_match(around_match: impl Into<String>, context_lines: Option<u32>) -> Self {
+        Self {
+            start_line: None,
+            end_line: None,
+            around_line: None,
+            around_match: Some(around_match.into()),
             context_lines,
         }
     }
@@ -300,6 +313,17 @@ impl FileContentOptions {
         Self {
             path_scope: PathScope::exact(path),
             content_context: ContentContext::around_line(around_line, context_lines),
+        }
+    }
+
+    pub fn for_explicit_path_read_around_match(
+        path: impl Into<String>,
+        around_match: impl Into<String>,
+        context_lines: Option<u32>,
+    ) -> Self {
+        Self {
+            path_scope: PathScope::exact(path),
+            content_context: ContentContext::around_match(around_match, context_lines),
         }
     }
 
@@ -1428,6 +1452,24 @@ mod tests {
         assert_eq!(
             options.content_context,
             ContentContext::around_line(3, Some(1))
+        );
+    }
+
+    #[test]
+    fn test_explicit_path_read_around_match_options_are_exact() {
+        let options = FileContentOptions::for_explicit_path_read_around_match(
+            "src/lib.rs",
+            "needle",
+            Some(1),
+        );
+
+        assert_eq!(
+            options.path_scope,
+            PathScope::Exact("src/lib.rs".to_string())
+        );
+        assert_eq!(
+            options.content_context,
+            ContentContext::around_match("needle", Some(1))
         );
     }
 }

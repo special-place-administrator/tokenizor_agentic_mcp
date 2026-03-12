@@ -757,6 +757,30 @@ fn test_get_file_content_with_around_line() {
     assert_eq!(result, "2: line two\n3: line three\n4: line four");
 }
 
+#[test]
+fn test_get_file_content_with_around_match() {
+    use tokenizor_agentic_mcp::live_index::search::ContentContext;
+    use tokenizor_agentic_mcp::protocol::format;
+
+    let dir = tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "lines.rs",
+        "line one\nTODO first\nline three\nTODO second\nline five",
+    );
+
+    let shared = LiveIndex::load(dir.path()).unwrap();
+    let index = shared.read().unwrap();
+    let file = index.capture_shared_file("lines.rs").unwrap();
+
+    let result = format::file_content_from_indexed_file_with_context(
+        file.as_ref(),
+        ContentContext::around_match("todo", Some(1)),
+    );
+
+    assert_eq!(result, "1: line one\n2: TODO first\n3: line three");
+}
+
 // ============================================================================
 // Phase 7 Plan 03: Persistence Integration Tests
 // ============================================================================

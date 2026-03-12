@@ -175,7 +175,9 @@ pub struct GetFileContentInput {
     pub end_line: Option<u32>,
     /// Center the read around this 1-indexed line.
     pub around_line: Option<u32>,
-    /// Number of lines of symmetric context to include around `around_line`.
+    /// Center the read around the first case-insensitive literal match in the file.
+    pub around_match: Option<String>,
+    /// Number of lines of symmetric context to include around `around_line` or `around_match`.
     pub context_lines: Option<u32>,
 }
 
@@ -460,6 +462,30 @@ fn search_text_options_from_input(
 fn file_content_options_from_input(
     input: &GetFileContentInput,
 ) -> Result<search::FileContentOptions, String> {
+    if let Some(raw_around_match) = input.around_match.as_deref() {
+        let around_match = raw_around_match.trim();
+        if around_match.is_empty() {
+            return Err(
+                "Invalid get_file_content request: `around_match` must not be empty.".to_string(),
+            );
+        }
+
+        if input.start_line.is_some() || input.end_line.is_some() || input.around_line.is_some() {
+            return Err(
+                "Invalid get_file_content request: `around_match` cannot be combined with `start_line`, `end_line`, or `around_line`."
+                    .to_string(),
+            );
+        }
+
+        return Ok(
+            search::FileContentOptions::for_explicit_path_read_around_match(
+                input.path.clone(),
+                around_match,
+                input.context_lines,
+            ),
+        );
+    }
+
     if input.around_line.is_some() && (input.start_line.is_some() || input.end_line.is_some()) {
         return Err(
             "Invalid get_file_content request: `around_line` cannot be combined with `start_line` or `end_line`."
@@ -2568,6 +2594,7 @@ mod tests {
                 start_line: None,
                 end_line: None,
                 around_line: None,
+                around_match: None,
                 context_lines: None,
             }))
             .await;
@@ -2586,6 +2613,7 @@ mod tests {
                 start_line: None,
                 end_line: None,
                 around_line: None,
+                around_match: None,
                 context_lines: None,
             }))
             .await;
@@ -2603,6 +2631,7 @@ mod tests {
                 start_line: Some(2),
                 end_line: Some(3),
                 around_line: None,
+                around_match: None,
                 context_lines: None,
             }))
             .await;
@@ -2620,6 +2649,7 @@ mod tests {
                 start_line: None,
                 end_line: None,
                 around_line: Some(3),
+                around_match: None,
                 context_lines: Some(1),
             }))
             .await;
@@ -2637,12 +2667,70 @@ mod tests {
                 start_line: Some(2),
                 end_line: None,
                 around_line: Some(2),
+                around_match: None,
                 context_lines: Some(1),
             }))
             .await;
         assert_eq!(
             result,
             "Invalid get_file_content request: `around_line` cannot be combined with `start_line` or `end_line`."
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_file_content_around_match_renders_first_numbered_excerpt() {
+        let content = b"line 1\nTODO first\nline 3\nTODO second\nline 5";
+        let (key, file) = make_file("src/lib.rs", content, vec![]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server
+            .get_file_content(Parameters(super::GetFileContentInput {
+                path: "src/lib.rs".to_string(),
+                start_line: None,
+                end_line: None,
+                around_line: None,
+                around_match: Some("todo".to_string()),
+                context_lines: Some(1),
+            }))
+            .await;
+        assert_eq!(result, "1: line 1\n2: TODO first\n3: line 3");
+    }
+
+    #[tokio::test]
+    async fn test_get_file_content_reports_missing_around_match() {
+        let content = b"line 1\nline 2\nline 3";
+        let (key, file) = make_file("src/lib.rs", content, vec![]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server
+            .get_file_content(Parameters(super::GetFileContentInput {
+                path: "src/lib.rs".to_string(),
+                start_line: None,
+                end_line: None,
+                around_line: None,
+                around_match: Some("needle".to_string()),
+                context_lines: Some(1),
+            }))
+            .await;
+        assert_eq!(result, "No matches for 'needle' in src/lib.rs");
+    }
+
+    #[tokio::test]
+    async fn test_get_file_content_rejects_around_match_with_other_selectors() {
+        let content = b"line 1\nline 2\nline 3";
+        let (key, file) = make_file("src/lib.rs", content, vec![]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server
+            .get_file_content(Parameters(super::GetFileContentInput {
+                path: "src/lib.rs".to_string(),
+                start_line: None,
+                end_line: Some(3),
+                around_line: Some(2),
+                around_match: Some("line".to_string()),
+                context_lines: Some(1),
+            }))
+            .await;
+        assert_eq!(
+            result,
+            "Invalid get_file_content request: `around_match` cannot be combined with `start_line`, `end_line`, or `around_line`."
         );
     }
 

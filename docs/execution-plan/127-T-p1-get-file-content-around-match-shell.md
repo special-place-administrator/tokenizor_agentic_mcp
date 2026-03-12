@@ -2,11 +2,11 @@
 doc_type: task
 task_id: 127
 title: P1 get_file_content around_match shell
-status: in_progress
+status: done
 sprint: tokenizor-upgrade-foundation
 parent_plan: 05-P-validation-and-backlog.md
 prev_task: 126-T-p1-get-file-content-around-match-contract-research.md
-next_task:
+next_task: 128-T-p1-get-file-content-chunking-contract-research.md
 created: 2026-03-12
 updated: 2026-03-12
 ---
@@ -48,19 +48,23 @@ updated: 2026-03-12
 
 ## Completion Notes
 
-- pending
+- extended `GetFileContentInput` with exact-path `around_match`
+- added deterministic validation that rejects mixing `around_match` with `start_line`, `end_line`, or `around_line`
+- reused numbered excerpt rendering to anchor on the first case-insensitive literal match line
+- added a stable no-match message for exact-path reads that do not contain the requested text
+- preserved existing full-file, explicit range, and `around_line` behavior
 
 ## Carry Forward To Next Task
 
 Next task:
 
-- `TBD`
+- `128-T-p1-get-file-content-chunking-contract-research.md`
 
 Carry forward:
 
 - keep `around_match` exact-path only
 - keep the first slice literal-only and first-match deterministic
-- avoid broadening this slice into regex, chunking, or multi-match selection
+- avoid broadening the next slice into regex, multi-match selection, or non-code file reads while chunking is designed
 
 Open points:
 

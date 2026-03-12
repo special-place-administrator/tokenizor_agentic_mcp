@@ -1,17 +1,146 @@
 # Tokenizor MCP
 
-Rust-native MCP server for local code indexing, retrieval, prompts, and resources.
+Rust-native MCP server for same-machine code indexing, retrieval, prompts, and resources.
 
-The npm package installs the executable as `tokenizor-mcp`. In this repository, the same CLI can be run with `cargo run -- ...`.
+The executable shipped by npm is `tokenizor-mcp`. In this repository, the same CLI can be run with `cargo run -- ...`.
 
-## Current Scope
+## Current Reality
 
-- Local same-machine use.
-- MCP over stdio.
-- Local daemon mode for shared project/session state across concurrent terminals.
-- Automated client setup for Claude Code and Codex.
-- Automatic hook-based context enrichment for Claude Code only.
-- Standard MCP tools, resources, and prompts for all clients.
+Tokenizor is already useful today as a local, code-first MCP. The current implementation provides:
+
+- a stdio MCP server for local clients
+- a local daemon mode for shared project/session state across concurrent terminals
+- tree-sitter-based symbol extraction across a broad set of programming languages
+- hook and sidecar enrichment for Claude Code
+- MCP tools, resources, and prompts for Claude Code, Codex, and other stdio MCP clients
+- local snapshot persistence and file watching for supported source files
+
+At the time of this README rewrite, `cargo test` is green in this repository.
+
+## What Works Today
+
+### Runtime and setup
+
+- Local same-machine use
+- MCP over stdio
+- Local daemon mode via `tokenizor-mcp daemon`
+- Automatic client setup for Claude Code and Codex via `tokenizor-mcp init`
+- Automatic hook registration for Claude Code
+- Local snapshot persistence at `.tokenizor/index.bin`
+- File watching and incremental re-indexing for supported source files
+
+### Search and navigation gains
+
+- `search_files` for ranked path discovery
+- `resolve_path` for exact path resolution from filenames and partial hints
+- `search_symbols` with `kind`, `path_prefix`, `language`, `limit`, `include_generated`, and `include_tests`
+- `search_text` with literal, OR-term, and regex search plus `path_prefix`, `language`, `limit`, `max_per_file`, `glob`, `exclude_glob`, symmetric `context`, `case_sensitive`, `whole_word`, and generated/test suppression
+- `get_file_content` with full-file reads, explicit line ranges, `around_line`, and first-match `around_match`
+- exact-selector reference navigation through `find_references`, `get_symbol_context`, and `get_context_bundle` using `path`, symbol kind, and symbol line
+- `find_dependents` with module- and namespace-aware attribution
+- prompt-submit hook routing that can use file hints, basename/extensionless aliases, module aliases, qualified symbol aliases, and `:line` hints to choose the right file or symbol more reliably
+
+### MCP surface implemented today
+
+Current tools:
+
+- `health`
+- `index_folder`
+- `get_file_outline`
+- `get_repo_outline`
+- `get_repo_map`
+- `get_file_context`
+- `get_symbol_context`
+- `analyze_file_impact`
+- `search_symbols`
+- `search_text`
+- `search_files`
+- `resolve_path`
+- `get_symbol`
+- `get_symbols`
+- `get_file_content`
+- `find_references`
+- `find_dependents`
+- `get_file_tree`
+- `get_context_bundle`
+- `what_changed`
+
+Current prompts:
+
+- `code-review`
+- `architecture-map`
+- `failure-triage`
+
+Current static resources:
+
+- `tokenizor://repo/health`
+- `tokenizor://repo/outline`
+- `tokenizor://repo/map`
+- `tokenizor://repo/changes/uncommitted`
+
+Current resource templates:
+
+- `tokenizor://file/context?path={path}&max_tokens={max_tokens}`
+- `tokenizor://file/content?path={path}&start_line={start_line}&end_line={end_line}`
+- `tokenizor://symbol/detail?path={path}&name={name}&kind={kind}`
+- `tokenizor://symbol/context?name={name}&file={file}`
+
+Important current caveat:
+
+- the tools have moved ahead of the resources in a few areas; for example, `get_file_content` now supports `around_line` and `around_match`, but the file-content resource template still only exposes `start_line` and `end_line`
+- exact-selector symbol inputs are implemented on tools, but the symbol-context resource template still exposes only `name` and optional `file`
+
+### Supported languages
+
+Current language extractors exist for:
+
+- Rust
+- Python
+- JavaScript
+- TypeScript
+- Go
+- Java
+- C
+- C++
+- C#
+- Ruby
+- PHP
+- Swift
+- Perl
+- Kotlin
+- Dart
+- Elixir
+
+## What Is Not Implemented Yet
+
+These items are part of the direction for the project, but they are not in the current runtime yet:
+
+- SpacetimeDB as the control plane
+- local content-addressed blob storage for raw bytes and large derived artifacts
+- `index_repository`, `cancel_index_run`, `checkpoint_now`, and `repair_index`
+- `trace_symbol` and `inspect_match`
+- `get_file_content` chunking
+- `get_file_content around_symbol`
+- a general `show_line_numbers` / header contract for ordinary full-file and explicit-range reads
+- a lightweight non-code text lane for JSON, YAML, TOML, Markdown, logs, and similar plain-text files
+- transparent hook-based enrichment for Codex
+- any multi-machine, remote, or authenticated daemon deployment model
+
+## Current Rough Edges and Open Work
+
+- `get_file_content` is much better than before, but it still is not a complete shell replacement for large-file paging until chunking lands
+- resource and prompt surfaces still lag some of the newer tool capabilities
+- current indexing is intentionally code-first; non-code text retrieval remains limited
+- long-running run management, checkpointing, repair workflows, and idempotent mutation semantics are still architecture goals rather than shipped features
+- the shortest path from file discovery to exact symbol/reference inspection is much better now, but a few workflow helpers still remain on the roadmap
+
+## Why It Is Already Better Than Earlier Revisions
+
+- shell fallback is reduced by `search_files`, `resolve_path`, scoped `search_text`, and contextual `get_file_content`
+- search lanes now have scope controls and noise suppression that make larger repositories much more usable
+- exact-selector reference queries avoid many of the common-name collisions that made earlier navigation noisy
+- the local daemon lets multiple terminals share one project view instead of rebuilding local state repeatedly
+- hook and resource surfaces give the model cheap orientation before expensive tool usage
 
 ## Installation
 
@@ -114,11 +243,7 @@ The Codex setup writes or updates:
 - `project_doc_fallback_filenames` to ensure `CLAUDE.md` is included
 - a bounded Tokenizor guidance block in `~/.codex/AGENTS.md`
 
-The repo does not currently install hook-based transparent enrichment for Codex. Codex uses the same backend through MCP tools, resources, prompts, and AGENTS guidance.
-
-### Idempotency
-
-The init flow is tested for repeated runs and for preserving unrelated existing Claude and Codex config.
+Codex currently uses MCP tools, resources, prompts, and AGENTS guidance, but it does not yet get the automatic transparent hook enrichment path that Claude Code gets.
 
 ## Runtime Model
 
@@ -133,7 +258,7 @@ When the stdio server starts:
 
 ### Local daemon
 
-The local daemon is started with:
+Start the local daemon with:
 
 ```bash
 tokenizor-mcp daemon
@@ -166,89 +291,6 @@ Hook and sidecar coordination uses project-local files under `.tokenizor`:
 
 The local runtime can load and save a serialized index snapshot at `.tokenizor/index.bin`.
 
-## MCP Surface
-
-The server currently exposes tools, prompts, and resources.
-
-### Tools
-
-Registered tool names:
-
-- `health`
-- `index_folder`
-- `get_file_outline`
-- `get_repo_outline`
-- `get_repo_map`
-- `get_file_context`
-- `get_symbol_context`
-- `analyze_file_impact`
-- `get_file_tree`
-- `get_symbol`
-- `get_symbols`
-- `get_file_content`
-- `search_symbols`
-- `search_text`
-- `find_references`
-- `find_dependents`
-- `get_context_bundle`
-- `what_changed`
-
-### Prompts
-
-Registered prompt names:
-
-- `code-review`
-- `architecture-map`
-- `failure-triage`
-
-### Static resources
-
-- `tokenizor://repo/health`
-- `tokenizor://repo/outline`
-- `tokenizor://repo/map`
-- `tokenizor://repo/changes/uncommitted`
-
-### Resource templates
-
-- `tokenizor://file/context?path={path}&max_tokens={max_tokens}`
-- `tokenizor://file/content?path={path}&start_line={start_line}&end_line={end_line}`
-- `tokenizor://symbol/detail?path={path}&name={name}&kind={kind}`
-- `tokenizor://symbol/context?name={name}&file={file}`
-
-## Tool Notes
-
-Current query behavior implemented in the server:
-
-- `search_symbols` supports substring matching and an optional `kind` filter.
-- `search_text` supports literal search, multi-term OR via `terms`, and regex mode.
-- `find_dependents` prefers concrete non-import symbol usage over import stubs when matching module or namespace evidence exists.
-- `find_dependents` includes namespace-aware type-usage matching for C# and Java and module-backed symbol/type usage attribution for files that import the target module.
-- Rust grouped `use crate::{...}` imports are expanded during reference extraction.
-- `get_file_context` builds its key-reference section from attributed file dependents rather than global bare-name matches.
-- `get_context_bundle` returns symbol source plus caller, callee, and type-usage context.
-- `what_changed` supports uncommitted git changes, git-ref comparisons, and explicit timestamp mode.
-
-## Supported Languages
-
-Current language extractor modules exist for:
-
-- Rust
-- Python
-- JavaScript
-- TypeScript
-- Go
-- Java
-- C
-- C++
-- C#
-- Ruby
-- PHP
-- Swift
-- Perl
-- Kotlin
-- Dart
-- Elixir
-
 ## Environment Variables
 
 | Variable | Default | Current effect |
@@ -270,13 +312,6 @@ cargo test
 ```
 
 The Cargo package name in this repository is `tokenizor_agentic_mcp`.
-
-## Limitations
-
-- Automated client setup is implemented only for Claude Code and Codex.
-- Automatic transparent hook enrichment is implemented only for Claude Code.
-- The daemon is local-only; this repo does not implement a multi-machine deployment mode.
-- The npm installer ships prebuilt binaries only for the platform list in this README.
 
 ## License
 
