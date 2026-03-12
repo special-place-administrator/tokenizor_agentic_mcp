@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.7.0...v0.8.0) (2026-03-12)
+
+
+### Features
+
+* add trait/interface implementation mapping with find_implementations tool ([4be3610](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/4be36105fa605fca6b3e33e67bdba6fa79258ede))
+
 ## [0.7.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.6.0...v0.7.0) (2026-03-12)
 
 
