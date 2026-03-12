@@ -221,6 +221,8 @@ pub struct FindDependentsInput {
     pub limit: Option<u32>,
     /// Maximum number of reference lines per file (default 10, capped at 50).
     pub max_per_file: Option<u32>,
+    /// Output format: "text" (default), "mermaid", or "dot".
+    pub format: Option<String>,
 }
 
 /// Input for `get_file_tree`.
@@ -1198,7 +1200,12 @@ impl TokenizorServer {
         };
         let limits =
             format::OutputLimits::new(input.limit.unwrap_or(20), input.max_per_file.unwrap_or(10));
-        format::find_dependents_result_view(&view, &input.path, &limits)
+        let fmt = input.format.as_deref().unwrap_or("text");
+        match fmt {
+            "mermaid" => format::find_dependents_mermaid(&view, &input.path, &limits),
+            "dot" => format::find_dependents_dot(&view, &input.path, &limits),
+            _ => format::find_dependents_result_view(&view, &input.path, &limits),
+        }
     }
 
     /// Browse the source file tree with symbol counts per file and directory.
@@ -3487,6 +3494,7 @@ mod tests {
                 path: "src/lib.rs".to_string(),
                 limit: None,
                 max_per_file: None,
+                format: None,
             }))
             .await;
         assert_eq!(result, crate::protocol::format::empty_guard_message());
@@ -3711,6 +3719,7 @@ mod tests {
                 path: "src/nonexistent.rs".to_string(),
                 limit: None,
                 max_per_file: None,
+                format: None,
             }))
             .await;
         assert!(result.contains("No dependents found"), "got: {result}");

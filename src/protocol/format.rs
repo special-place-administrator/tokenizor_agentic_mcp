@@ -1376,6 +1376,87 @@ pub fn find_dependents_result_view(
     lines.join("\n")
 }
 
+/// Render a find_dependents result as a Mermaid flowchart.
+pub fn find_dependents_mermaid(
+    view: &FindDependentsView,
+    path: &str,
+    limits: &OutputLimits,
+) -> String {
+    if view.files.is_empty() {
+        return format!("No dependents found for \"{path}\"");
+    }
+
+    let mut lines = vec!["flowchart LR".to_string()];
+    let target_id = mermaid_node_id(path);
+    lines.push(format!("    {target_id}[\"{path}\"]"));
+
+    for file in view.files.iter().take(limits.max_files) {
+        let dep_id = mermaid_node_id(&file.file_path);
+        let ref_count = file.lines.len().min(limits.max_per_file);
+        lines.push(format!(
+            "    {dep_id}[\"{}\"] -->|{} refs| {target_id}",
+            file.file_path, ref_count
+        ));
+    }
+
+    let remaining = view.files.len().saturating_sub(limits.max_files);
+    if remaining > 0 {
+        lines.push(format!(
+            "    more[\"... and {remaining} more files\"] --> {target_id}"
+        ));
+    }
+
+    lines.join("\n")
+}
+
+/// Render a find_dependents result as a Graphviz DOT digraph.
+pub fn find_dependents_dot(view: &FindDependentsView, path: &str, limits: &OutputLimits) -> String {
+    if view.files.is_empty() {
+        return format!("No dependents found for \"{path}\"");
+    }
+
+    let mut lines = vec!["digraph dependents {".to_string()];
+    lines.push("    rankdir=LR;".to_string());
+    lines.push(format!(
+        "    \"{}\" [shape=box, style=bold];",
+        dot_escape(path)
+    ));
+
+    for file in view.files.iter().take(limits.max_files) {
+        let ref_count = file.lines.len().min(limits.max_per_file);
+        lines.push(format!(
+            "    \"{}\" -> \"{}\" [label=\"{} refs\"];",
+            dot_escape(&file.file_path),
+            dot_escape(path),
+            ref_count
+        ));
+    }
+
+    let remaining = view.files.len().saturating_sub(limits.max_files);
+    if remaining > 0 {
+        lines.push(format!(
+            "    \"... and {} more\" -> \"{}\" [style=dashed];",
+            remaining,
+            dot_escape(path)
+        ));
+    }
+
+    lines.push("}".to_string());
+    lines.join("\n")
+}
+
+/// Sanitize a file path into a valid Mermaid node ID (alphanumeric + underscores).
+fn mermaid_node_id(path: &str) -> String {
+    path.chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+/// Escape a string for DOT label/node usage.
+fn dot_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// Get full context bundle for a symbol: definition body + callers + callees + type usages.
 ///
 /// Each section is capped at 20 entries with "...and N more" overflow.
@@ -2833,6 +2914,66 @@ mod tests {
         );
 
         assert_eq!(captured_result, live_result);
+    }
+
+    #[test]
+    fn test_find_dependents_mermaid_shows_flowchart() {
+        let content_b = b"use crate::db;\n";
+        let r = make_ref("db", ReferenceKind::Import, 1, None);
+        let (key_b, file_b) = make_file_with_refs("src/handler.rs", content_b, vec![], vec![r]);
+        let (key_a, file_a) = make_file("src/db.rs", b"pub fn connect() {}", vec![]);
+        let index = make_index_with_reverse(vec![(key_a, file_a), (key_b, file_b)]);
+        let view = index.capture_find_dependents_view("src/db.rs");
+        let result = find_dependents_mermaid(&view, "src/db.rs", &OutputLimits::default());
+        assert!(
+            result.starts_with("flowchart LR"),
+            "should start with flowchart, got: {result}"
+        );
+        assert!(result.contains("src/db.rs"), "should mention target file");
+        assert!(
+            result.contains("src/handler.rs"),
+            "should mention dependent"
+        );
+        assert!(result.contains("refs"), "should show ref count");
+    }
+
+    #[test]
+    fn test_find_dependents_mermaid_empty() {
+        let (key, file) = make_file("src/db.rs", b"", vec![]);
+        let index = make_index_with_reverse(vec![(key, file)]);
+        let view = index.capture_find_dependents_view("src/db.rs");
+        let result = find_dependents_mermaid(&view, "src/db.rs", &OutputLimits::default());
+        assert_eq!(result, "No dependents found for \"src/db.rs\"");
+    }
+
+    #[test]
+    fn test_find_dependents_dot_shows_digraph() {
+        let content_b = b"use crate::db;\n";
+        let r = make_ref("db", ReferenceKind::Import, 1, None);
+        let (key_b, file_b) = make_file_with_refs("src/handler.rs", content_b, vec![], vec![r]);
+        let (key_a, file_a) = make_file("src/db.rs", b"pub fn connect() {}", vec![]);
+        let index = make_index_with_reverse(vec![(key_a, file_a), (key_b, file_b)]);
+        let view = index.capture_find_dependents_view("src/db.rs");
+        let result = find_dependents_dot(&view, "src/db.rs", &OutputLimits::default());
+        assert!(
+            result.starts_with("digraph dependents {"),
+            "should start with digraph, got: {result}"
+        );
+        assert!(result.contains("src/db.rs"), "should mention target file");
+        assert!(
+            result.contains("src/handler.rs"),
+            "should mention dependent"
+        );
+        assert!(result.ends_with('}'), "should end with closing brace");
+    }
+
+    #[test]
+    fn test_find_dependents_dot_empty() {
+        let (key, file) = make_file("src/db.rs", b"", vec![]);
+        let index = make_index_with_reverse(vec![(key, file)]);
+        let view = index.capture_find_dependents_view("src/db.rs");
+        let result = find_dependents_dot(&view, "src/db.rs", &OutputLimits::default());
+        assert_eq!(result, "No dependents found for \"src/db.rs\"");
     }
 
     // ─── context_bundle_result tests ──────────────────────────────────────
