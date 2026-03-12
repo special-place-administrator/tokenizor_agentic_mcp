@@ -118,10 +118,95 @@ pub enum SupportTier {
     Unsupported,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum FileClass {
+    Code,
+    Text,
+    Binary,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct FileClassification {
+    pub class: FileClass,
+    pub is_generated: bool,
+    pub is_test: bool,
+    pub is_vendor: bool,
+}
+
+impl FileClassification {
+    pub fn for_code_path(relative_path: &str) -> Self {
+        let lower = relative_path.replace('\\', "/").to_ascii_lowercase();
+        let segments: Vec<&str> = lower
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect();
+        let basename = segments.last().copied().unwrap_or("");
+        let stem = basename
+            .rsplit_once('.')
+            .map(|(name, _)| name)
+            .unwrap_or(basename);
+
+        let is_test = segments
+            .iter()
+            .any(|segment| matches!(*segment, "tests" | "test" | "__tests__" | "spec"))
+            || stem.starts_with("test_")
+            || stem.ends_with("_test")
+            || stem.ends_with(".test")
+            || stem.ends_with("_spec")
+            || stem.ends_with(".spec");
+
+        let is_vendor = segments.iter().any(|segment| {
+            matches!(
+                *segment,
+                "vendor"
+                    | "third_party"
+                    | "third-party"
+                    | "node_modules"
+                    | ".venv"
+                    | "venv"
+                    | "site-packages"
+                    | "pods"
+            )
+        });
+
+        let is_generated = segments.iter().any(|segment| {
+            matches!(
+                *segment,
+                "generated" | "__generated__" | "generated-sources"
+            )
+        }) || basename.contains(".generated.")
+            || basename.contains(".gen.")
+            || basename.ends_with(".g.dart")
+            || basename.ends_with(".pb.go")
+            || basename.ends_with(".designer.cs")
+            || basename.ends_with(".min.js");
+
+        Self {
+            class: FileClass::Code,
+            is_generated,
+            is_test,
+            is_vendor,
+        }
+    }
+
+    pub const fn is_code(&self) -> bool {
+        matches!(self.class, FileClass::Code)
+    }
+
+    pub const fn is_text(&self) -> bool {
+        matches!(self.class, FileClass::Text)
+    }
+
+    pub const fn is_binary(&self) -> bool {
+        matches!(self.class, FileClass::Binary)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileProcessingResult {
     pub relative_path: String,
     pub language: LanguageId,
+    pub classification: FileClassification,
     pub outcome: FileOutcome,
     pub symbols: Vec<SymbolRecord>,
     pub byte_len: u64,
@@ -389,6 +474,7 @@ mod tests {
         let result = FileProcessingResult {
             relative_path: "test.rs".to_string(),
             language: LanguageId::Rust,
+            classification: FileClassification::for_code_path("test.rs"),
             outcome: FileOutcome::Processed,
             symbols: vec![],
             byte_len: 0,
@@ -398,6 +484,30 @@ mod tests {
         };
         assert!(result.references.is_empty());
         assert!(result.alias_map.is_empty());
+    }
+
+    #[test]
+    fn test_file_classification_for_code_path_marks_code_only_by_default() {
+        let classification = FileClassification::for_code_path("src/lib.rs");
+
+        assert!(classification.is_code());
+        assert!(!classification.is_text());
+        assert!(!classification.is_binary());
+        assert!(!classification.is_generated);
+        assert!(!classification.is_test);
+        assert!(!classification.is_vendor);
+    }
+
+    #[test]
+    fn test_file_classification_for_code_path_marks_noise_tags_from_path() {
+        let generated = FileClassification::for_code_path("src/generated/client.pb.go");
+        assert!(generated.is_generated);
+
+        let test_file = FileClassification::for_code_path("tests/parser_spec.rs");
+        assert!(test_file.is_test);
+
+        let vendor_file = FileClassification::for_code_path("node_modules/pkg/index.js");
+        assert!(vendor_file.is_vendor);
     }
 
     #[test]

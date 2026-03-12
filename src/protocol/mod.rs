@@ -4,7 +4,7 @@ pub mod resources;
 pub mod tools;
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 use rmcp::RoleServer;
 use rmcp::handler::server::router::prompt::PromptRouter;
@@ -17,12 +17,9 @@ use rmcp::model::{
 use rmcp::service::RequestContext;
 use rmcp::{ServerHandler, prompt_handler, tool_handler};
 
-use crate::live_index::store::LiveIndex;
+use crate::live_index::SharedIndex;
 use crate::sidecar::TokenStats;
 use crate::watcher::WatcherInfo;
-
-/// Thread-safe shared handle to the index (re-exported for convenience).
-pub type SharedIndex = Arc<RwLock<LiveIndex>>;
 
 /// The MCP server struct.
 ///

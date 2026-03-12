@@ -43,6 +43,7 @@ fn make_rust_file(path: &str, fn_name: &str) -> IndexedFile {
     IndexedFile {
         relative_path: path.to_string(),
         language: LanguageId::Rust,
+        classification: tokenizor_agentic_mcp::domain::FileClassification::for_code_path(path),
         content: content.clone(),
         symbols: vec![SymbolRecord {
             name: fn_name.to_string(),

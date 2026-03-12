@@ -7,6 +7,43 @@ use tokenizor_agentic_mcp::{
     cli, daemon, discovery, live_index, observability, protocol, sidecar, watcher,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StartupIndexLogView {
+    Ready {
+        file_count: usize,
+        symbol_count: usize,
+        parsed_count: usize,
+        partial_parse_count: usize,
+        failed_count: usize,
+        duration_ms: u64,
+    },
+    Degraded {
+        summary: String,
+    },
+}
+
+fn startup_index_log_view(
+    published: &live_index::PublishedIndexState,
+) -> Option<StartupIndexLogView> {
+    match published.status {
+        live_index::PublishedIndexStatus::Ready => Some(StartupIndexLogView::Ready {
+            file_count: published.file_count,
+            symbol_count: published.symbol_count,
+            parsed_count: published.parsed_count,
+            partial_parse_count: published.partial_parse_count,
+            failed_count: published.failed_count,
+            duration_ms: published.load_duration.as_millis() as u64,
+        }),
+        live_index::PublishedIndexStatus::Degraded => Some(StartupIndexLogView::Degraded {
+            summary: published
+                .degraded_summary
+                .clone()
+                .unwrap_or_else(|| "circuit breaker tripped".to_string()),
+        }),
+        live_index::PublishedIndexStatus::Empty | live_index::PublishedIndexStatus::Loading => None,
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
     match cli.command {
@@ -117,12 +154,14 @@ async fn run_local_mcp_server_async(
                 .map(|(k, v)| (k.clone(), v.mtime_secs))
                 .collect();
 
+            let live = persist::snapshot_to_live_index(snapshot);
             tracing::info!(
                 files = file_count,
+                load_source = ?live.load_source(),
+                snapshot_verify_state = ?live.snapshot_verify_state(),
                 "loaded serialized index from .tokenizor/index.bin"
             );
-            let live = persist::snapshot_to_live_index(snapshot);
-            let shared: live_index::SharedIndex = std::sync::Arc::new(std::sync::RwLock::new(live));
+            let shared: live_index::SharedIndex = live_index::SharedIndexHandle::shared(live);
 
             // Spawn background verification to reconcile against current disk state.
             let bg_index = shared.clone();
@@ -137,26 +176,31 @@ async fn run_local_mcp_server_async(
             live_index::LiveIndex::load(&root)?
         };
 
-        let guard = index.read().expect("lock poisoned");
-        match guard.index_state() {
-            live_index::IndexState::Ready => {
-                let stats = guard.health_stats();
+        let published = index.published_state();
+        match startup_index_log_view(&published) {
+            Some(StartupIndexLogView::Ready {
+                file_count,
+                symbol_count,
+                parsed_count,
+                partial_parse_count,
+                failed_count,
+                duration_ms,
+            }) => {
                 tracing::info!(
-                    files = stats.file_count,
-                    symbols = stats.symbol_count,
-                    parsed = stats.parsed_count,
-                    partial = stats.partial_parse_count,
-                    failed = stats.failed_count,
-                    duration_ms = stats.load_duration.as_millis() as u64,
+                    files = file_count,
+                    symbols = symbol_count,
+                    parsed = parsed_count,
+                    partial = partial_parse_count,
+                    failed = failed_count,
+                    duration_ms,
                     "LiveIndex ready"
                 );
             }
-            live_index::IndexState::CircuitBreakerTripped { ref summary } => {
+            Some(StartupIndexLogView::Degraded { summary }) => {
                 tracing::error!(%summary, "circuit breaker tripped — index degraded");
             }
-            _ => {}
+            None => {}
         }
-        drop(guard);
 
         let name = root
             .file_name()
@@ -222,8 +266,7 @@ async fn run_local_mcp_server_async(
     // Serialize index to disk on clean shutdown.
     // Only serialize when auto-index is enabled (i.e., we have a real project root).
     if let Some(ref root) = watcher_root {
-        let guard = index.read().expect("lock not poisoned");
-        match persist::serialize_index(&guard, root) {
+        match persist::serialize_shared_index(&index, root) {
             Ok(()) => tracing::info!("index serialized to .tokenizor/index.bin"),
             Err(e) => tracing::warn!("failed to serialize index on shutdown: {e}"),
         }
@@ -234,4 +277,61 @@ async fn run_local_mcp_server_async(
     tracing::info!("sidecar shutdown signal sent");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StartupIndexLogView, startup_index_log_view};
+    use std::time::{Duration, SystemTime};
+    use tokenizor_agentic_mcp::live_index::{
+        IndexLoadSource, PublishedIndexState, PublishedIndexStatus, SnapshotVerifyState,
+    };
+
+    fn published_state(status: PublishedIndexStatus) -> PublishedIndexState {
+        PublishedIndexState {
+            generation: 7,
+            status,
+            degraded_summary: None,
+            file_count: 12,
+            parsed_count: 10,
+            partial_parse_count: 1,
+            failed_count: 1,
+            symbol_count: 34,
+            loaded_at_system: SystemTime::now(),
+            load_duration: Duration::from_millis(42),
+            load_source: IndexLoadSource::FreshLoad,
+            snapshot_verify_state: SnapshotVerifyState::NotNeeded,
+            is_empty: false,
+        }
+    }
+
+    #[test]
+    fn test_startup_index_log_view_uses_published_ready_counts() {
+        let published = published_state(PublishedIndexStatus::Ready);
+
+        assert_eq!(
+            startup_index_log_view(&published),
+            Some(StartupIndexLogView::Ready {
+                file_count: 12,
+                symbol_count: 34,
+                parsed_count: 10,
+                partial_parse_count: 1,
+                failed_count: 1,
+                duration_ms: 42,
+            })
+        );
+    }
+
+    #[test]
+    fn test_startup_index_log_view_uses_published_degraded_summary() {
+        let mut published = published_state(PublishedIndexStatus::Degraded);
+        published.degraded_summary = Some("circuit breaker tripped: 3/10 files failed".to_string());
+
+        assert_eq!(
+            startup_index_log_view(&published),
+            Some(StartupIndexLogView::Degraded {
+                summary: "circuit breaker tripped: 3/10 files failed".to_string(),
+            })
+        );
+    }
 }

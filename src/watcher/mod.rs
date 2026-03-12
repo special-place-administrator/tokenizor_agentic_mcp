@@ -9,7 +9,7 @@ use notify_debouncer_full::{
 };
 use tracing::{debug, error, warn};
 
-use crate::domain::LanguageId;
+use crate::domain::{FileClassification, LanguageId};
 use crate::live_index::store::{IndexedFile, SharedIndex};
 use crate::{hash, parsing};
 
@@ -211,8 +211,7 @@ pub(crate) fn maybe_reindex(
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // ENOENT → treat as removal
-            let mut index = shared.write().unwrap();
-            index.remove_file(relative_path);
+            shared.remove_file(relative_path);
             warn!("watcher: file not found, removed from index: {relative_path}");
             return ReindexResult::Removed;
         }
@@ -236,14 +235,16 @@ pub(crate) fn maybe_reindex(
     }
 
     // 3. Parse outside the lock
-    let result = parsing::process_file(relative_path, &bytes, language);
+    let result = parsing::process_file_with_classification(
+        relative_path,
+        &bytes,
+        language,
+        FileClassification::for_code_path(relative_path),
+    );
     let indexed = IndexedFile::from_parse_result(result, bytes);
 
     // 4. Acquire write lock and update
-    {
-        let mut index = shared.write().unwrap();
-        index.update_file(relative_path.to_string(), indexed);
-    }
+    shared.update_file(relative_path.to_string(), indexed);
 
     debug!("watcher: re-indexed {relative_path}");
     ReindexResult::Reindexed
@@ -317,9 +318,7 @@ pub(crate) fn process_events(
 
             match event.kind {
                 EventKind::Remove(_) => {
-                    let mut index = shared.write().unwrap();
-                    index.remove_file(&relative_path);
-                    drop(index);
+                    shared.remove_file(&relative_path);
 
                     let mut info = watcher_info.lock().unwrap();
                     info.events_processed += 1;
@@ -675,11 +674,14 @@ mod tests {
     fn test_maybe_reindex_updates_reverse_index_on_change() {
         use crate::domain::LanguageId;
         use crate::live_index::store::IndexedFile;
-        use std::sync::{Arc, RwLock};
         use tempfile::TempDir;
 
         let tmp = TempDir::new().unwrap();
-        let rs_path = tmp.path().join("src").join("lib.rs");
+        let rs_path = tmp
+            .path()
+            .join("tests")
+            .join("generated")
+            .join("lib.generated.rs");
         std::fs::create_dir_all(rs_path.parent().unwrap()).unwrap();
 
         // --- Initial content: calls `old_function` ---
@@ -687,7 +689,7 @@ mod tests {
         std::fs::write(&rs_path, initial_content).unwrap();
 
         // Build the initial shared index by parsing the file directly.
-        let rel_path = "src/lib.rs";
+        let rel_path = "tests/generated/lib.generated.rs";
         let shared: crate::live_index::store::SharedIndex = {
             let result = crate::parsing::process_file(rel_path, initial_content, LanguageId::Rust);
             let indexed = IndexedFile::from_parse_result(result, initial_content.to_vec());
@@ -698,11 +700,15 @@ mod tests {
                 load_duration: std::time::Duration::ZERO,
                 cb_state: crate::live_index::store::CircuitBreakerState::new(0.20),
                 is_empty: false,
+                load_source: crate::live_index::store::IndexLoadSource::FreshLoad,
+                snapshot_verify_state: crate::live_index::store::SnapshotVerifyState::NotNeeded,
                 reverse_index: std::collections::HashMap::new(),
+                files_by_basename: std::collections::HashMap::new(),
+                files_by_dir_component: std::collections::HashMap::new(),
                 trigram_index: crate::live_index::trigram::TrigramIndex::new(),
             };
             index.update_file(rel_path.to_string(), indexed);
-            Arc::new(RwLock::new(index))
+            crate::live_index::SharedIndexHandle::shared(index)
         };
 
         // Confirm the reverse index contains "old_function".
@@ -737,6 +743,12 @@ mod tests {
                 !idx.reverse_index.contains_key("old_function"),
                 "reverse_index should NOT contain 'old_function' after re-index"
             );
+            let file = idx
+                .get_file(rel_path)
+                .expect("reindexed file should still exist");
+            assert!(file.classification.is_code());
+            assert!(file.classification.is_test);
+            assert!(file.classification.is_generated);
         }
     }
 
@@ -745,7 +757,6 @@ mod tests {
     fn test_maybe_reindex_hash_skip_on_unchanged_content() {
         use crate::domain::LanguageId;
         use crate::live_index::store::IndexedFile;
-        use std::sync::{Arc, RwLock};
         use tempfile::TempDir;
 
         let tmp = TempDir::new().unwrap();
@@ -764,11 +775,15 @@ mod tests {
                 load_duration: std::time::Duration::ZERO,
                 cb_state: crate::live_index::store::CircuitBreakerState::new(0.20),
                 is_empty: false,
+                load_source: crate::live_index::store::IndexLoadSource::FreshLoad,
+                snapshot_verify_state: crate::live_index::store::SnapshotVerifyState::NotNeeded,
                 reverse_index: std::collections::HashMap::new(),
+                files_by_basename: std::collections::HashMap::new(),
+                files_by_dir_component: std::collections::HashMap::new(),
                 trigram_index: crate::live_index::trigram::TrigramIndex::new(),
             };
             index.update_file(rel_path.to_string(), indexed);
-            Arc::new(RwLock::new(index))
+            crate::live_index::SharedIndexHandle::shared(index)
         };
 
         // File content unchanged — expect HashSkip.

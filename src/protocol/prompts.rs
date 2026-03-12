@@ -163,7 +163,7 @@ fn build_failure_triage_instructions(
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex, RwLock};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use crate::live_index::store::{CircuitBreakerState, LiveIndex};
@@ -179,12 +179,16 @@ mod tests {
             load_duration: Duration::from_millis(1),
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: false,
+            load_source: crate::live_index::store::IndexLoadSource::FreshLoad,
+            snapshot_verify_state: crate::live_index::store::SnapshotVerifyState::NotNeeded,
             reverse_index: HashMap::new(),
+            files_by_basename: HashMap::new(),
+            files_by_dir_component: HashMap::new(),
             trigram_index: crate::live_index::trigram::TrigramIndex::new(),
         };
 
         TokenizorServer::new(
-            Arc::new(RwLock::new(index)),
+            crate::live_index::SharedIndexHandle::shared(index),
             "prompt_project".to_string(),
             Arc::new(Mutex::new(WatcherInfo::default())),
             None,

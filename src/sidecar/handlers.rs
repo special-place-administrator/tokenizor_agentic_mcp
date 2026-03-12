@@ -86,26 +86,18 @@ fn resolve_repo_root(state: &SidecarState) -> Result<std::path::PathBuf, StatusC
 pub async fn health_handler(
     State(state): State<SidecarState>,
 ) -> Result<Json<HealthResponse>, StatusCode> {
-    let guard = state
-        .index
-        .read()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let published = state.index.published_state();
 
-    let file_count = guard.file_count();
-    let symbol_count = guard.symbol_count();
-    let state_str = format!("{:?}", guard.index_state());
-    let uptime_secs = guard
-        .loaded_at_system()
+    let uptime_secs = published
+        .loaded_at_system
         .elapsed()
         .unwrap_or_default()
         .as_secs();
 
-    drop(guard);
-
     Ok(Json(HealthResponse {
-        file_count,
-        symbol_count,
-        index_state: state_str,
+        file_count: published.file_count,
+        symbol_count: published.symbol_count,
+        index_state: published.status_label().to_string(),
         uptime_secs,
     }))
 }
@@ -317,13 +309,7 @@ async fn handle_new_file_impact(
 
     // Index the file.
     let indexed = crate::live_index::store::IndexedFile::from_parse_result(result, bytes);
-    {
-        let mut write_guard = state
-            .index
-            .write()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        write_guard.update_file(path.to_string(), indexed);
-    }
+    state.index.update_file(path.to_string(), indexed);
 
     // Update symbol cache with empty pre-edit snapshot (it's new, no pre-state).
     {
@@ -431,13 +417,7 @@ async fn handle_edit_impact(
         .collect();
 
     let indexed = crate::live_index::store::IndexedFile::from_parse_result(result, bytes);
-    {
-        let mut write_guard = state
-            .index
-            .write()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        write_guard.update_file(path.to_string(), indexed);
-    }
+    state.index.update_file(path.to_string(), indexed);
 
     // Compute symbol diff.
     let added: Vec<&SymbolSnapshot> = post_symbols
@@ -962,6 +942,7 @@ mod tests {
         IndexedFile {
             relative_path: path.to_string(),
             language: LanguageId::Rust,
+            classification: crate::domain::FileClassification::for_code_path(path),
             content: b"fn test() {}".to_vec(),
             symbols,
             parse_status: status,
@@ -976,8 +957,10 @@ mod tests {
         files: Vec<(&str, IndexedFile)>,
     ) -> crate::live_index::store::SharedIndex {
         use crate::live_index::trigram::TrigramIndex;
-        let files_map: HashMap<String, IndexedFile> =
-            files.into_iter().map(|(p, f)| (p.to_string(), f)).collect();
+        let files_map: HashMap<String, std::sync::Arc<IndexedFile>> = files
+            .into_iter()
+            .map(|(p, f)| (p.to_string(), std::sync::Arc::new(f)))
+            .collect();
         let trigram_index = TrigramIndex::build_from_files(&files_map);
         let mut index = LiveIndex {
             files: files_map,
@@ -986,11 +969,16 @@ mod tests {
             load_duration: Duration::from_millis(10),
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: false,
+            load_source: crate::live_index::store::IndexLoadSource::FreshLoad,
+            snapshot_verify_state: crate::live_index::store::SnapshotVerifyState::NotNeeded,
             reverse_index: HashMap::new(),
+            files_by_basename: HashMap::new(),
+            files_by_dir_component: HashMap::new(),
             trigram_index,
         };
         index.rebuild_reverse_index();
-        Arc::new(RwLock::new(index))
+        index.rebuild_path_indices();
+        crate::live_index::SharedIndexHandle::shared(index)
     }
 
     /// Build a SidecarState wrapping a SharedIndex for use in tests.

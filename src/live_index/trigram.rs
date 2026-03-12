@@ -34,10 +34,13 @@ impl TrigramIndex {
     }
 
     /// Build a trigram index from all files in the given map.
-    pub fn build_from_files(files: &HashMap<String, IndexedFile>) -> Self {
+    pub fn build_from_files<V>(files: &HashMap<String, V>) -> Self
+    where
+        V: AsRef<IndexedFile>,
+    {
         let mut idx = Self::new();
         for (path, file) in files {
-            idx.insert_file(path, &file.content);
+            idx.insert_file(path, &file.as_ref().content);
         }
         idx
     }
@@ -49,7 +52,10 @@ impl TrigramIndex {
     /// then verifies each candidate with a byte-level contains check.
     ///
     /// Returns a `Vec<String>` of matching relative paths.
-    pub fn search(&self, query: &[u8], files: &HashMap<String, IndexedFile>) -> Vec<String> {
+    pub fn search<V>(&self, query: &[u8], files: &HashMap<String, V>) -> Vec<String>
+    where
+        V: AsRef<IndexedFile>,
+    {
         if query.is_empty() {
             return Vec::new();
         }
@@ -90,6 +96,7 @@ impl TrigramIndex {
                 let file = files.get(path)?;
                 // Case-insensitive byte-level containment check
                 let content_lower: Vec<u8> = file
+                    .as_ref()
                     .content
                     .iter()
                     .map(|b| b.to_ascii_lowercase())
@@ -140,12 +147,16 @@ impl TrigramIndex {
     // ── Private helpers ──────────────────────────────────────────────────────
 
     /// Linear scan through all files for short queries (< 3 bytes).
-    fn linear_scan(&self, query: &[u8], files: &HashMap<String, IndexedFile>) -> Vec<String> {
+    fn linear_scan<V>(&self, query: &[u8], files: &HashMap<String, V>) -> Vec<String>
+    where
+        V: AsRef<IndexedFile>,
+    {
         let query_lower: Vec<u8> = query.iter().map(|b| b.to_ascii_lowercase()).collect();
         files
             .iter()
             .filter_map(|(path, file)| {
                 let content_lower: Vec<u8> = file
+                    .as_ref()
                     .content
                     .iter()
                     .map(|b| b.to_ascii_lowercase())
@@ -241,6 +252,7 @@ mod tests {
             IndexedFile {
                 relative_path: path.to_string(),
                 language: LanguageId::Rust,
+                classification: crate::domain::FileClassification::for_code_path(path),
                 content: content.to_vec(),
                 symbols: vec![],
                 parse_status: ParseStatus::Parsed,

@@ -1,10 +1,18 @@
 pub mod persist;
 pub mod query;
+pub mod search;
 pub mod store;
 pub mod trigram;
 
-pub use query::HealthStats;
+pub use query::{
+    ContextBundleFoundView, ContextBundleReferenceView, ContextBundleSectionView,
+    ContextBundleView, DependentFileView, DependentLineView, FileContentView, FileOutlineView,
+    FindDependentsView, FindReferencesView, HealthStats, ReferenceContextLineView,
+    ReferenceFileView, ReferenceHitView, RepoOutlineFileView, RepoOutlineView, ResolvePathView,
+    SearchFilesHit, SearchFilesTier, SearchFilesView, SymbolDetailView, WhatChangedTimestampView,
+};
 pub use store::{
-    CircuitBreakerState, IndexState, IndexedFile, LiveIndex, ParseStatus, ReferenceLocation,
-    SharedIndex,
+    CircuitBreakerState, IndexLoadSource, IndexState, IndexedFile, LiveIndex, ParseStatus,
+    PublishedIndexState, PublishedIndexStatus, ReferenceLocation, SharedIndex, SharedIndexHandle,
+    SnapshotVerifyState,
 };

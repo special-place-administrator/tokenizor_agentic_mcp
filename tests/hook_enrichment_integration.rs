@@ -66,6 +66,7 @@ fn make_rust_file_with_symbols(path: &str, symbols: Vec<(&str, SymbolKind)>) -> 
     IndexedFile {
         relative_path: path.to_string(),
         language: LanguageId::Rust,
+        classification: tokenizor_agentic_mcp::domain::FileClassification::for_code_path(path),
         content,
         symbols: symbol_records,
         parse_status: ParseStatus::Parsed,

@@ -330,7 +330,7 @@ where
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex, RwLock};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use crate::domain::{LanguageId, SymbolKind, SymbolRecord};
@@ -350,6 +350,7 @@ mod tests {
         let file = IndexedFile {
             relative_path: "src/main.rs".to_string(),
             language: LanguageId::Rust,
+            classification: crate::domain::FileClassification::for_code_path("src/main.rs"),
             content: b"fn main() {}".to_vec(),
             symbols: vec![symbol],
             parse_status: ParseStatus::Parsed,
@@ -359,7 +360,7 @@ mod tests {
             alias_map: HashMap::new(),
         };
         let mut files = HashMap::new();
-        files.insert("src/main.rs".to_string(), file);
+        files.insert("src/main.rs".to_string(), std::sync::Arc::new(file));
         let mut index = LiveIndex {
             files,
             loaded_at: Instant::now(),
@@ -367,12 +368,17 @@ mod tests {
             load_duration: Duration::from_millis(10),
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: false,
+            load_source: crate::live_index::store::IndexLoadSource::FreshLoad,
+            snapshot_verify_state: crate::live_index::store::SnapshotVerifyState::NotNeeded,
             reverse_index: HashMap::new(),
+            files_by_basename: HashMap::new(),
+            files_by_dir_component: HashMap::new(),
             trigram_index: crate::live_index::trigram::TrigramIndex::new(),
         };
         index.rebuild_reverse_index();
+        index.rebuild_path_indices();
         TokenizorServer::new(
-            Arc::new(RwLock::new(index)),
+            crate::live_index::SharedIndexHandle::shared(index),
             "test_project".to_string(),
             Arc::new(Mutex::new(WatcherInfo::default())),
             None,

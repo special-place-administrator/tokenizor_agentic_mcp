@@ -2,7 +2,12 @@
 ///
 /// All functions take `&LiveIndex` (or data derived from it) and return `String`.
 /// No I/O, no async. Output matches the locked formats defined in CONTEXT.md.
-use crate::live_index::LiveIndex;
+use crate::live_index::{
+    ContextBundleSectionView, ContextBundleView, FileContentView, FileOutlineView,
+    FindDependentsView, FindReferencesView, HealthStats, IndexedFile, LiveIndex,
+    PublishedIndexState, RepoOutlineFileView, RepoOutlineView, ResolvePathView,
+    SearchFilesTier, SearchFilesView, SymbolDetailView, WhatChangedTimestampView, search,
+};
 
 /// Format the file outline for a given path.
 ///
@@ -10,18 +15,23 @@ use crate::live_index::LiveIndex;
 /// Body: each symbol indented by `depth * 2` spaces, then `{kind:<12} {name:<30} {start}-{end}`
 /// Not-found: "File not found: {path}"
 pub fn file_outline(index: &LiveIndex, path: &str) -> String {
-    let file = match index.get_file(path) {
-        Some(f) => f,
-        None => return not_found_file(path),
-    };
+    match index.capture_shared_file(path) {
+        Some(file) => file_outline_from_indexed_file(file.as_ref()),
+        None => not_found_file(path),
+    }
+}
 
+pub fn file_outline_from_indexed_file(file: &IndexedFile) -> String {
+    render_file_outline(&file.relative_path, &file.symbols)
+}
+
+fn render_file_outline(relative_path: &str, symbols: &[crate::domain::SymbolRecord]) -> String {
     let mut lines = Vec::new();
-    lines.push(format!("{}  ({} symbols)", path, file.symbols.len()));
+    lines.push(format!("{}  ({} symbols)", relative_path, symbols.len()));
 
-    for sym in &file.symbols {
+    for sym in symbols {
         let indent = "  ".repeat(sym.depth as usize);
         let kind_str = sym.kind.to_string();
-        // Format: indent + kind (left-padded to 12) + name (left-padded to 30) + line range
         lines.push(format!(
             "{}{:<12} {:<30} {}-{}",
             indent, kind_str, sym.name, sym.line_range.0, sym.line_range.1
@@ -29,6 +39,13 @@ pub fn file_outline(index: &LiveIndex, path: &str) -> String {
     }
 
     lines.join("\n")
+}
+
+/// Compatibility renderer for `FileOutlineView`.
+///
+/// Main hot-path readers should prefer `file_outline_from_indexed_file()`.
+pub fn file_outline_view(view: &FileOutlineView) -> String {
+    render_file_outline(&view.relative_path, &view.symbols)
 }
 
 /// Return the full source body for a named symbol plus a footer.
@@ -41,12 +58,51 @@ pub fn symbol_detail(
     name: &str,
     kind_filter: Option<&str>,
 ) -> String {
-    let file = match index.get_file(path) {
-        Some(f) => f,
-        None => return not_found_file(path),
-    };
+    match index.capture_shared_file(path) {
+        Some(file) => symbol_detail_from_indexed_file(file.as_ref(), name, kind_filter),
+        None => not_found_file(path),
+    }
+}
 
-    let sym = file.symbols.iter().find(|s| {
+pub fn symbol_detail_from_indexed_file(
+    file: &IndexedFile,
+    name: &str,
+    kind_filter: Option<&str>,
+) -> String {
+    render_symbol_detail(
+        &file.relative_path,
+        &file.content,
+        &file.symbols,
+        name,
+        kind_filter,
+    )
+}
+
+/// Compatibility renderer for `SymbolDetailView`.
+///
+/// Main hot-path readers should prefer `symbol_detail_from_indexed_file()`.
+pub fn symbol_detail_view(
+    view: &SymbolDetailView,
+    name: &str,
+    kind_filter: Option<&str>,
+) -> String {
+    render_symbol_detail(
+        &view.relative_path,
+        &view.content,
+        &view.symbols,
+        name,
+        kind_filter,
+    )
+}
+
+fn render_symbol_detail(
+    relative_path: &str,
+    content: &[u8],
+    symbols: &[crate::domain::SymbolRecord],
+    name: &str,
+    kind_filter: Option<&str>,
+) -> String {
+    let sym = symbols.iter().find(|s| {
         s.name == name
             && kind_filter
                 .map(|k| s.kind.to_string().eq_ignore_ascii_case(k))
@@ -54,14 +110,14 @@ pub fn symbol_detail(
     });
 
     match sym {
-        None => not_found_symbol(index, path, name),
+        None => render_not_found_symbol(relative_path, symbols, name),
         Some(s) => {
             let start = s.byte_range.0 as usize;
             let end = s.byte_range.1 as usize;
-            let body = if end <= file.content.len() {
-                String::from_utf8_lossy(&file.content[start..end]).into_owned()
+            let body = if end <= content.len() {
+                String::from_utf8_lossy(&content[start..end]).into_owned()
             } else {
-                String::from_utf8_lossy(&file.content).into_owned()
+                String::from_utf8_lossy(content).into_owned()
             };
             let byte_count = end.saturating_sub(start);
             format!(
@@ -72,27 +128,21 @@ pub fn symbol_detail(
     }
 }
 
-/// 3-tier match classification for `search_symbols_result`.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum MatchTier {
-    /// Query == symbol name (case-insensitive).
-    Exact = 0,
-    /// Symbol name starts with query (case-insensitive).
-    Prefix = 1,
-    /// Symbol name contains query elsewhere (case-insensitive).
-    Substring = 2,
+pub fn code_slice_view(path: &str, slice: &[u8]) -> String {
+    let text = String::from_utf8_lossy(slice).into_owned();
+    format!("{path}\n{text}")
 }
 
-/// A single scored symbol match for tiered sorting.
-struct ScoredMatch {
-    tier: MatchTier,
-    /// Tiebreaker within tier: alphabetical key (name) for Exact, length for Prefix, match offset for Substring.
-    tiebreak: u32,
-    /// Display name (symbol name, for secondary tiebreaking).
-    name: String,
-    path: String,
-    kind: String,
-    line: u32,
+pub fn code_slice_from_indexed_file(
+    file: &IndexedFile,
+    start_byte: usize,
+    end_byte: Option<usize>,
+) -> String {
+    let end = end_byte
+        .unwrap_or(file.content.len())
+        .min(file.content.len());
+    let start = start_byte.min(end);
+    code_slice_view(&file.relative_path, &file.content[start..end])
 }
 
 /// Search for symbols matching a query (case-insensitive), with 3-tier scored ranking.
@@ -119,87 +169,48 @@ pub fn search_symbols_result_with_kind(
     query: &str,
     kind_filter: Option<&str>,
 ) -> String {
-    let query_lower = query.to_lowercase();
-    const RESULT_LIMIT: usize = 50;
+    let result = search::search_symbols(
+        index,
+        query,
+        kind_filter,
+        search::ResultLimit::symbol_search_default().get(),
+    );
+    search_symbols_result_view(&result, query)
+}
 
-    let mut matches: Vec<ScoredMatch> = Vec::new();
-    let mut files_with_hits: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    let mut paths: Vec<&String> = index.all_files().map(|(p, _)| p).collect();
-    paths.sort();
-
-    for path in paths {
-        let file = index.get_file(path).unwrap();
-        for sym in &file.symbols {
-            if let Some(filter) = kind_filter
-                && !filter.eq_ignore_ascii_case("all")
-                && !sym.kind.to_string().eq_ignore_ascii_case(filter)
-            {
-                continue;
-            }
-            let name_lower = sym.name.to_lowercase();
-            if !name_lower.contains(&query_lower) {
-                continue;
-            }
-
-            let (tier, tiebreak) = if name_lower == query_lower {
-                // Exact: tiebreak by alphabetical order (stored as 0; sorted by name below)
-                (MatchTier::Exact, 0u32)
-            } else if name_lower.starts_with(&query_lower) {
-                // Prefix: shorter names win
-                (MatchTier::Prefix, sym.name.len() as u32)
-            } else {
-                // Substring: earlier match position wins
-                let pos = name_lower.find(&query_lower).unwrap_or(0) as u32;
-                (MatchTier::Substring, pos)
-            };
-
-            files_with_hits.insert(path.clone());
-            matches.push(ScoredMatch {
-                tier,
-                tiebreak,
-                name: sym.name.clone(),
-                path: path.clone(),
-                kind: sym.kind.to_string(),
-                line: sym.line_range.0,
-            });
-        }
-    }
-
-    if matches.is_empty() {
+pub fn search_symbols_result_view(result: &search::SymbolSearchResult, query: &str) -> String {
+    if result.hits.is_empty() {
         return format!("No symbols matching '{query}'");
     }
 
-    // Sort by (tier, tiebreak, name)
-    matches.sort_by(|a, b| {
-        a.tier
-            .cmp(&b.tier)
-            .then(a.tiebreak.cmp(&b.tiebreak))
-            .then(a.name.cmp(&b.name))
-    });
+    let mut lines = vec![format!(
+        "{} matches in {} files",
+        result.hits.len(),
+        result.file_count
+    )];
 
-    let total_matches = matches.len().min(RESULT_LIMIT);
-    let file_count = files_with_hits.len();
-    let mut lines = vec![format!("{total_matches} matches in {file_count} files")];
-
-    // Group into tier sections
-    let limited: Vec<&ScoredMatch> = matches.iter().take(RESULT_LIMIT).collect();
-
-    let mut last_tier: Option<&MatchTier> = None;
-    for m in &limited {
-        if last_tier != Some(&m.tier) {
-            last_tier = Some(&m.tier);
-            let header = match m.tier {
-                MatchTier::Exact => "\u{2500}\u{2500} Exact matches \u{2500}\u{2500}",
-                MatchTier::Prefix => "\u{2500}\u{2500} Prefix matches \u{2500}\u{2500}",
-                MatchTier::Substring => "\u{2500}\u{2500} Substring matches \u{2500}\u{2500}",
+    let mut last_tier: Option<search::SymbolMatchTier> = None;
+    for hit in &result.hits {
+        if last_tier != Some(hit.tier) {
+            last_tier = Some(hit.tier);
+            let header = match hit.tier {
+                search::SymbolMatchTier::Exact => "\u{2500}\u{2500} Exact matches \u{2500}\u{2500}",
+                search::SymbolMatchTier::Prefix => {
+                    "\u{2500}\u{2500} Prefix matches \u{2500}\u{2500}"
+                }
+                search::SymbolMatchTier::Substring => {
+                    "\u{2500}\u{2500} Substring matches \u{2500}\u{2500}"
+                }
             };
             if lines.len() > 1 {
-                lines.push(String::new()); // blank line between sections
+                lines.push(String::new());
             }
             lines.push(header.to_string());
         }
-        lines.push(format!("  {}: {} {}  ({})", m.line, m.kind, m.name, m.path));
+        lines.push(format!(
+            "  {}: {} {}  ({})",
+            hit.line, hit.kind, hit.name, hit.path
+        ));
     }
 
     lines.join("\n")
@@ -223,126 +234,40 @@ pub fn search_text_result_with_options(
     terms: Option<&[String]>,
     regex: bool,
 ) -> String {
-    let normalized_terms: Vec<String> = match terms {
-        Some(raw_terms) if !raw_terms.is_empty() => raw_terms
-            .iter()
-            .map(|term| term.trim())
-            .filter(|term| !term.is_empty())
-            .map(ToOwned::to_owned)
-            .collect(),
-        _ => query
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .map(|text| vec![text.to_string()])
-            .unwrap_or_default(),
-    };
-
-    if regex {
-        let pattern = query
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .unwrap_or("");
-        if pattern.is_empty() {
-            return "Regex search requires a non-empty query.".to_string();
-        }
-
-        let regex = match regex::Regex::new(pattern) {
-            Ok(regex) => regex,
-            Err(error) => return format!("Invalid regex '{pattern}': {error}"),
-        };
-
-        return collect_text_matches(
-            index,
-            index.all_files().map(|(path, _)| path.clone()).collect(),
-            |line| regex.is_match(line),
-            &format!("regex '{pattern}'"),
-        );
-    }
-
-    if normalized_terms.is_empty() {
-        return "Search requires a non-empty query or terms.".to_string();
-    }
-
-    let mut candidate_paths = std::collections::HashSet::new();
-    for term in &normalized_terms {
-        for path in index.trigram_index.search(term.as_bytes(), &index.files) {
-            candidate_paths.insert(path);
-        }
-    }
-
-    let lowered_terms: Vec<String> = normalized_terms
-        .iter()
-        .map(|term| term.to_lowercase())
-        .collect();
-
-    let label = if normalized_terms.len() == 1 {
-        format!("'{}'", normalized_terms[0])
-    } else {
-        format!("terms [{}]", normalized_terms.join(", "))
-    };
-
-    collect_text_matches(
-        index,
-        candidate_paths.into_iter().collect(),
-        |line| {
-            let lowered = line.to_lowercase();
-            lowered_terms.iter().any(|term| lowered.contains(term))
-        },
-        &label,
-    )
+    let result = search::search_text(index, query, terms, regex);
+    search_text_result_view(result)
 }
 
-fn collect_text_matches<F>(
-    index: &LiveIndex,
-    mut candidate_paths: Vec<String>,
-    mut is_match: F,
-    label: &str,
-) -> String
-where
-    F: FnMut(&str) -> bool,
-{
-    candidate_paths.sort();
-
-    let mut by_file: Vec<(String, Vec<String>)> = Vec::new();
-    let mut total_matches = 0usize;
-
-    for path in &candidate_paths {
-        let file = match index.get_file(path) {
-            Some(file) => file,
-            None => continue,
-        };
-        let content_str = String::from_utf8_lossy(&file.content);
-
-        let matches: Vec<String> = content_str
-            .lines()
-            .enumerate()
-            .filter_map(|(line_idx, line)| {
-                let line = line.trim_end_matches('\r');
-                if is_match(line) {
-                    Some(format!("  {}: {}", line_idx + 1, line))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if !matches.is_empty() {
-            total_matches += matches.len();
-            by_file.push((path.clone(), matches));
+pub fn search_text_result_view(
+    result: Result<search::TextSearchResult, search::TextSearchError>,
+) -> String {
+    let result = match result {
+        Ok(result) => result,
+        Err(search::TextSearchError::EmptyRegexQuery) => {
+            return "Regex search requires a non-empty query.".to_string();
         }
-    }
+        Err(search::TextSearchError::EmptyQueryOrTerms) => {
+            return "Search requires a non-empty query or terms.".to_string();
+        }
+        Err(search::TextSearchError::InvalidRegex { pattern, error }) => {
+            return format!("Invalid regex '{pattern}': {error}");
+        }
+    };
 
-    if by_file.is_empty() {
-        return format!("No matches for {label}");
+    if result.files.is_empty() {
+        return format!("No matches for {}", result.label);
     }
 
     let mut lines = vec![format!(
-        "{total_matches} matches in {} files",
-        by_file.len()
+        "{} matches in {} files",
+        result.total_matches,
+        result.files.len()
     )];
-    for (path, matches) in &by_file {
-        lines.push(path.clone());
-        lines.extend_from_slice(matches);
+    for file in &result.files {
+        lines.push(file.path.clone());
+        for line_match in &file.matches {
+            lines.push(format!("  {}: {}", line_match.line_number, line_match.line));
+        }
     }
     lines.join("\n")
 }
@@ -361,13 +286,19 @@ where
 /// {D} directories, {F} files, {S} symbols
 /// ```
 pub fn file_tree(index: &LiveIndex, path: &str, depth: u32) -> String {
+    let view = index.capture_repo_outline_view();
+    file_tree_view(&view.files, path, depth)
+}
+
+pub fn file_tree_view(files: &[RepoOutlineFileView], path: &str, depth: u32) -> String {
     let depth = depth.min(5);
     let prefix = path.trim_matches('/');
 
     // Collect all files whose relative_path starts with the path prefix.
-    let matching_files: Vec<(&String, &crate::live_index::store::IndexedFile)> = index
-        .all_files()
-        .filter(|(p, _)| {
+    let matching_files: Vec<&RepoOutlineFileView> = files
+        .iter()
+        .filter(|file| {
+            let p = file.relative_path.as_str();
             if prefix.is_empty() {
                 true
             } else {
@@ -394,31 +325,31 @@ pub fn file_tree(index: &LiveIndex, path: &str, depth: u32) -> String {
     } else {
         prefix.len() + 1
     };
-    let stripped: Vec<(&str, &crate::live_index::store::IndexedFile)> = matching_files
-        .iter()
-        .map(|(p, f)| {
+    let stripped: Vec<(&str, &RepoOutlineFileView)> = matching_files
+        .into_iter()
+        .map(|file| {
+            let p = file.relative_path.as_str();
             (
                 if p.len() >= strip_len {
                     &p[strip_len..]
                 } else {
-                    p.as_str()
+                    p
                 },
-                *f,
+                file,
             )
         })
         .collect();
 
     // Recursively build tree lines.
     fn build_lines(
-        entries: &[(&str, &crate::live_index::store::IndexedFile)],
+        entries: &[(&str, &RepoOutlineFileView)],
         current_depth: u32,
         max_depth: u32,
         indent: usize,
     ) -> Vec<String> {
         // Group by first path component.
-        let mut dirs: BTreeMap<&str, Vec<(&str, &crate::live_index::store::IndexedFile)>> =
-            BTreeMap::new();
-        let mut files_here: Vec<(&str, &crate::live_index::store::IndexedFile)> = Vec::new();
+        let mut dirs: BTreeMap<&str, Vec<(&str, &RepoOutlineFileView)>> = BTreeMap::new();
+        let mut files_here: Vec<(&str, &RepoOutlineFileView)> = Vec::new();
 
         for (rel, file) in entries {
             if let Some(slash) = rel.find('/') {
@@ -436,7 +367,7 @@ pub fn file_tree(index: &LiveIndex, path: &str, depth: u32) -> String {
         // Files at this level
         files_here.sort_by_key(|(name, _)| *name);
         for (name, file) in &files_here {
-            let sym_count = file.symbols.len();
+            let sym_count = file.symbol_count;
             let sym_label = if sym_count == 1 { "symbol" } else { "symbols" };
             lines.push(format!(
                 "{}{} [{}]  ({} {})",
@@ -447,7 +378,7 @@ pub fn file_tree(index: &LiveIndex, path: &str, depth: u32) -> String {
         // Directories at this level
         for (dir_name, children) in &dirs {
             let file_count = count_files(children);
-            let sym_count: usize = children.iter().map(|(_, f)| f.symbols.len()).sum();
+            let sym_count: usize = children.iter().map(|(_, f)| f.symbol_count).sum();
             let sym_label = if sym_count == 1 { "symbol" } else { "symbols" };
 
             if current_depth >= max_depth {
@@ -469,7 +400,7 @@ pub fn file_tree(index: &LiveIndex, path: &str, depth: u32) -> String {
         lines
     }
 
-    fn count_files(entries: &[(&str, &crate::live_index::store::IndexedFile)]) -> usize {
+    fn count_files(entries: &[(&str, &RepoOutlineFileView)]) -> usize {
         let mut count = 0;
         for (rel, _) in entries {
             if rel.contains('/') {
@@ -479,10 +410,8 @@ pub fn file_tree(index: &LiveIndex, path: &str, depth: u32) -> String {
             }
         }
         // also count files in sub-directories
-        let mut dirs: std::collections::HashMap<
-            &str,
-            Vec<(&str, &crate::live_index::store::IndexedFile)>,
-        > = std::collections::HashMap::new();
+        let mut dirs: std::collections::HashMap<&str, Vec<(&str, &RepoOutlineFileView)>> =
+            std::collections::HashMap::new();
         for (rel, file) in entries {
             if let Some(slash) = rel.find('/') {
                 dirs.entry(&rel[..slash])
@@ -496,12 +425,10 @@ pub fn file_tree(index: &LiveIndex, path: &str, depth: u32) -> String {
         count
     }
 
-    fn count_dirs(entries: &[(&str, &crate::live_index::store::IndexedFile)]) -> usize {
+    fn count_dirs(entries: &[(&str, &RepoOutlineFileView)]) -> usize {
         let mut dirs: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        let mut sub_entries: std::collections::HashMap<
-            &str,
-            Vec<(&str, &crate::live_index::store::IndexedFile)>,
-        > = std::collections::HashMap::new();
+        let mut sub_entries: std::collections::HashMap<&str, Vec<(&str, &RepoOutlineFileView)>> =
+            std::collections::HashMap::new();
         for (rel, file) in entries {
             if let Some(slash) = rel.find('/') {
                 let dir_name = &rel[..slash];
@@ -523,7 +450,7 @@ pub fn file_tree(index: &LiveIndex, path: &str, depth: u32) -> String {
 
     let total_files = stripped.len();
     let total_dirs = count_dirs(&stripped);
-    let total_symbols: usize = stripped.iter().map(|(_, f)| f.symbols.len()).sum();
+    let total_symbols: usize = stripped.iter().map(|(_, f)| f.symbol_count).sum();
     let sym_label = if total_symbols == 1 {
         "symbol"
     } else {
@@ -544,26 +471,94 @@ pub fn file_tree(index: &LiveIndex, path: &str, depth: u32) -> String {
 /// Header: `{project_name}  ({N} files, {M} symbols)`
 /// Body: sorted paths, each: `  {filename:<20} {language:<12} {symbol_count} symbols`
 pub fn repo_outline(index: &LiveIndex, project_name: &str) -> String {
-    let total_files = index.file_count();
-    let total_symbols = index.symbol_count();
+    let view = index.capture_repo_outline_view();
+    repo_outline_view(&view, project_name)
+}
 
+fn repo_outline_display_labels(files: &[RepoOutlineFileView]) -> std::collections::HashMap<String, String> {
+    fn basename(path: &str) -> &str {
+        path.rsplit('/').next().unwrap_or(path)
+    }
+
+    let mut by_basename: std::collections::HashMap<&str, Vec<&str>> =
+        std::collections::HashMap::new();
+    for file in files {
+        by_basename
+            .entry(basename(&file.relative_path))
+            .or_default()
+            .push(file.relative_path.as_str());
+    }
+
+    let mut labels = std::collections::HashMap::with_capacity(files.len());
+    for paths in by_basename.into_values() {
+        let split_paths: Vec<Vec<&str>> = paths
+            .iter()
+            .map(|path| path.split('/').filter(|segment| !segment.is_empty()).collect())
+            .collect();
+        let max_depth = split_paths.iter().map(Vec::len).max().unwrap_or(1);
+        let mut resolved: Vec<Option<String>> = vec![None; split_paths.len()];
+
+        for depth in 1..=max_depth {
+            let mut candidate_counts: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for parts in &split_paths {
+                let start = parts.len().saturating_sub(depth);
+                let candidate = parts[start..].join("/");
+                *candidate_counts.entry(candidate).or_insert(0) += 1;
+            }
+
+            for (idx, parts) in split_paths.iter().enumerate() {
+                if resolved[idx].is_some() {
+                    continue;
+                }
+                let start = parts.len().saturating_sub(depth);
+                let candidate = parts[start..].join("/");
+                if candidate_counts.get(&candidate) == Some(&1) || depth == max_depth {
+                    resolved[idx] = Some(candidate);
+                }
+            }
+
+            if resolved.iter().all(Option::is_some) {
+                break;
+            }
+        }
+
+        for (path, label) in paths.iter().zip(resolved.into_iter()) {
+            labels.insert(
+                (*path).to_string(),
+                label.unwrap_or_else(|| (*path).to_string()),
+            );
+        }
+    }
+
+    labels
+}
+
+pub fn repo_outline_view(view: &RepoOutlineView, project_name: &str) -> String {
     let mut lines = Vec::new();
     lines.push(format!(
-        "{project_name}  ({total_files} files, {total_symbols} symbols)"
+        "{project_name}  ({} files, {} symbols)",
+        view.total_files, view.total_symbols
     ));
 
-    let mut paths: Vec<&String> = index.all_files().map(|(p, _)| p).collect();
-    paths.sort();
+    let labels = repo_outline_display_labels(&view.files);
+    let label_width = labels
+        .values()
+        .map(|label| label.len())
+        .max()
+        .unwrap_or(20)
+        .clamp(20, 32);
 
-    for path in paths {
-        let file = index.get_file(path).unwrap();
-        // Get just the filename for display
-        let filename = path.rsplit('/').next().unwrap_or(path.as_str());
+    for file in &view.files {
+        let label = labels
+            .get(&file.relative_path)
+            .expect("repo outline label should exist");
         lines.push(format!(
-            "  {:<20} {:<12} {} symbols",
-            filename,
+            "  {:<width$} {:<12} {} symbols",
+            label,
             file.language.to_string(),
-            file.symbols.len()
+            file.symbol_count,
+            width = label_width
         ));
     }
 
@@ -587,52 +582,16 @@ pub fn repo_outline(index: &LiveIndex, project_name: &str) -> String {
 /// ```
 pub fn health_report(index: &LiveIndex) -> String {
     use crate::live_index::IndexState;
-    use crate::watcher::WatcherState;
 
     let state = index.index_state();
     let status = match state {
-        IndexState::Empty => "Empty".to_string(),
-        IndexState::Ready => "Ready".to_string(),
-        IndexState::Loading => "Loading".to_string(),
-        IndexState::CircuitBreakerTripped { .. } => "Degraded".to_string(),
+        IndexState::Empty => "Empty",
+        IndexState::Ready => "Ready",
+        IndexState::Loading => "Loading",
+        IndexState::CircuitBreakerTripped { .. } => "Degraded",
     };
-
     let stats = index.health_stats();
-
-    let watcher_line = match &stats.watcher_state {
-        WatcherState::Active => {
-            let last = match stats.last_event_at {
-                None => "never".to_string(),
-                Some(t) => {
-                    let secs = t.elapsed().map(|d| d.as_secs()).unwrap_or(0);
-                    format!("{secs}s ago")
-                }
-            };
-            format!(
-                "Watcher: active ({} events, last: {}, debounce: {}ms)",
-                stats.events_processed, last, stats.debounce_window_ms
-            )
-        }
-        WatcherState::Degraded => {
-            format!(
-                "Watcher: degraded ({} events processed before failure)",
-                stats.events_processed
-            )
-        }
-        WatcherState::Off => "Watcher: off".to_string(),
-    };
-
-    format!(
-        "Status: {}\nFiles:  {} indexed ({} parsed, {} partial, {} failed)\nSymbols: {}\nLoaded in: {}ms\n{}",
-        status,
-        stats.file_count,
-        stats.parsed_count,
-        stats.partial_parse_count,
-        stats.failed_count,
-        stats.symbol_count,
-        stats.load_duration.as_millis(),
-        watcher_line
-    )
+    health_report_from_stats(status, &stats)
 }
 
 /// Generate a health report for the index with live watcher state.
@@ -644,17 +603,44 @@ pub fn health_report_with_watcher(
     watcher: &crate::watcher::WatcherInfo,
 ) -> String {
     use crate::live_index::IndexState;
-    use crate::watcher::WatcherState;
 
     let state = index.index_state();
     let status = match state {
-        IndexState::Empty => "Empty".to_string(),
-        IndexState::Ready => "Ready".to_string(),
-        IndexState::Loading => "Loading".to_string(),
-        IndexState::CircuitBreakerTripped { .. } => "Degraded".to_string(),
+        IndexState::Empty => "Empty",
+        IndexState::Ready => "Ready",
+        IndexState::Loading => "Loading",
+        IndexState::CircuitBreakerTripped { .. } => "Degraded",
     };
-
     let stats = index.health_stats_with_watcher(watcher);
+    health_report_from_stats(status, &stats)
+}
+
+pub fn health_report_from_published_state(
+    published: &PublishedIndexState,
+    watcher: &crate::watcher::WatcherInfo,
+) -> String {
+    let mut stats = HealthStats {
+        file_count: published.file_count,
+        symbol_count: published.symbol_count,
+        parsed_count: published.parsed_count,
+        partial_parse_count: published.partial_parse_count,
+        failed_count: published.failed_count,
+        load_duration: published.load_duration,
+        watcher_state: watcher.state.clone(),
+        events_processed: watcher.events_processed,
+        last_event_at: watcher.last_event_at,
+        debounce_window_ms: watcher.debounce_window_ms,
+    };
+    // Preserve the existing formatter shape by reusing HealthStats.
+    if matches!(stats.watcher_state, crate::watcher::WatcherState::Off) {
+        stats.events_processed = 0;
+        stats.last_event_at = None;
+    }
+    health_report_from_stats(published.status_label(), &stats)
+}
+
+pub fn health_report_from_stats(status: &str, stats: &HealthStats) -> String {
+    use crate::watcher::WatcherState;
 
     let watcher_line = match &stats.watcher_state {
         WatcherState::Active => {
@@ -697,26 +683,17 @@ pub fn health_report_with_watcher(
 /// If since_ts < loaded_at: return list of all files (entire index is "newer")
 /// If since_ts >= loaded_at: return "No changes detected since last index load."
 pub fn what_changed_result(index: &LiveIndex, since_ts: i64) -> String {
-    use std::time::UNIX_EPOCH;
+    let view = index.capture_what_changed_timestamp_view();
+    what_changed_timestamp_view(&view, since_ts)
+}
 
-    let loaded_at = index.loaded_at_system();
-    let loaded_secs = loaded_at
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    if since_ts < loaded_secs {
+pub fn what_changed_timestamp_view(view: &WhatChangedTimestampView, since_ts: i64) -> String {
+    if since_ts < view.loaded_secs {
         // Entire index is newer — list all files
-        let mut paths: Vec<&String> = index.all_files().map(|(p, _)| p).collect();
-        paths.sort();
-        if paths.is_empty() {
+        if view.paths.is_empty() {
             return "No changes detected since last index load.".to_string();
         }
-        paths
-            .iter()
-            .map(|p| p.as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
+        view.paths.join("\n")
     } else {
         "No changes detected since last index load.".to_string()
     }
@@ -735,6 +712,85 @@ pub fn what_changed_paths_result(paths: &[String], empty_message: &str) -> Strin
     normalized_paths.join("\n")
 }
 
+pub fn resolve_path_result(index: &LiveIndex, hint: &str) -> String {
+    let view = index.capture_resolve_path_view(hint);
+    resolve_path_result_view(&view)
+}
+
+pub fn resolve_path_result_view(view: &ResolvePathView) -> String {
+    match view {
+        ResolvePathView::EmptyHint => "Path hint must not be empty.".to_string(),
+        ResolvePathView::Resolved { path } => path.clone(),
+        ResolvePathView::NotFound { hint } => {
+            format!("No indexed source path matched '{hint}'")
+        }
+        ResolvePathView::Ambiguous {
+            hint,
+            matches,
+            overflow_count,
+        } => {
+            let mut lines = vec![format!(
+                "Ambiguous path hint '{hint}' ({} matches)",
+                matches.len() + overflow_count
+            )];
+            lines.extend(matches.iter().map(|path| format!("  {path}")));
+            if *overflow_count > 0 {
+                lines.push(format!("  ... and {} more", overflow_count));
+            }
+            lines.join("\n")
+        }
+    }
+}
+
+pub fn search_files_result(index: &LiveIndex, query: &str, limit: usize) -> String {
+    let view = index.capture_search_files_view(query, limit);
+    search_files_result_view(&view)
+}
+
+pub fn search_files_result_view(view: &SearchFilesView) -> String {
+    match view {
+        SearchFilesView::EmptyQuery => "Path search requires a non-empty query.".to_string(),
+        SearchFilesView::NotFound { query } => {
+            format!("No indexed source files matching '{query}'")
+        }
+        SearchFilesView::Found {
+            total_matches,
+            overflow_count,
+            hits,
+            ..
+        } => {
+            let mut lines = vec![if *total_matches == 1 {
+                "1 matching file".to_string()
+            } else {
+                format!("{total_matches} matching files")
+            }];
+
+            let mut last_tier: Option<SearchFilesTier> = None;
+            for hit in hits {
+                if last_tier != Some(hit.tier) {
+                    last_tier = Some(hit.tier);
+                    let header = match hit.tier {
+                        SearchFilesTier::StrongPath => "── Strong path matches ──",
+                        SearchFilesTier::Basename => "── Basename matches ──",
+                        SearchFilesTier::LoosePath => "── Loose path matches ──",
+                    };
+                    if lines.len() > 1 {
+                        lines.push(String::new());
+                    }
+                    lines.push(header.to_string());
+                }
+                lines.push(format!("  {}", hit.path));
+            }
+
+            if *overflow_count > 0 {
+                lines.push(format!("... and {} more", overflow_count));
+            }
+
+            lines.join("\n")
+        }
+    }
+}
+
 /// Return raw file content, optionally sliced by 1-indexed line range.
 ///
 /// Not-found: "File not found: {path}"
@@ -744,12 +800,51 @@ pub fn file_content(
     start_line: Option<u32>,
     end_line: Option<u32>,
 ) -> String {
-    let file = match index.get_file(path) {
-        Some(f) => f,
-        None => return not_found_file(path),
-    };
+    let options = search::FileContentOptions::for_explicit_path_read(path, start_line, end_line);
+    match index.capture_shared_file_for_scope(&options.path_scope) {
+        Some(file) => file_content_from_indexed_file_with_context(
+            file.as_ref(),
+            options.content_context,
+        ),
+        None => not_found_file(path),
+    }
+}
 
-    let content = String::from_utf8_lossy(&file.content);
+pub fn file_content_from_indexed_file(
+    file: &IndexedFile,
+    start_line: Option<u32>,
+    end_line: Option<u32>,
+) -> String {
+    file_content_from_indexed_file_with_context(
+        file,
+        search::ContentContext::line_range(start_line, end_line),
+    )
+}
+
+pub fn file_content_from_indexed_file_with_context(
+    file: &IndexedFile,
+    context: search::ContentContext,
+) -> String {
+    render_file_content_bytes(&file.content, context.start_line, context.end_line)
+}
+
+/// Compatibility renderer for `FileContentView`.
+///
+/// Main hot-path readers should prefer `file_content_from_indexed_file()`.
+pub fn file_content_view(
+    view: &FileContentView,
+    start_line: Option<u32>,
+    end_line: Option<u32>,
+) -> String {
+    render_file_content_bytes(&view.content, start_line, end_line)
+}
+
+fn render_file_content_bytes(
+    content: &[u8],
+    start_line: Option<u32>,
+    end_line: Option<u32>,
+) -> String {
+    let content = String::from_utf8_lossy(content);
 
     match (start_line, end_line) {
         (None, None) => content.into_owned(),
@@ -781,19 +876,29 @@ pub fn not_found_file(path: &str) -> String {
 
 /// "No symbol {name} in {path}. Symbols in that file: {comma-separated list}"
 pub fn not_found_symbol(index: &LiveIndex, path: &str, name: &str) -> String {
-    match index.get_file(path) {
+    match index.capture_shared_file(path) {
         None => not_found_file(path),
-        Some(file) => {
-            let symbol_names: Vec<&str> = file.symbols.iter().map(|s| s.name.as_str()).collect();
-            if symbol_names.is_empty() {
-                format!("No symbol {name} in {path}. No symbols in that file.")
-            } else {
-                format!(
-                    "No symbol {name} in {path}. Symbols in that file: {}",
-                    symbol_names.join(", ")
-                )
-            }
-        }
+        Some(file) => render_not_found_symbol(&file.relative_path, &file.symbols, name),
+    }
+}
+
+fn render_not_found_symbol(
+    relative_path: &str,
+    symbols: &[crate::domain::SymbolRecord],
+    name: &str,
+) -> String {
+    let symbol_names: Vec<String> = symbols.iter().map(|s| s.name.clone()).collect();
+    not_found_symbol_names(relative_path, &symbol_names, name)
+}
+
+fn not_found_symbol_names(relative_path: &str, symbol_names: &[String], name: &str) -> String {
+    if symbol_names.is_empty() {
+        format!("No symbol {name} in {relative_path}. No symbols in that file.")
+    } else {
+        format!(
+            "No symbol {name} in {relative_path}. Symbols in that file: {}",
+            symbol_names.join(", ")
+        )
     }
 }
 
@@ -802,63 +907,41 @@ pub fn not_found_symbol(index: &LiveIndex, path: &str, name: &str) -> String {
 /// kind_filter: "call" | "import" | "type_usage" | "all" | None (all)
 /// Output format matches CONTEXT.md decision AD-6 (compact human-readable).
 pub fn find_references_result(index: &LiveIndex, name: &str, kind_filter: Option<&str>) -> String {
-    let kind_enum = parse_kind_filter(kind_filter);
-    let refs = index.find_references_for_name(name, kind_enum, false);
+    let view = index.capture_find_references_view(name, kind_filter);
+    find_references_result_view(&view, name)
+}
 
-    if refs.is_empty() {
+pub fn find_references_result_view(view: &FindReferencesView, name: &str) -> String {
+    if view.total_refs == 0 {
         return format!("No references found for \"{name}\"");
     }
 
-    // Group by file path with stable (sorted) order for determinism
-    let mut by_file: std::collections::BTreeMap<&str, Vec<&crate::domain::ReferenceRecord>> =
-        std::collections::BTreeMap::new();
-    for (file_path, r) in &refs {
-        by_file.entry(file_path).or_default().push(r);
-    }
-
-    let total = refs.len();
-    let file_count = by_file.len();
+    let total = view.total_refs;
+    let file_count = view.files.len();
     let mut lines = vec![format!("{total} references in {file_count} files")];
     lines.push(String::new()); // blank line
 
-    for (file_path, file_refs) in &by_file {
-        lines.push(file_path.to_string());
-        if let Some(file) = index.get_file(file_path) {
-            let content_str = String::from_utf8_lossy(&file.content);
-            let content_lines: Vec<&str> = content_str.lines().collect();
-
-            for r in file_refs {
-                let ref_line_0 = r.line_range.0 as usize; // 0-indexed
-                // Context: 1 line before, reference line, 1 line after (all 1-indexed in output)
-                let ctx_start = ref_line_0.saturating_sub(1);
-                let ctx_end = if content_lines.is_empty() {
-                    0
-                } else {
-                    (ref_line_0 + 1).min(content_lines.len() - 1)
-                };
-
-                // Enclosing symbol annotation shown on the reference line
-                let enclosing_annotation = r
-                    .enclosing_symbol_index
-                    .and_then(|idx| file.symbols.get(idx as usize))
-                    .map(|sym| format!("  [in {} {}]", sym.kind, sym.name))
-                    .unwrap_or_default();
-
-                for (i, line) in content_lines[ctx_start..=ctx_end].iter().enumerate() {
-                    let line_number = ctx_start + i + 1; // 1-indexed
-                    let is_ref_line = (ctx_start + i) == ref_line_0;
-                    if is_ref_line && !enclosing_annotation.is_empty() {
-                        lines.push(format!("  {line_number}: {line:<40}{enclosing_annotation}"));
+    for file in &view.files {
+        lines.push(file.file_path.clone());
+        for hit in &file.hits {
+            for line in &hit.context_lines {
+                if line.is_reference_line {
+                    if let Some(annotation) = &line.enclosing_annotation {
+                        lines.push(format!(
+                            "  {}: {:<40}{}",
+                            line.line_number, line.text, annotation
+                        ));
                     } else {
-                        lines.push(format!("  {line_number}: {line}"));
+                        lines.push(format!("  {}: {}", line.line_number, line.text));
                     }
+                } else {
+                    lines.push(format!("  {}: {}", line.line_number, line.text));
                 }
             }
         }
         lines.push(String::new()); // blank line between files
     }
 
-    // Remove trailing blank line
     while lines.last().map(|l| l.is_empty()).unwrap_or(false) {
         lines.pop();
     }
@@ -866,52 +949,30 @@ pub fn find_references_result(index: &LiveIndex, name: &str, kind_filter: Option
     lines.join("\n")
 }
 
-/// Parse a kind filter string to Option<ReferenceKind>.
-fn parse_kind_filter(kind_filter: Option<&str>) -> Option<crate::domain::ReferenceKind> {
-    use crate::domain::ReferenceKind;
-    match kind_filter {
-        Some("call") => Some(ReferenceKind::Call),
-        Some("import") => Some(ReferenceKind::Import),
-        Some("type_usage") => Some(ReferenceKind::TypeUsage),
-        Some("macro_use") => Some(ReferenceKind::MacroUse),
-        Some("all") | None => None,
-        _ => None,
-    }
-}
-
 /// Find all files that import (depend on) the given path.
 ///
 /// Output format: compact list grouped by importing file, each with import line.
 pub fn find_dependents_result(index: &LiveIndex, path: &str) -> String {
-    let deps = index.find_dependents_for_file(path);
+    let view = index.capture_find_dependents_view(path);
+    find_dependents_result_view(&view, path)
+}
 
-    if deps.is_empty() {
+pub fn find_dependents_result_view(view: &FindDependentsView, path: &str) -> String {
+    if view.files.is_empty() {
         return format!("No dependents found for \"{path}\"");
     }
 
-    // Group by importing file
-    let mut by_file: std::collections::BTreeMap<&str, Vec<&crate::domain::ReferenceRecord>> =
-        std::collections::BTreeMap::new();
-    for (file_path, r) in &deps {
-        by_file.entry(file_path).or_default().push(r);
-    }
-
-    let file_count = by_file.len();
+    let file_count = view.files.len();
     let mut lines = vec![format!("{file_count} files depend on {path}")];
     lines.push(String::new()); // blank line
 
-    for (file_path, file_refs) in &by_file {
-        lines.push(file_path.to_string());
-        if let Some(file) = index.get_file(file_path) {
-            let content_str = String::from_utf8_lossy(&file.content);
-            let content_lines: Vec<&str> = content_str.lines().collect();
-
-            for r in file_refs {
-                let line_0 = r.line_range.0 as usize; // 0-indexed
-                let line_content = content_lines.get(line_0).copied().unwrap_or("");
-                let line_number = line_0 + 1; // 1-indexed
-                lines.push(format!("  {line_number}: {line_content}   [{}]", r.kind));
-            }
+    for file in &view.files {
+        lines.push(file.file_path.clone());
+        for line in &file.lines {
+            lines.push(format!(
+                "  {}: {}   [{}]",
+                line.line_number, line.line_content, line.kind
+            ));
         }
         lines.push(String::new()); // blank line between files
     }
@@ -933,94 +994,55 @@ pub fn context_bundle_result(
     name: &str,
     kind_filter: Option<&str>,
 ) -> String {
-    use crate::domain::ReferenceKind;
-
-    let file = match index.get_file(path) {
-        Some(f) => f,
-        None => return not_found_file(path),
-    };
-
-    // Find the symbol definition
-    let sym = match file.symbols.iter().enumerate().find(|(_, s)| {
-        s.name == name
-            && kind_filter
-                .map(|k| s.kind.to_string().eq_ignore_ascii_case(k))
-                .unwrap_or(true)
-    }) {
-        None => return not_found_symbol(index, path, name),
-        Some((sym_idx, s)) => (sym_idx, s.clone()),
-    };
-
-    let (sym_idx, sym_rec) = sym;
-
-    // Symbol body
-    let start = sym_rec.byte_range.0 as usize;
-    let end = sym_rec.byte_range.1 as usize;
-    let body = if end <= file.content.len() {
-        String::from_utf8_lossy(&file.content[start..end]).into_owned()
-    } else {
-        String::from_utf8_lossy(&file.content).into_owned()
-    };
-    let byte_count = end.saturating_sub(start);
-
-    let mut output = format!(
-        "{}\n[{}, lines {}-{}, {} bytes]\n",
-        body, sym_rec.kind, sym_rec.line_range.0, sym_rec.line_range.1, byte_count
-    );
-
-    // Callers: Call references to this symbol from anywhere
-    let callers = index.find_references_for_name(name, Some(ReferenceKind::Call), false);
-    output.push_str(&format_ref_section("Callers", &callers, index));
-
-    // Callees: Call references made BY this symbol (inside it)
-    let callees = index.callees_for_symbol(path, sym_idx);
-    let callee_pairs: Vec<(&str, &crate::domain::ReferenceRecord)> =
-        callees.iter().map(|r| (path, *r)).collect();
-    output.push_str(&format_ref_section("Callees", &callee_pairs, index));
-
-    // Type usages: TypeUsage references to this symbol from anywhere
-    let type_usages = index.find_references_for_name(name, Some(ReferenceKind::TypeUsage), false);
-    output.push_str(&format_ref_section("Type usages", &type_usages, index));
-
-    output
+    let view = index.capture_context_bundle_view(path, name, kind_filter);
+    context_bundle_result_view(&view)
 }
 
-const SECTION_CAP: usize = 20;
+pub fn context_bundle_result_view(view: &ContextBundleView) -> String {
+    match view {
+        ContextBundleView::FileNotFound { path } => not_found_file(path),
+        ContextBundleView::SymbolNotFound {
+            relative_path,
+            symbol_names,
+            name,
+        } => not_found_symbol_names(relative_path, symbol_names, name),
+        ContextBundleView::Found(view) => {
+            let mut output = format!(
+                "{}\n[{}, lines {}-{}, {} bytes]\n",
+                view.body, view.kind_label, view.line_range.0, view.line_range.1, view.byte_count
+            );
+            output.push_str(&format_context_bundle_section("Callers", &view.callers));
+            output.push_str(&format_context_bundle_section("Callees", &view.callees));
+            output.push_str(&format_context_bundle_section(
+                "Type usages",
+                &view.type_usages,
+            ));
+            output
+        }
+    }
+}
 
-/// Format a reference section (Callers, Callees, Type usages) with cap at 20.
-fn format_ref_section(
-    title: &str,
-    refs: &[(&str, &crate::domain::ReferenceRecord)],
-    index: &LiveIndex,
-) -> String {
-    let count = refs.len();
-    let display = refs.len().min(SECTION_CAP);
-    let mut lines = vec![format!("\n{title} ({count}):")];
+fn format_context_bundle_section(title: &str, section: &ContextBundleSectionView) -> String {
+    let mut lines = vec![format!("\n{title} ({}):", section.total_count)];
 
-    for (file_path, r) in refs.iter().take(display) {
-        let line_1indexed = r.line_range.0 + 1; // 1-indexed
-        let enclosing = index
-            .get_file(file_path)
-            .and_then(|f| {
-                r.enclosing_symbol_index
-                    .and_then(|idx| f.symbols.get(idx as usize))
-                    .map(|s| format!("in {} {}", s.kind, s.name))
-            })
-            .unwrap_or_default();
-        let display_name = r.qualified_name.as_deref().unwrap_or(&r.name);
-        if enclosing.is_empty() {
-            lines.push(format!("  {display_name:<20} {file_path}:{line_1indexed}"));
+    for entry in &section.entries {
+        if let Some(enclosing) = &entry.enclosing {
+            lines.push(format!(
+                "  {:<20} {}:{}  {}",
+                entry.display_name, entry.file_path, entry.line_number, enclosing
+            ));
         } else {
             lines.push(format!(
-                "  {display_name:<20} {file_path}:{line_1indexed}  {enclosing}"
+                "  {:<20} {}:{}",
+                entry.display_name, entry.file_path, entry.line_number
             ));
         }
     }
 
-    if count > SECTION_CAP {
+    if section.overflow_count > 0 {
         lines.push(format!(
             "  ...and {} more {}",
-            count - SECTION_CAP,
+            section.overflow_count,
             title.to_lowercase()
         ));
     }
@@ -1146,6 +1168,7 @@ mod tests {
             IndexedFile {
                 relative_path: path.to_string(),
                 language: LanguageId::Rust,
+                classification: crate::domain::FileClassification::for_code_path(path),
                 content: content.to_vec(),
                 symbols,
                 parse_status: ParseStatus::Parsed,
@@ -1160,18 +1183,27 @@ mod tests {
     fn make_index(files: Vec<(String, IndexedFile)>) -> LiveIndex {
         use crate::live_index::trigram::TrigramIndex;
         let cb = CircuitBreakerState::new(0.20);
-        let files_map = files.into_iter().collect::<HashMap<_, _>>();
+        let files_map = files
+            .into_iter()
+            .map(|(path, file)| (path, std::sync::Arc::new(file)))
+            .collect::<HashMap<_, _>>();
         let trigram_index = TrigramIndex::build_from_files(&files_map);
-        LiveIndex {
+        let mut index = LiveIndex {
             files: files_map,
             loaded_at: Instant::now(),
             loaded_at_system: std::time::SystemTime::now(),
             load_duration: Duration::from_millis(42),
             cb_state: cb,
             is_empty: false,
+            load_source: crate::live_index::store::IndexLoadSource::FreshLoad,
+            snapshot_verify_state: crate::live_index::store::SnapshotVerifyState::NotNeeded,
             reverse_index: HashMap::new(),
+            files_by_basename: HashMap::new(),
+            files_by_dir_component: HashMap::new(),
             trigram_index,
-        }
+        };
+        index.rebuild_path_indices();
+        index
     }
 
     fn empty_index() -> LiveIndex {
@@ -1246,6 +1278,22 @@ mod tests {
         assert!(result.contains("(0 symbols)"), "should show 0 symbols");
     }
 
+    #[test]
+    fn test_file_outline_view_matches_live_index_output() {
+        let (key, file) = make_file(
+            "src/main.rs",
+            b"fn main() {}",
+            vec![make_symbol("main", SymbolKind::Function, 0, 1, 5)],
+        );
+        let index = make_index(vec![(key, file)]);
+
+        let live_result = file_outline(&index, "src/main.rs");
+        let captured_result =
+            file_outline_view(&index.capture_file_outline_view("src/main.rs").unwrap());
+
+        assert_eq!(captured_result, live_result);
+    }
+
     // --- symbol_detail tests ---
 
     #[test]
@@ -1296,6 +1344,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_symbol_detail_view_matches_live_index_output() {
+        let content = b"fn hello() { println!(\"hi\"); }";
+        let sym = make_symbol_with_bytes("hello", SymbolKind::Function, 0, 1, 1, 0, 30);
+        let (key, file) = make_file("src/lib.rs", content, vec![sym]);
+        let index = make_index(vec![(key, file)]);
+
+        let live_result = symbol_detail(&index, "src/lib.rs", "hello", None);
+        let captured_result = symbol_detail_view(
+            &index.capture_symbol_detail_view("src/lib.rs").unwrap(),
+            "hello",
+            None,
+        );
+
+        assert_eq!(captured_result, live_result);
+    }
+
+    #[test]
+    fn test_code_slice_view_formats_path_and_slice_text() {
+        let result = code_slice_view("src/lib.rs", b"fn foo()");
+        assert_eq!(result, "src/lib.rs\nfn foo()");
+    }
+
+    #[test]
+    fn test_code_slice_from_indexed_file_clamps_and_formats() {
+        let (key, file) = make_file("src/lib.rs", b"fn foo() { bar(); }", vec![]);
+        let index = make_index(vec![(key, file)]);
+
+        let result = code_slice_from_indexed_file(
+            index.capture_shared_file("src/lib.rs").unwrap().as_ref(),
+            0,
+            Some(200),
+        );
+
+        assert_eq!(result, "src/lib.rs\nfn foo() { bar(); }");
+    }
+
     // --- search_symbols_result tests ---
 
     #[test]
@@ -1332,6 +1417,22 @@ mod tests {
         let index = make_index(vec![(key, file)]);
         let result = search_symbols_result(&index, "xyz_no_match");
         assert_eq!(result, "No symbols matching 'xyz_no_match'");
+    }
+
+    #[test]
+    fn test_search_symbols_result_view_matches_live_index_output() {
+        let symbols = vec![
+            make_symbol("get_user", SymbolKind::Function, 0, 1, 5),
+            make_symbol("get_role", SymbolKind::Function, 0, 6, 10),
+        ];
+        let (key, file) = make_file("src/lib.rs", b"fn get_user() {} fn get_role() {}", symbols);
+        let index = make_index(vec![(key, file)]);
+
+        let live_result = search_symbols_result(&index, "get");
+        let captured_result =
+            search_symbols_result_view(&search::search_symbols(&index, "get", None, 50), "get");
+
+        assert_eq!(captured_result, live_result);
     }
 
     #[test]
@@ -1410,6 +1511,18 @@ mod tests {
         let index = make_index(vec![(key, file)]);
         let result = search_text_result(&index, "xyz_totally_absent");
         assert_eq!(result, "No matches for 'xyz_totally_absent'");
+    }
+
+    #[test]
+    fn test_search_text_result_view_matches_live_index_output() {
+        let (key, file) = make_file("src/lib.rs", b"let x = 1;\nlet y = 2;", vec![]);
+        let index = make_index(vec![(key, file)]);
+
+        let live_result = search_text_result(&index, "let");
+        let captured_result =
+            search_text_result_view(search::search_text(&index, Some("let"), None, false));
+
+        assert_eq!(captured_result, live_result);
     }
 
     #[test]
@@ -1496,6 +1609,59 @@ mod tests {
         assert!(result.contains("1 symbols"), "should show symbol count");
     }
 
+    #[test]
+    fn test_repo_outline_repeated_basenames_use_shortest_unique_suffixes() {
+        let sym = make_symbol("foo", SymbolKind::Function, 0, 1, 3);
+        let index = make_index(vec![
+            make_file("src/live_index/mod.rs", b"fn foo() {}", vec![sym.clone()]),
+            make_file("src/protocol/mod.rs", b"fn foo() {}", vec![sym.clone()]),
+            make_file(
+                "src/parsing/languages/mod.rs",
+                b"fn foo() {}",
+                vec![sym],
+            ),
+        ]);
+
+        let result = repo_outline(&index, "proj");
+
+        assert!(result.contains("live_index/mod.rs"), "got: {result}");
+        assert!(result.contains("protocol/mod.rs"), "got: {result}");
+        assert!(result.contains("languages/mod.rs"), "got: {result}");
+        assert!(!result.contains("\n  mod.rs"), "got: {result}");
+    }
+
+    #[test]
+    fn test_repo_outline_deeper_collisions_expand_beyond_one_parent() {
+        let sym = make_symbol("foo", SymbolKind::Function, 0, 1, 3);
+        let index = make_index(vec![
+            make_file(
+                "src/alpha/shared/mod.rs",
+                b"fn foo() {}",
+                vec![sym.clone()],
+            ),
+            make_file("tests/beta/shared/mod.rs", b"fn foo() {}", vec![sym]),
+        ]);
+
+        let result = repo_outline(&index, "proj");
+
+        assert!(result.contains("alpha/shared/mod.rs"), "got: {result}");
+        assert!(result.contains("beta/shared/mod.rs"), "got: {result}");
+    }
+
+    #[test]
+    fn test_repo_outline_view_matches_live_index_output() {
+        let alpha = make_symbol("alpha", SymbolKind::Function, 0, 1, 3);
+        let beta = make_symbol("beta", SymbolKind::Function, 0, 5, 7);
+        let (k1, f1) = make_file("src/zeta.rs", b"fn beta() {}", vec![beta]);
+        let (k2, f2) = make_file("src/alpha.rs", b"fn alpha() {}", vec![alpha]);
+        let index = make_index(vec![(k1, f1), (k2, f2)]);
+
+        let live_result = repo_outline(&index, "proj");
+        let captured_result = repo_outline_view(&index.capture_repo_outline_view(), "proj");
+
+        assert_eq!(captured_result, live_result);
+    }
+
     // --- health_report tests ---
 
     #[test]
@@ -1523,7 +1689,11 @@ mod tests {
             load_duration: Duration::from_millis(0),
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: true,
+            load_source: crate::live_index::store::IndexLoadSource::EmptyBootstrap,
+            snapshot_verify_state: crate::live_index::store::SnapshotVerifyState::NotNeeded,
             reverse_index: HashMap::new(),
+            files_by_basename: HashMap::new(),
+            files_by_dir_component: HashMap::new(),
             trigram_index: crate::live_index::trigram::TrigramIndex::new(),
         };
         let result = health_report(&index);
@@ -1561,6 +1731,49 @@ mod tests {
         assert_eq!(stats.events_processed, 7);
     }
 
+    #[test]
+    fn test_health_report_from_stats_matches_live_index_output() {
+        use crate::watcher::{WatcherInfo, WatcherState};
+
+        let sym = make_symbol("foo", SymbolKind::Function, 0, 1, 3);
+        let (key, file) = make_file("src/lib.rs", b"fn foo() {}", vec![sym]);
+        let index = make_index(vec![(key, file)]);
+        let watcher = WatcherInfo {
+            state: WatcherState::Active,
+            events_processed: 7,
+            last_event_at: None,
+            debounce_window_ms: 200,
+        };
+
+        let live_result = health_report_with_watcher(&index, &watcher);
+        let captured_result =
+            health_report_from_stats("Ready", &index.health_stats_with_watcher(&watcher));
+
+        assert_eq!(captured_result, live_result);
+    }
+
+    #[test]
+    fn test_health_report_from_published_state_matches_live_index_output() {
+        use crate::watcher::{WatcherInfo, WatcherState};
+
+        let sym = make_symbol("foo", SymbolKind::Function, 0, 1, 3);
+        let (key, file) = make_file("src/lib.rs", b"fn foo() {}", vec![sym]);
+        let index = make_index(vec![(key, file)]);
+        let watcher = WatcherInfo {
+            state: WatcherState::Active,
+            events_processed: 7,
+            last_event_at: None,
+            debounce_window_ms: 200,
+        };
+
+        let live_result = health_report_with_watcher(&index, &watcher);
+        let shared = crate::live_index::SharedIndexHandle::shared(index);
+        let captured_result =
+            health_report_from_published_state(&shared.published_state(), &watcher);
+
+        assert_eq!(captured_result, live_result);
+    }
+
     // --- what_changed_result tests ---
 
     #[test]
@@ -1586,6 +1799,19 @@ mod tests {
     }
 
     #[test]
+    fn test_what_changed_timestamp_view_matches_live_index_output() {
+        let (k1, f1) = make_file("src/z.rs", b"fn z() {}", vec![]);
+        let (k2, f2) = make_file("src/a.rs", b"fn a() {}", vec![]);
+        let index = make_index(vec![(k1, f1), (k2, f2)]);
+
+        let live_result = what_changed_result(&index, 0);
+        let captured_result =
+            what_changed_timestamp_view(&index.capture_what_changed_timestamp_view(), 0);
+
+        assert_eq!(captured_result, live_result);
+    }
+
+    #[test]
     fn test_what_changed_paths_result_sorts_and_deduplicates() {
         let result = what_changed_paths_result(
             &[
@@ -1596,6 +1822,89 @@ mod tests {
             "No git changes detected.",
         );
         assert_eq!(result, "src/a.rs\nsrc/b.rs");
+    }
+
+    #[test]
+    fn test_resolve_path_result_view_returns_exact_path() {
+        let view = ResolvePathView::Resolved {
+            path: "src/protocol/tools.rs".to_string(),
+        };
+
+        assert_eq!(resolve_path_result_view(&view), "src/protocol/tools.rs");
+    }
+
+    #[test]
+    fn test_resolve_path_result_view_formats_ambiguous_output() {
+        let view = ResolvePathView::Ambiguous {
+            hint: "lib.rs".to_string(),
+            matches: vec!["src/lib.rs".to_string(), "tests/lib.rs".to_string()],
+            overflow_count: 1,
+        };
+
+        let result = resolve_path_result_view(&view);
+
+        assert!(result.contains("Ambiguous path hint 'lib.rs' (3 matches)"));
+        assert!(result.contains("  src/lib.rs"));
+        assert!(result.contains("  tests/lib.rs"));
+        assert!(result.contains("  ... and 1 more"));
+    }
+
+    #[test]
+    fn test_resolve_path_result_view_not_found() {
+        let view = ResolvePathView::NotFound {
+            hint: "README.md".to_string(),
+        };
+
+        assert_eq!(
+            resolve_path_result_view(&view),
+            "No indexed source path matched 'README.md'"
+        );
+    }
+
+    #[test]
+    fn test_search_files_result_view_groups_ranked_paths() {
+        let view = SearchFilesView::Found {
+            query: "tools.rs".to_string(),
+            total_matches: 3,
+            overflow_count: 1,
+            hits: vec![
+                crate::live_index::SearchFilesHit {
+                    tier: SearchFilesTier::StrongPath,
+                    path: "src/protocol/tools.rs".to_string(),
+                },
+                crate::live_index::SearchFilesHit {
+                    tier: SearchFilesTier::Basename,
+                    path: "src/sidecar/tools.rs".to_string(),
+                },
+                crate::live_index::SearchFilesHit {
+                    tier: SearchFilesTier::LoosePath,
+                    path: "src/protocol/tools_helper.rs".to_string(),
+                },
+            ],
+        };
+
+        let result = search_files_result_view(&view);
+
+        assert!(result.contains("3 matching files"));
+        assert!(result.contains("── Strong path matches ──"));
+        assert!(result.contains("  src/protocol/tools.rs"));
+        assert!(result.contains("── Basename matches ──"));
+        assert!(result.contains("  src/sidecar/tools.rs"));
+        assert!(result.contains("── Loose path matches ──"));
+        assert!(result.contains("  src/protocol/tools_helper.rs"));
+        assert!(result.contains("... and 1 more"));
+    }
+
+    #[test]
+    fn test_search_files_result_view_not_found() {
+        let view = SearchFilesView::NotFound {
+            query: "README.md".to_string(),
+        };
+
+        assert_eq!(
+            search_files_result_view(&view),
+            "No indexed source files matching 'README.md'"
+        );
     }
 
     // --- file_content tests ---
@@ -1629,6 +1938,81 @@ mod tests {
         let index = empty_index();
         let result = file_content(&index, "nonexistent.rs", None, None);
         assert_eq!(result, "File not found: nonexistent.rs");
+    }
+
+    #[test]
+    fn test_file_outline_from_indexed_file_matches_live_index_output() {
+        let (key, file) = make_file(
+            "src/main.rs",
+            b"fn main() {}",
+            vec![
+                make_symbol("main", SymbolKind::Function, 0, 0, 0),
+                make_symbol("helper", SymbolKind::Function, 1, 1, 1),
+            ],
+        );
+        let index = make_index(vec![(key, file)]);
+
+        let live_result = file_outline(&index, "src/main.rs");
+        let shared_result = file_outline_from_indexed_file(
+            index.capture_shared_file("src/main.rs").unwrap().as_ref(),
+        );
+
+        assert_eq!(shared_result, live_result);
+    }
+
+    #[test]
+    fn test_symbol_detail_from_indexed_file_matches_live_index_output() {
+        let content = b"fn helper() {}\nfn target() {}\n";
+        let (key, file) = make_file(
+            "src/main.rs",
+            content,
+            vec![
+                make_symbol_with_bytes("helper", SymbolKind::Function, 0, 0, 0, 0, 13),
+                make_symbol_with_bytes("target", SymbolKind::Function, 0, 1, 1, 14, 27),
+            ],
+        );
+        let index = make_index(vec![(key, file)]);
+
+        let live_result = symbol_detail(&index, "src/main.rs", "target", None);
+        let shared_result = symbol_detail_from_indexed_file(
+            index.capture_shared_file("src/main.rs").unwrap().as_ref(),
+            "target",
+            None,
+        );
+
+        assert_eq!(shared_result, live_result);
+    }
+
+    #[test]
+    fn test_file_content_view_matches_live_index_output() {
+        let content = b"line 1\nline 2\nline 3\nline 4\nline 5";
+        let (key, file) = make_file("src/main.rs", content, vec![]);
+        let index = make_index(vec![(key, file)]);
+
+        let live_result = file_content(&index, "src/main.rs", Some(2), Some(4));
+        let captured_result = file_content_view(
+            &index.capture_file_content_view("src/main.rs").unwrap(),
+            Some(2),
+            Some(4),
+        );
+
+        assert_eq!(captured_result, live_result);
+    }
+
+    #[test]
+    fn test_file_content_from_indexed_file_matches_live_index_output() {
+        let content = b"line 1\nline 2\nline 3\nline 4\nline 5";
+        let (key, file) = make_file("src/main.rs", content, vec![]);
+        let index = make_index(vec![(key, file)]);
+
+        let live_result = file_content(&index, "src/main.rs", Some(2), Some(4));
+        let shared_result = file_content_from_indexed_file(
+            index.capture_shared_file("src/main.rs").unwrap().as_ref(),
+            Some(2),
+            Some(4),
+        );
+
+        assert_eq!(shared_result, live_result);
     }
 
     // --- guard messages ---
@@ -1705,6 +2089,7 @@ mod tests {
             IndexedFile {
                 relative_path: path.to_string(),
                 language: LanguageId::Rust,
+                classification: crate::domain::FileClassification::for_code_path(path),
                 content: content.to_vec(),
                 symbols,
                 parse_status: ParseStatus::Parsed,
@@ -1719,7 +2104,10 @@ mod tests {
     fn make_index_with_reverse(files: Vec<(String, IndexedFile)>) -> LiveIndex {
         use crate::live_index::trigram::TrigramIndex;
         let cb = CircuitBreakerState::new(0.20);
-        let files_map = files.into_iter().collect::<HashMap<_, _>>();
+        let files_map = files
+            .into_iter()
+            .map(|(path, file)| (path, std::sync::Arc::new(file)))
+            .collect::<HashMap<_, _>>();
         let trigram_index = TrigramIndex::build_from_files(&files_map);
         let mut index = LiveIndex {
             files: files_map,
@@ -1728,10 +2116,15 @@ mod tests {
             load_duration: Duration::from_millis(42),
             cb_state: cb,
             is_empty: false,
+            load_source: crate::live_index::store::IndexLoadSource::FreshLoad,
+            snapshot_verify_state: crate::live_index::store::SnapshotVerifyState::NotNeeded,
             reverse_index: HashMap::new(),
+            files_by_basename: HashMap::new(),
+            files_by_dir_component: HashMap::new(),
             trigram_index,
         };
         index.rebuild_reverse_index();
+        index.rebuild_path_indices();
         index
     }
 
@@ -1785,6 +2178,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_find_references_result_view_matches_live_index_output() {
+        let content = b"fn handle() {\n    process(x);\n}\n";
+        let sym = make_symbol_with_bytes("handle", SymbolKind::Function, 0, 1, 3, 0, 30);
+        let r = make_ref("process", ReferenceKind::Call, 2, Some(0));
+        let (key, file) = make_file_with_refs("src/handler.rs", content, vec![sym], vec![r]);
+        let index = make_index_with_reverse(vec![(key, file)]);
+
+        let live_result = find_references_result(&index, "process", None);
+        let captured_result = find_references_result_view(
+            &index.capture_find_references_view("process", None),
+            "process",
+        );
+
+        assert_eq!(captured_result, live_result);
+    }
+
     // ─── find_dependents_result tests ─────────────────────────────────────
 
     #[test]
@@ -1816,6 +2226,23 @@ mod tests {
         let index = make_index_with_reverse(vec![(key, file)]);
         let result = find_dependents_result(&index, "src/db.rs");
         assert_eq!(result, "No dependents found for \"src/db.rs\"");
+    }
+
+    #[test]
+    fn test_find_dependents_result_view_matches_live_index_output() {
+        let content_b = b"use crate::db;\n";
+        let r = make_ref("db", ReferenceKind::Import, 1, None);
+        let (key_b, file_b) = make_file_with_refs("src/handler.rs", content_b, vec![], vec![r]);
+        let (key_a, file_a) = make_file("src/db.rs", b"pub fn connect() {}", vec![]);
+        let index = make_index_with_reverse(vec![(key_a, file_a), (key_b, file_b)]);
+
+        let live_result = find_dependents_result(&index, "src/db.rs");
+        let captured_result = find_dependents_result_view(
+            &index.capture_find_dependents_view("src/db.rs"),
+            "src/db.rs",
+        );
+
+        assert_eq!(captured_result, live_result);
     }
 
     // ─── context_bundle_result tests ──────────────────────────────────────
@@ -1900,6 +2327,23 @@ mod tests {
             result.contains("Type usages (0)"),
             "zero type usages section missing, got: {result}"
         );
+    }
+
+    #[test]
+    fn test_context_bundle_result_view_matches_live_index_output() {
+        let content = b"fn process(x: i32) -> i32 {\n    x + 1\n}\n";
+        let sym = make_symbol_with_bytes("process", SymbolKind::Function, 0, 1, 3, 0, 41);
+        let (key, file) = make_file_with_refs("src/lib.rs", content, vec![sym], vec![]);
+        let index = make_index_with_reverse(vec![(key, file)]);
+
+        let live_result = context_bundle_result(&index, "src/lib.rs", "process", None);
+        let captured_result = context_bundle_result_view(&index.capture_context_bundle_view(
+            "src/lib.rs",
+            "process",
+            None,
+        ));
+
+        assert_eq!(captured_result, live_result);
     }
 
     // --- format_token_savings tests ---
@@ -2206,6 +2650,7 @@ mod tests {
             IndexedFile {
                 relative_path: path.to_string(),
                 language: lang,
+                classification: crate::domain::FileClassification::for_code_path(path),
                 content: content.to_vec(),
                 symbols,
                 parse_status: ParseStatus::Parsed,
@@ -2236,6 +2681,30 @@ mod tests {
             result.contains("1 symbol"),
             "should show symbol count; got: {result}"
         );
+    }
+
+    #[test]
+    fn test_file_tree_view_matches_live_index_output() {
+        let sym1 = make_symbol("foo", SymbolKind::Function, 0, 1, 3);
+        let sym2 = make_symbol("bar", SymbolKind::Function, 0, 1, 3);
+        let (k1, f1) = make_file_with_lang(
+            "src/a.rs",
+            b"fn foo() {}",
+            vec![sym1],
+            crate::domain::LanguageId::Rust,
+        );
+        let (k2, f2) = make_file_with_lang(
+            "tests/b.rs",
+            b"fn bar() {}",
+            vec![sym2],
+            crate::domain::LanguageId::Rust,
+        );
+        let index = make_index(vec![(k1, f1), (k2, f2)]);
+
+        let live_result = file_tree(&index, "", 3);
+        let captured_result = file_tree_view(&index.capture_repo_outline_view().files, "", 3);
+
+        assert_eq!(captured_result, live_result);
     }
 
     #[test]
@@ -2316,6 +2785,30 @@ mod tests {
             !result.contains("b.rs"),
             "src filter should not show tests/b.rs; got: {result}"
         );
+    }
+
+    #[test]
+    fn test_file_tree_repeated_basenames_remain_hierarchical() {
+        let sym = make_symbol("foo", SymbolKind::Function, 0, 1, 3);
+        let index = make_index(vec![
+            make_file_with_lang(
+                "src/live_index/mod.rs",
+                b"fn foo() {}",
+                vec![sym.clone()],
+                crate::domain::LanguageId::Rust,
+            ),
+            make_file_with_lang(
+                "src/protocol/mod.rs",
+                b"fn foo() {}",
+                vec![sym],
+                crate::domain::LanguageId::Rust,
+            ),
+        ]);
+        let result = file_tree(&index, "", 3);
+        assert!(result.contains("live_index/"), "got: {result}");
+        assert!(result.contains("protocol/"), "got: {result}");
+        assert!(!result.contains("live_index/mod.rs"), "got: {result}");
+        assert!(!result.contains("protocol/mod.rs"), "got: {result}");
     }
 
     #[test]

@@ -337,16 +337,20 @@ mod tests {
         use std::sync::{Arc, RwLock};
         use std::time::{Duration, Instant, SystemTime};
 
-        let index = Arc::new(RwLock::new(LiveIndex {
+        let index = crate::live_index::SharedIndexHandle::shared(LiveIndex {
             files: HashMap::new(),
             loaded_at: Instant::now(),
             loaded_at_system: SystemTime::now(),
             load_duration: Duration::ZERO,
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: true,
+            load_source: crate::live_index::store::IndexLoadSource::EmptyBootstrap,
+            snapshot_verify_state: crate::live_index::store::SnapshotVerifyState::NotNeeded,
             reverse_index: HashMap::new(),
+            files_by_basename: HashMap::new(),
+            files_by_dir_component: HashMap::new(),
             trigram_index: crate::live_index::trigram::TrigramIndex::new(),
-        }));
+        });
 
         let state = SidecarState {
             index,

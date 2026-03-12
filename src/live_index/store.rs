@@ -1,15 +1,17 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ops::{Deref, DerefMut};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, LockResult, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant, SystemTime};
 
 use rayon::prelude::*;
 use tracing::{error, info, warn};
 
+use super::query::RepoOutlineView;
 use crate::domain::{
-    FileOutcome, FileProcessingResult, LanguageId, ReferenceRecord, SymbolRecord,
-    find_enclosing_symbol,
+    FileClassification, FileOutcome, FileProcessingResult, LanguageId, ReferenceRecord,
+    SymbolRecord, find_enclosing_symbol,
 };
 use crate::error::Result;
 use crate::{discovery, parsing};
@@ -30,6 +32,7 @@ pub enum ParseStatus {
 pub struct IndexedFile {
     pub relative_path: String,
     pub language: LanguageId,
+    pub classification: FileClassification,
     /// Raw file bytes stored in memory (LIDX-03 — zero disk I/O on read path).
     pub content: Vec<u8>,
     /// Symbols extracted by the parser.
@@ -75,6 +78,7 @@ impl IndexedFile {
         let FileProcessingResult {
             relative_path,
             language,
+            classification,
             outcome: _,
             symbols,
             byte_len,
@@ -104,6 +108,7 @@ impl IndexedFile {
         IndexedFile {
             relative_path,
             language,
+            classification,
             content,
             symbols,
             parse_status,
@@ -112,6 +117,12 @@ impl IndexedFile {
             references,
             alias_map,
         }
+    }
+}
+
+impl AsRef<IndexedFile> for IndexedFile {
+    fn as_ref(&self) -> &IndexedFile {
+        self
     }
 }
 
@@ -225,10 +236,54 @@ pub enum IndexState {
     },
 }
 
+/// Where the current in-memory index contents were sourced from.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum IndexLoadSource {
+    EmptyBootstrap,
+    FreshLoad,
+    SnapshotRestore,
+}
+
+/// Reconciliation status after restoring from a persisted snapshot.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SnapshotVerifyState {
+    NotNeeded,
+    Pending,
+    Running,
+    Completed,
+}
+
+/// Compact published status label for handle-level state consumers.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PublishedIndexStatus {
+    Empty,
+    Loading,
+    Ready,
+    Degraded,
+}
+
+/// Lightweight published state captured from the live index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublishedIndexState {
+    pub generation: u64,
+    pub status: PublishedIndexStatus,
+    pub degraded_summary: Option<String>,
+    pub file_count: usize,
+    pub parsed_count: usize,
+    pub partial_parse_count: usize,
+    pub failed_count: usize,
+    pub symbol_count: usize,
+    pub loaded_at_system: SystemTime,
+    pub load_duration: Duration,
+    pub load_source: IndexLoadSource,
+    pub snapshot_verify_state: SnapshotVerifyState,
+    pub is_empty: bool,
+}
+
 /// The in-memory index: file contents and parsed symbols for all discovered files.
 pub struct LiveIndex {
     /// Keyed by `relative_path` (forward-slash normalized).
-    pub(crate) files: HashMap<String, IndexedFile>,
+    pub(crate) files: HashMap<String, Arc<IndexedFile>>,
     pub(crate) loaded_at: Instant,
     /// Wall-clock time when index was last loaded. Used by what_changed tool.
     pub(crate) loaded_at_system: SystemTime,
@@ -236,15 +291,193 @@ pub struct LiveIndex {
     pub(crate) cb_state: CircuitBreakerState,
     /// True when constructed with empty() and reload() has not been called.
     pub(crate) is_empty: bool,
+    /// Provenance for the current live contents.
+    pub(crate) load_source: IndexLoadSource,
+    /// Snapshot reconciliation status for snapshot-restored indices.
+    pub(crate) snapshot_verify_state: SnapshotVerifyState,
     /// Repo-level reverse index: reference name -> all locations in the index.
     /// Rebuilt synchronously after every mutation (update_file, add_file, remove_file, reload).
     pub(crate) reverse_index: HashMap<String, Vec<ReferenceLocation>>,
+    /// Secondary path index: lowercase basename -> sorted matching relative paths.
+    pub(crate) files_by_basename: HashMap<String, Vec<String>>,
+    /// Secondary path index: lowercase directory component -> sorted matching relative paths.
+    pub(crate) files_by_dir_component: HashMap<String, Vec<String>>,
     /// Trigram search index for file-level text search acceleration.
     pub(crate) trigram_index: super::trigram::TrigramIndex,
 }
 
+/// Central shared handle for the live in-memory index.
+///
+/// This is intentionally a thin compatibility shell over the current `RwLock<LiveIndex>` so the
+/// project can later attach published read snapshots or other state-machine metadata here without
+/// another repo-wide alias migration.
+pub struct SharedIndexHandle {
+    live: RwLock<LiveIndex>,
+    published_state: RwLock<Arc<PublishedIndexState>>,
+    published_repo_outline: RwLock<Arc<RepoOutlineView>>,
+    next_generation: AtomicU64,
+}
+
+/// Write guard that republishes lightweight handle state when mutated data is released.
+pub struct SharedIndexWriteGuard<'a> {
+    handle: &'a SharedIndexHandle,
+    guard: RwLockWriteGuard<'a, LiveIndex>,
+    dirty: bool,
+}
+
+impl SharedIndexHandle {
+    pub fn new(index: LiveIndex) -> Self {
+        let published_state = Arc::new(PublishedIndexState::capture(0, &index));
+        let published_repo_outline = Arc::new(index.capture_repo_outline_view());
+        Self {
+            live: RwLock::new(index),
+            published_state: RwLock::new(published_state),
+            published_repo_outline: RwLock::new(published_repo_outline),
+            next_generation: AtomicU64::new(1),
+        }
+    }
+
+    pub fn shared(index: LiveIndex) -> Arc<Self> {
+        Arc::new(Self::new(index))
+    }
+
+    pub fn read(&self) -> LockResult<RwLockReadGuard<'_, LiveIndex>> {
+        self.live.read()
+    }
+
+    pub fn write(
+        &self,
+    ) -> std::result::Result<
+        SharedIndexWriteGuard<'_>,
+        std::sync::PoisonError<RwLockWriteGuard<'_, LiveIndex>>,
+    > {
+        self.live.write().map(|guard| SharedIndexWriteGuard {
+            handle: self,
+            guard,
+            dirty: false,
+        })
+    }
+
+    pub fn published_state(&self) -> Arc<PublishedIndexState> {
+        self.published_state.read().expect("lock poisoned").clone()
+    }
+
+    pub fn published_repo_outline(&self) -> Arc<RepoOutlineView> {
+        self.published_repo_outline
+            .read()
+            .expect("lock poisoned")
+            .clone()
+    }
+
+    pub fn reload(&self, root: &Path) -> crate::error::Result<()> {
+        let mut live = self.live.write().expect("lock poisoned");
+        live.reload(root)?;
+        self.publish_locked(&live);
+        Ok(())
+    }
+
+    pub fn update_file(&self, path: String, file: IndexedFile) {
+        let mut live = self.live.write().expect("lock poisoned");
+        live.update_file(path, file);
+        self.publish_locked(&live);
+    }
+
+    pub fn add_file(&self, path: String, file: IndexedFile) {
+        let mut live = self.live.write().expect("lock poisoned");
+        live.add_file(path, file);
+        self.publish_locked(&live);
+    }
+
+    pub fn remove_file(&self, path: &str) {
+        let mut live = self.live.write().expect("lock poisoned");
+        live.remove_file(path);
+        self.publish_locked(&live);
+    }
+
+    pub fn mark_snapshot_verify_running(&self) {
+        let mut live = self.live.write().expect("lock poisoned");
+        live.mark_snapshot_verify_running();
+        self.publish_locked(&live);
+    }
+
+    pub fn mark_snapshot_verify_completed(&self) {
+        let mut live = self.live.write().expect("lock poisoned");
+        live.mark_snapshot_verify_completed();
+        self.publish_locked(&live);
+    }
+
+    fn publish_locked(&self, live: &LiveIndex) {
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        let published_state = Arc::new(PublishedIndexState::capture(generation, live));
+        let published_repo_outline = Arc::new(live.capture_repo_outline_view());
+        *self.published_state.write().expect("lock poisoned") = published_state;
+        *self.published_repo_outline.write().expect("lock poisoned") = published_repo_outline;
+    }
+}
+
+impl<'a> Deref for SharedIndexWriteGuard<'a> {
+    type Target = LiveIndex;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl DerefMut for SharedIndexWriteGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.dirty = true;
+        &mut self.guard
+    }
+}
+
+impl Drop for SharedIndexWriteGuard<'_> {
+    fn drop(&mut self) {
+        if self.dirty {
+            self.handle.publish_locked(&self.guard);
+        }
+    }
+}
+
 /// Thread-safe shared handle to the index.
-pub type SharedIndex = Arc<RwLock<LiveIndex>>;
+pub type SharedIndex = Arc<SharedIndexHandle>;
+
+impl PublishedIndexState {
+    fn capture(generation: u64, index: &LiveIndex) -> Self {
+        let (status, degraded_summary) = match index.index_state() {
+            IndexState::Empty => (PublishedIndexStatus::Empty, None),
+            IndexState::Loading => (PublishedIndexStatus::Loading, None),
+            IndexState::Ready => (PublishedIndexStatus::Ready, None),
+            IndexState::CircuitBreakerTripped { summary } => {
+                (PublishedIndexStatus::Degraded, Some(summary))
+            }
+        };
+        let stats = index.health_stats();
+        Self {
+            generation,
+            status,
+            degraded_summary,
+            file_count: stats.file_count,
+            parsed_count: stats.parsed_count,
+            partial_parse_count: stats.partial_parse_count,
+            failed_count: stats.failed_count,
+            symbol_count: stats.symbol_count,
+            loaded_at_system: index.loaded_at_system,
+            load_duration: stats.load_duration,
+            load_source: index.load_source,
+            snapshot_verify_state: index.snapshot_verify_state,
+            is_empty: index.is_empty,
+        }
+    }
+
+    pub fn status_label(&self) -> &'static str {
+        match self.status {
+            PublishedIndexStatus::Empty => "Empty",
+            PublishedIndexStatus::Loading => "Loading",
+            PublishedIndexStatus::Ready => "Ready",
+            PublishedIndexStatus::Degraded => "Degraded",
+        }
+    }
+}
 
 impl LiveIndex {
     /// Load all source files under `root` into memory in parallel (Rayon), parse them,
@@ -273,7 +506,12 @@ impl LiveIndex {
                     }
                 };
 
-                let result = parsing::process_file(&df.relative_path, &bytes, df.language.clone());
+                let result = parsing::process_file_with_classification(
+                    &df.relative_path,
+                    &bytes,
+                    df.language.clone(),
+                    df.classification,
+                );
                 let indexed = IndexedFile::from_parse_result(result, bytes);
                 Some((df.relative_path.clone(), indexed))
             })
@@ -281,7 +519,8 @@ impl LiveIndex {
 
         // 3. Build HashMap sequentially, running circuit breaker checks
         let cb_state = CircuitBreakerState::from_env();
-        let mut files: HashMap<String, IndexedFile> = HashMap::with_capacity(parse_results.len());
+        let mut files: HashMap<String, Arc<IndexedFile>> =
+            HashMap::with_capacity(parse_results.len());
 
         let mut cb_tripped = false;
         for (path, indexed_file) in parse_results {
@@ -299,11 +538,11 @@ impl LiveIndex {
                 error!("{}", summary);
                 cb_tripped = true;
                 // Still insert the file before breaking
-                files.insert(path, indexed_file);
+                files.insert(path, Arc::new(indexed_file));
                 break;
             }
 
-            files.insert(path, indexed_file);
+            files.insert(path, Arc::new(indexed_file));
         }
 
         if cb_tripped {
@@ -327,12 +566,17 @@ impl LiveIndex {
             load_duration,
             cb_state,
             is_empty: false,
+            load_source: IndexLoadSource::FreshLoad,
+            snapshot_verify_state: SnapshotVerifyState::NotNeeded,
             reverse_index: HashMap::new(),
+            files_by_basename: HashMap::new(),
+            files_by_dir_component: HashMap::new(),
             trigram_index,
         };
         index.rebuild_reverse_index();
+        index.rebuild_path_indices();
 
-        Ok(Arc::new(RwLock::new(index)))
+        Ok(SharedIndexHandle::shared(index))
     }
 
     /// Create an empty `SharedIndex` with no files loaded.
@@ -347,10 +591,14 @@ impl LiveIndex {
             load_duration: Duration::ZERO,
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: true,
+            load_source: IndexLoadSource::EmptyBootstrap,
+            snapshot_verify_state: SnapshotVerifyState::NotNeeded,
             reverse_index: HashMap::new(),
+            files_by_basename: HashMap::new(),
+            files_by_dir_component: HashMap::new(),
             trigram_index: super::trigram::TrigramIndex::new(),
         };
-        Arc::new(RwLock::new(index))
+        SharedIndexHandle::shared(index)
     }
 
     /// Reload all source files under `root` into this index in-place.
@@ -389,7 +637,12 @@ impl LiveIndex {
                     }
                 };
 
-                let result = parsing::process_file(&df.relative_path, &bytes, df.language.clone());
+                let result = parsing::process_file_with_classification(
+                    &df.relative_path,
+                    &bytes,
+                    df.language.clone(),
+                    df.classification,
+                );
                 let indexed = IndexedFile::from_parse_result(result, bytes);
                 Some((df.relative_path.clone(), indexed))
             })
@@ -397,7 +650,7 @@ impl LiveIndex {
 
         // 3. Build new file map with fresh circuit breaker
         let new_cb = CircuitBreakerState::from_env();
-        let mut new_files: HashMap<String, IndexedFile> =
+        let mut new_files: HashMap<String, Arc<IndexedFile>> =
             HashMap::with_capacity(parse_results.len());
 
         let mut cb_tripped = false;
@@ -415,11 +668,11 @@ impl LiveIndex {
                 let summary = new_cb.summary();
                 error!("{}", summary);
                 cb_tripped = true;
-                new_files.insert(path, indexed_file);
+                new_files.insert(path, Arc::new(indexed_file));
                 break;
             }
 
-            new_files.insert(path, indexed_file);
+            new_files.insert(path, Arc::new(indexed_file));
         }
 
         if cb_tripped {
@@ -441,8 +694,11 @@ impl LiveIndex {
         self.load_duration = load_duration;
         self.cb_state = new_cb;
         self.is_empty = false;
+        self.load_source = IndexLoadSource::FreshLoad;
+        self.snapshot_verify_state = SnapshotVerifyState::NotNeeded;
         self.trigram_index = super::trigram::TrigramIndex::build_from_files(&self.files);
         self.rebuild_reverse_index();
+        self.rebuild_path_indices();
 
         Ok(())
     }
@@ -452,8 +708,13 @@ impl LiveIndex {
     /// Updates `loaded_at_system` to reflect the mutation time.
     /// If the file already exists, its entry is replaced atomically.
     pub fn update_file(&mut self, path: String, file: IndexedFile) {
+        if self.files.contains_key(&path) {
+            self.remove_path_indices_for_path(&path);
+        }
         self.trigram_index.update_file(&path, &file.content);
-        self.files.insert(path, file);
+        self.files.insert(path.clone(), Arc::new(file));
+        self.insert_path_indices_for_path(&path);
+        self.is_empty = false;
         self.loaded_at_system = SystemTime::now();
         self.rebuild_reverse_index();
     }
@@ -474,6 +735,7 @@ impl LiveIndex {
     pub fn remove_file(&mut self, path: &str) {
         if self.files.remove(path).is_some() {
             self.trigram_index.remove_file(path);
+            self.remove_path_indices_for_path(path);
             self.loaded_at_system = SystemTime::now();
             self.rebuild_reverse_index();
         }
@@ -496,6 +758,112 @@ impl LiveIndex {
             }
         }
         self.reverse_index = idx;
+    }
+
+    pub(crate) fn rebuild_path_indices(&mut self) {
+        self.files_by_basename.clear();
+        self.files_by_dir_component.clear();
+
+        let paths: Vec<String> = self.files.keys().cloned().collect();
+        for path in &paths {
+            self.insert_path_indices_for_path(path);
+        }
+    }
+
+    fn insert_path_indices_for_path(&mut self, path: &str) {
+        if let Some(basename) = basename_key(path) {
+            insert_sorted_unique(self.files_by_basename.entry(basename).or_default(), path);
+        }
+
+        for component in dir_component_keys(path) {
+            insert_sorted_unique(
+                self.files_by_dir_component.entry(component).or_default(),
+                path,
+            );
+        }
+    }
+
+    fn remove_path_indices_for_path(&mut self, path: &str) {
+        if let Some(basename) = basename_key(path)
+            && let Some(paths) = self.files_by_basename.get_mut(&basename)
+        {
+            remove_sorted_path(paths, path);
+            if paths.is_empty() {
+                self.files_by_basename.remove(&basename);
+            }
+        }
+
+        for component in dir_component_keys(path) {
+            if let Some(paths) = self.files_by_dir_component.get_mut(&component) {
+                remove_sorted_path(paths, path);
+                if paths.is_empty() {
+                    self.files_by_dir_component.remove(&component);
+                }
+            }
+        }
+    }
+
+    /// Returns where the current in-memory contents came from.
+    pub fn load_source(&self) -> IndexLoadSource {
+        self.load_source
+    }
+
+    /// Returns the current snapshot reconciliation state.
+    pub fn snapshot_verify_state(&self) -> SnapshotVerifyState {
+        self.snapshot_verify_state
+    }
+
+    pub(crate) fn mark_snapshot_verify_running(&mut self) {
+        if self.load_source == IndexLoadSource::SnapshotRestore {
+            self.snapshot_verify_state = SnapshotVerifyState::Running;
+        }
+    }
+
+    pub(crate) fn mark_snapshot_verify_completed(&mut self) {
+        if self.load_source == IndexLoadSource::SnapshotRestore {
+            self.snapshot_verify_state = SnapshotVerifyState::Completed;
+        }
+    }
+}
+
+fn basename_key(path: &str) -> Option<String> {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase())
+}
+
+fn dir_component_keys(path: &str) -> Vec<String> {
+    let components: Vec<&str> = path
+        .split(['/', '\\'])
+        .filter(|component| !component.is_empty())
+        .collect();
+    if components.len() <= 1 {
+        return Vec::new();
+    }
+
+    let mut seen = HashSet::new();
+    let mut keys = Vec::new();
+    for component in &components[..components.len() - 1] {
+        let key = component.to_ascii_lowercase();
+        if seen.insert(key.clone()) {
+            keys.push(key);
+        }
+    }
+    keys.sort();
+    keys
+}
+
+fn insert_sorted_unique(paths: &mut Vec<String>, path: &str) {
+    match paths.binary_search_by(|existing| existing.as_str().cmp(path)) {
+        Ok(_) => {}
+        Err(pos) => paths.insert(pos, path.to_string()),
+    }
+}
+
+fn remove_sorted_path(paths: &mut Vec<String>, path: &str) {
+    if let Ok(pos) = paths.binary_search_by(|existing| existing.as_str().cmp(path)) {
+        paths.remove(pos);
     }
 }
 
@@ -523,6 +891,7 @@ mod tests {
         FileProcessingResult {
             relative_path: "test.rs".to_string(),
             language: LanguageId::Rust,
+            classification: crate::domain::FileClassification::for_code_path("test.rs"),
             outcome,
             symbols,
             byte_len: 42,
@@ -674,6 +1043,11 @@ mod tests {
             "valid files should not trip circuit breaker"
         );
         assert_eq!(index.file_count(), 5);
+        assert_eq!(index.load_source(), IndexLoadSource::FreshLoad);
+        assert_eq!(
+            index.snapshot_verify_state(),
+            SnapshotVerifyState::NotNeeded
+        );
     }
 
     #[test]
@@ -728,6 +1102,169 @@ mod tests {
         let shared = LiveIndex::empty();
         let index = shared.read().unwrap();
         assert_eq!(index.file_count(), 0);
+        assert_eq!(index.load_source(), IndexLoadSource::EmptyBootstrap);
+        assert_eq!(
+            index.snapshot_verify_state(),
+            SnapshotVerifyState::NotNeeded
+        );
+    }
+
+    #[test]
+    fn test_shared_index_handle_preserves_read_write_access() {
+        let shared = LiveIndex::empty();
+        {
+            let mut live = shared.write().expect("lock poisoned");
+            live.add_file(
+                "src/new.rs".to_string(),
+                make_indexed_file_for_mutation("src/new.rs"),
+            );
+        }
+
+        let index = shared.read().unwrap();
+        assert!(index.get_file("src/new.rs").is_some());
+    }
+
+    #[test]
+    fn test_shared_index_handle_published_state_tracks_generation_and_counts() {
+        let shared = LiveIndex::empty();
+        let initial = shared.published_state();
+        assert_eq!(initial.generation, 0);
+        assert_eq!(initial.status, PublishedIndexStatus::Empty);
+        assert_eq!(initial.degraded_summary, None);
+        assert_eq!(initial.file_count, 0);
+        assert_eq!(initial.parsed_count, 0);
+        assert_eq!(initial.partial_parse_count, 0);
+        assert_eq!(initial.failed_count, 0);
+        assert_eq!(initial.load_source, IndexLoadSource::EmptyBootstrap);
+
+        shared.add_file(
+            "src/new.rs".to_string(),
+            make_indexed_file_for_mutation("src/new.rs"),
+        );
+        let after_add = shared.published_state();
+        assert_eq!(after_add.generation, 1);
+        assert_eq!(after_add.status, PublishedIndexStatus::Ready);
+        assert_eq!(after_add.degraded_summary, None);
+        assert_eq!(after_add.file_count, 1);
+        assert_eq!(after_add.parsed_count, 1);
+        assert_eq!(after_add.partial_parse_count, 0);
+        assert_eq!(after_add.failed_count, 0);
+        assert_eq!(after_add.symbol_count, 1);
+
+        shared.remove_file("src/new.rs");
+        let after_remove = shared.published_state();
+        assert_eq!(after_remove.generation, 2);
+        assert_eq!(after_remove.status, PublishedIndexStatus::Ready);
+        assert_eq!(after_remove.degraded_summary, None);
+        assert_eq!(after_remove.file_count, 0);
+        assert_eq!(after_remove.symbol_count, 0);
+    }
+
+    #[test]
+    fn test_shared_index_handle_write_guard_publishes_on_drop() {
+        let shared = LiveIndex::empty();
+
+        {
+            let mut live = shared.write().expect("lock poisoned");
+            live.add_file(
+                "src/new.rs".to_string(),
+                make_indexed_file_for_mutation("src/new.rs"),
+            );
+        }
+
+        let after_add = shared.published_state();
+        assert_eq!(after_add.generation, 1);
+        assert_eq!(after_add.status, PublishedIndexStatus::Ready);
+        assert_eq!(after_add.degraded_summary, None);
+        assert_eq!(after_add.file_count, 1);
+
+        {
+            let mut live = shared.write().expect("lock poisoned");
+            live.remove_file("src/new.rs");
+        }
+
+        let after_remove = shared.published_state();
+        assert_eq!(after_remove.generation, 2);
+        assert_eq!(after_remove.status, PublishedIndexStatus::Ready);
+        assert_eq!(after_remove.degraded_summary, None);
+        assert_eq!(after_remove.file_count, 0);
+    }
+
+    #[test]
+    fn test_shared_index_handle_published_state_tracks_verify_transitions() {
+        let mut live = make_empty_live_index();
+        live.is_empty = false;
+        live.load_source = IndexLoadSource::SnapshotRestore;
+        live.snapshot_verify_state = SnapshotVerifyState::Pending;
+        let shared = SharedIndexHandle::shared(live);
+
+        shared.mark_snapshot_verify_running();
+        let running = shared.published_state();
+        assert_eq!(running.generation, 1);
+        assert_eq!(running.status, PublishedIndexStatus::Ready);
+        assert_eq!(running.degraded_summary, None);
+        assert_eq!(running.snapshot_verify_state, SnapshotVerifyState::Running);
+
+        shared.mark_snapshot_verify_completed();
+        let completed = shared.published_state();
+        assert_eq!(completed.generation, 2);
+        assert_eq!(
+            completed.snapshot_verify_state,
+            SnapshotVerifyState::Completed
+        );
+    }
+
+    #[test]
+    fn test_shared_index_handle_published_state_captures_degraded_summary() {
+        let mut live = make_empty_live_index();
+        live.is_empty = false;
+        for _ in 0..3 {
+            live.cb_state.record_failure("src/bad.rs", "parse failure");
+        }
+        for _ in 0..7 {
+            live.cb_state.record_success();
+        }
+        assert!(live.cb_state.should_abort(), "circuit breaker should trip");
+        let shared = SharedIndexHandle::shared(live);
+
+        let published = shared.published_state();
+        assert_eq!(published.status, PublishedIndexStatus::Degraded);
+        assert!(
+            published
+                .degraded_summary
+                .as_deref()
+                .is_some_and(|summary| summary.contains("circuit breaker tripped")),
+            "expected degraded summary, got {:?}",
+            published.degraded_summary
+        );
+    }
+
+    #[test]
+    fn test_shared_index_handle_published_repo_outline_tracks_mutations() {
+        let shared = LiveIndex::empty();
+
+        let initial = shared.published_repo_outline();
+        assert_eq!(initial.total_files, 0);
+        assert_eq!(initial.total_symbols, 0);
+        assert!(initial.files.is_empty());
+
+        shared.add_file(
+            "src/main.rs".to_string(),
+            make_indexed_file_for_mutation("src/main.rs"),
+        );
+        let after_add = shared.published_repo_outline();
+        assert_eq!(after_add.total_files, 1);
+        assert_eq!(after_add.total_symbols, 1);
+        assert_eq!(after_add.files[0].relative_path, "src/main.rs");
+
+        {
+            let mut live = shared.write().expect("lock poisoned");
+            live.remove_file("src/main.rs");
+        }
+        let after_remove = shared.published_repo_outline();
+        assert_eq!(after_remove.total_files, 0);
+        assert_eq!(after_remove.total_symbols, 0);
+        assert!(after_remove.files.is_empty());
     }
 
     #[test]
@@ -759,6 +1296,11 @@ mod tests {
         assert_eq!(index.file_count(), 2);
         assert!(index.is_ready(), "after reload should be ready");
         assert_eq!(index.index_state(), IndexState::Ready);
+        assert_eq!(index.load_source(), IndexLoadSource::FreshLoad);
+        assert_eq!(
+            index.snapshot_verify_state(),
+            SnapshotVerifyState::NotNeeded
+        );
     }
 
     #[test]
@@ -820,6 +1362,7 @@ mod tests {
         IndexedFile {
             relative_path: path.to_string(),
             language: LanguageId::Rust,
+            classification: crate::domain::FileClassification::for_code_path(path),
             content: b"fn test() {}".to_vec(),
             symbols: vec![dummy_symbol()],
             parse_status: ParseStatus::Parsed,
@@ -838,9 +1381,76 @@ mod tests {
             load_duration: Duration::ZERO,
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: false,
+            load_source: IndexLoadSource::FreshLoad,
+            snapshot_verify_state: SnapshotVerifyState::NotNeeded,
             reverse_index: HashMap::new(),
+            files_by_basename: HashMap::new(),
+            files_by_dir_component: HashMap::new(),
             trigram_index: crate::live_index::trigram::TrigramIndex::new(),
         }
+    }
+
+    #[test]
+    fn test_live_index_load_builds_path_indices() {
+        let dir = TempDir::new().expect("failed to create tempdir");
+        fs::create_dir_all(dir.path().join("src")).expect("failed to create src dir");
+        fs::create_dir_all(dir.path().join("tests")).expect("failed to create tests dir");
+        write_file(dir.path(), "src/lib.rs", "pub fn lib_fn() {}");
+        write_file(dir.path(), "tests/lib.rs", "fn test_lib() {}");
+
+        let shared = LiveIndex::load(dir.path()).expect("LiveIndex::load failed");
+        let index = shared.read().unwrap();
+
+        assert_eq!(
+            index.files_by_basename.get("lib.rs"),
+            Some(&vec!["src/lib.rs".to_string(), "tests/lib.rs".to_string()])
+        );
+        assert_eq!(
+            index.files_by_dir_component.get("src"),
+            Some(&vec!["src/lib.rs".to_string()])
+        );
+        assert_eq!(
+            index.files_by_dir_component.get("tests"),
+            Some(&vec!["tests/lib.rs".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_live_index_reload_rebuilds_path_indices() {
+        let dir = TempDir::new().expect("failed to create tempdir");
+        fs::create_dir_all(dir.path().join("src")).expect("failed to create src dir");
+        write_file(dir.path(), "src/alpha.rs", "fn alpha() {}");
+
+        let shared = LiveIndex::load(dir.path()).expect("LiveIndex::load failed");
+
+        fs::remove_file(dir.path().join("src/alpha.rs")).expect("failed to remove alpha");
+        fs::create_dir_all(dir.path().join("tests")).expect("failed to create tests dir");
+        write_file(dir.path(), "tests/beta.rs", "fn beta() {}");
+
+        {
+            let mut index = shared.write().unwrap();
+            index.reload(dir.path()).expect("reload should succeed");
+        }
+
+        let index = shared.read().unwrap();
+        assert!(!index.files_by_basename.contains_key("alpha.rs"));
+        assert_eq!(
+            index.files_by_basename.get("beta.rs"),
+            Some(&vec!["tests/beta.rs".to_string()])
+        );
+        assert!(!index.files_by_dir_component.contains_key("src"));
+        assert_eq!(
+            index.files_by_dir_component.get("tests"),
+            Some(&vec!["tests/beta.rs".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_dir_component_keys_deduplicate_and_accept_backslashes() {
+        assert_eq!(
+            dir_component_keys("src\\live_index\\src\\store.rs"),
+            vec!["live_index".to_string(), "src".to_string()]
+        );
     }
 
     #[test]
@@ -855,6 +1465,14 @@ mod tests {
             index.get_file("src/new.rs").is_some(),
             "file should be inserted"
         );
+        assert_eq!(
+            index.files_by_basename.get("new.rs"),
+            Some(&vec!["src/new.rs".to_string()])
+        );
+        assert_eq!(
+            index.files_by_dir_component.get("src"),
+            Some(&vec!["src/new.rs".to_string()])
+        );
         let ts = index.loaded_at_system;
         assert!(ts >= before, "loaded_at_system should be >= before update");
         assert!(ts <= after, "loaded_at_system should be <= after update");
@@ -866,6 +1484,7 @@ mod tests {
         let file1 = IndexedFile {
             relative_path: "src/foo.rs".to_string(),
             language: LanguageId::Rust,
+            classification: crate::domain::FileClassification::for_code_path("src/foo.rs"),
             content: b"fn old() {}".to_vec(),
             symbols: vec![],
             parse_status: ParseStatus::Parsed,
@@ -879,6 +1498,7 @@ mod tests {
         let file2 = IndexedFile {
             relative_path: "src/foo.rs".to_string(),
             language: LanguageId::Rust,
+            classification: crate::domain::FileClassification::for_code_path("src/foo.rs"),
             content: b"fn new() {}".to_vec(),
             symbols: vec![dummy_symbol()],
             parse_status: ParseStatus::Parsed,
@@ -895,6 +1515,14 @@ mod tests {
             "should have replaced the file"
         );
         assert_eq!(index.file_count(), 1, "should still have exactly 1 file");
+        assert_eq!(
+            index.files_by_basename.get("foo.rs"),
+            Some(&vec!["src/foo.rs".to_string()])
+        );
+        assert_eq!(
+            index.files_by_dir_component.get("src"),
+            Some(&vec!["src/foo.rs".to_string()])
+        );
     }
 
     #[test]
@@ -926,6 +1554,8 @@ mod tests {
             "file should be removed"
         );
         assert_eq!(index.file_count(), 0);
+        assert!(!index.files_by_basename.contains_key("to_delete.rs"));
+        assert!(!index.files_by_dir_component.contains_key("src"));
     }
 
     #[test]
@@ -986,6 +1616,7 @@ mod tests {
         IndexedFile {
             relative_path: path.to_string(),
             language: LanguageId::Rust,
+            classification: crate::domain::FileClassification::for_code_path(path),
             content: b"fn test() {}".to_vec(),
             symbols: vec![],
             parse_status: ParseStatus::Parsed,
@@ -1006,6 +1637,7 @@ mod tests {
         let result = FileProcessingResult {
             relative_path: "test.rs".to_string(),
             language: LanguageId::Rust,
+            classification: crate::domain::FileClassification::for_code_path("test.rs"),
             outcome: FileOutcome::Processed,
             symbols: vec![],
             byte_len: 0,

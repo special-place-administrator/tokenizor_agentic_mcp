@@ -295,16 +295,16 @@ impl DaemonState {
     pub fn project_health(&self, project_id: &str) -> Option<ProjectHealth> {
         let projects = self.projects.read().expect("lock poisoned");
         let project = projects.get(project_id)?;
-        let index = project.index.read().expect("lock poisoned");
+        let published = project.index.published_state();
 
         Some(ProjectHealth {
             project_id: project.project_id.clone(),
             project_name: project.project_name.clone(),
             canonical_root: normalized_path_string(&project.canonical_root),
             session_count: project.session_ids.len(),
-            file_count: index.file_count(),
-            symbol_count: index.symbol_count(),
-            index_state: format!("{:?}", index.index_state()),
+            file_count: published.file_count,
+            symbol_count: published.symbol_count,
+            index_state: published.status_label().to_string(),
             opened_at_unix_secs: unix_seconds(project.opened_at),
         })
     }
@@ -695,11 +695,10 @@ impl ProjectInstance {
     }
 
     fn reload(&mut self, canonical_root: &Path) -> anyhow::Result<(usize, usize)> {
-        let mut guard = self.index.write().expect("lock poisoned");
-        guard.reload(canonical_root)?;
-        let file_count = guard.file_count();
-        let symbol_count = guard.symbol_count();
-        drop(guard);
+        self.index.reload(canonical_root)?;
+        let published = self.index.published_state();
+        let file_count = published.file_count;
+        let symbol_count = published.symbol_count;
 
         abort_watcher_task(&mut self.watcher_task);
         self.watcher_task = start_project_watcher(

@@ -6,7 +6,10 @@ use std::panic;
 
 use tree_sitter::Parser;
 
-use crate::domain::{FileOutcome, FileProcessingResult, LanguageId, ReferenceRecord, SymbolRecord};
+use crate::domain::{
+    FileClassification, FileOutcome, FileProcessingResult, LanguageId, ReferenceRecord,
+    SymbolRecord,
+};
 use crate::hash::digest_hex;
 
 type ParseSourceOutput = (
@@ -20,6 +23,20 @@ pub fn process_file(
     relative_path: &str,
     bytes: &[u8],
     language: LanguageId,
+) -> FileProcessingResult {
+    process_file_with_classification(
+        relative_path,
+        bytes,
+        language,
+        FileClassification::for_code_path(relative_path),
+    )
+}
+
+pub fn process_file_with_classification(
+    relative_path: &str,
+    bytes: &[u8],
+    language: LanguageId,
+    classification: FileClassification,
 ) -> FileProcessingResult {
     let byte_len = bytes.len() as u64;
     let content_hash = digest_hex(bytes);
@@ -39,6 +56,7 @@ pub fn process_file(
             FileProcessingResult {
                 relative_path: relative_path.to_string(),
                 language,
+                classification,
                 outcome,
                 symbols,
                 byte_len,
@@ -50,6 +68,7 @@ pub fn process_file(
         Ok(Err(err)) => FileProcessingResult {
             relative_path: relative_path.to_string(),
             language,
+            classification,
             outcome: FileOutcome::Failed {
                 error: err.to_string(),
             },
@@ -62,6 +81,7 @@ pub fn process_file(
         Err(_panic) => FileProcessingResult {
             relative_path: relative_path.to_string(),
             language,
+            classification,
             outcome: FileOutcome::Failed {
                 error: "tree-sitter parser panicked during parsing".to_string(),
             },

@@ -5,17 +5,20 @@
 /// Background verification corrects stale entries after loading a snapshot.
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::domain::{LanguageId, ReferenceRecord, SymbolRecord};
-use crate::live_index::store::{CircuitBreakerState, IndexedFile, LiveIndex, ParseStatus};
+use crate::domain::{FileClassification, LanguageId, ReferenceRecord, SymbolRecord};
+use crate::live_index::store::{
+    CircuitBreakerState, IndexLoadSource, IndexedFile, LiveIndex, ParseStatus, SnapshotVerifyState,
+};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const CURRENT_VERSION: u32 = 1;
+const CURRENT_VERSION: u32 = 2;
 const INDEX_FILENAME: &str = "index.bin";
 const TOKENIZOR_DIR: &str = ".tokenizor";
 
@@ -36,6 +39,7 @@ pub struct IndexSnapshot {
 pub struct IndexedFileSnapshot {
     pub relative_path: String,
     pub language: LanguageId,
+    pub classification: FileClassification,
     pub content: Vec<u8>,
     pub symbols: Vec<SymbolRecord>,
     pub parse_status: ParseStatus,
@@ -69,9 +73,36 @@ pub struct StatCheckResult {
 ///
 /// Returns `Ok(())` on success. Non-fatal — caller logs and continues.
 pub fn serialize_index(index: &LiveIndex, project_root: &Path) -> anyhow::Result<()> {
-    // Build snapshot from live index data (clone, so caller keeps the lock).
-    let snapshot = build_snapshot(index);
+    let snapshot_input = capture_snapshot_build_input(index);
+    serialize_captured_snapshot(snapshot_input, project_root)
+}
 
+fn capture_snapshot_build_input(index: &LiveIndex) -> SnapshotBuildInput {
+    SnapshotBuildInput {
+        files: index.files.clone(),
+    }
+}
+
+fn serialize_captured_snapshot(
+    snapshot_input: SnapshotBuildInput,
+    project_root: &Path,
+) -> anyhow::Result<()> {
+    let snapshot = build_snapshot(snapshot_input, project_root);
+    write_snapshot(snapshot, project_root)
+}
+
+pub fn serialize_shared_index(
+    shared: &crate::live_index::store::SharedIndex,
+    project_root: &Path,
+) -> anyhow::Result<()> {
+    let snapshot_input = {
+        let guard = shared.read().expect("lock not poisoned");
+        capture_snapshot_build_input(&guard)
+    };
+    serialize_captured_snapshot(snapshot_input, project_root)
+}
+
+fn write_snapshot(snapshot: IndexSnapshot, project_root: &Path) -> anyhow::Result<()> {
     // Serialize with postcard
     let bytes = postcard::to_stdvec(&snapshot)?;
 
@@ -136,12 +167,13 @@ pub fn load_snapshot(project_root: &Path) -> Option<IndexSnapshot> {
 /// Rebuilds the reverse index and trigram index from the snapshot data.
 /// Sets `loaded_at`, `loaded_at_system`, `is_empty = false`.
 pub fn snapshot_to_live_index(snapshot: IndexSnapshot) -> LiveIndex {
-    let mut files: HashMap<String, IndexedFile> = HashMap::with_capacity(snapshot.files.len());
+    let mut files: HashMap<String, Arc<IndexedFile>> = HashMap::with_capacity(snapshot.files.len());
 
     for (path, snap_file) in snapshot.files {
         let indexed_file = IndexedFile {
             relative_path: snap_file.relative_path,
             language: snap_file.language,
+            classification: snap_file.classification,
             content: snap_file.content,
             symbols: snap_file.symbols,
             parse_status: snap_file.parse_status,
@@ -150,7 +182,7 @@ pub fn snapshot_to_live_index(snapshot: IndexSnapshot) -> LiveIndex {
             references: snap_file.references,
             alias_map: snap_file.alias_map,
         };
-        files.insert(path, indexed_file);
+        files.insert(path, Arc::new(indexed_file));
     }
 
     let trigram_index = super::trigram::TrigramIndex::build_from_files(&files);
@@ -162,10 +194,15 @@ pub fn snapshot_to_live_index(snapshot: IndexSnapshot) -> LiveIndex {
         load_duration: Duration::ZERO,
         cb_state: CircuitBreakerState::new(0.20),
         is_empty: false,
+        load_source: IndexLoadSource::SnapshotRestore,
+        snapshot_verify_state: SnapshotVerifyState::Pending,
         reverse_index: HashMap::new(),
+        files_by_basename: HashMap::new(),
+        files_by_dir_component: HashMap::new(),
         trigram_index,
     };
     index.rebuild_reverse_index();
+    index.rebuild_path_indices();
     index
 }
 
@@ -179,12 +216,29 @@ pub fn stat_check_files(
     snapshot_mtimes: &HashMap<String, i64>,
     root: &Path,
 ) -> StatCheckResult {
+    let verify_view = capture_verify_view(index);
+    stat_check_files_from_view(&verify_view, snapshot_mtimes, root)
+}
+
+fn stat_check_files_from_view(
+    verify_view: &VerifyIndexView,
+    snapshot_mtimes: &HashMap<String, i64>,
+    root: &Path,
+) -> StatCheckResult {
+    let known_paths: std::collections::HashSet<&str> = verify_view
+        .files
+        .iter()
+        .map(|file| file.relative_path.as_str())
+        .collect();
     let mut changed = Vec::new();
     let mut deleted = Vec::new();
 
     // Check each indexed file against disk
-    for (rel_path, indexed_file) in &index.files {
-        let abs_path = root.join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+    for file in &verify_view.files {
+        let abs_path = root.join(
+            file.relative_path
+                .replace('/', std::path::MAIN_SEPARATOR_STR),
+        );
         match std::fs::metadata(&abs_path) {
             Ok(meta) => {
                 let on_disk_size = meta.len();
@@ -195,15 +249,18 @@ pub fn stat_check_files(
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
 
-                let stored_mtime = snapshot_mtimes.get(rel_path).copied().unwrap_or(0);
+                let stored_mtime = snapshot_mtimes
+                    .get(&file.relative_path)
+                    .copied()
+                    .unwrap_or(0);
 
-                if on_disk_size != indexed_file.byte_len || on_disk_mtime != stored_mtime {
-                    changed.push(rel_path.clone());
+                if on_disk_size != file.byte_len || on_disk_mtime != stored_mtime {
+                    changed.push(file.relative_path.clone());
                 }
             }
             Err(_) => {
                 // File gone
-                deleted.push(rel_path.clone());
+                deleted.push(file.relative_path.clone());
             }
         }
     }
@@ -212,7 +269,7 @@ pub fn stat_check_files(
     let new_files = match crate::discovery::discover_files(root) {
         Ok(discovered) => discovered
             .into_iter()
-            .filter(|df| !index.files.contains_key(&df.relative_path))
+            .filter(|df| !known_paths.contains(df.relative_path.as_str()))
             .map(|df| df.relative_path)
             .collect(),
         Err(e) => {
@@ -233,15 +290,21 @@ pub fn stat_check_files(
 /// Returns paths of files whose on-disk content hash differs from the index.
 /// Default: 10% (pass 0.10).
 pub fn spot_verify_sample(index: &LiveIndex, root: &Path, sample_pct: f64) -> Vec<String> {
-    use std::collections::HashSet;
+    let verify_view = capture_verify_view(index);
+    spot_verify_sample_from_view(&verify_view, root, sample_pct)
+}
 
-    let all_paths: Vec<&String> = index.files.keys().collect();
-    if all_paths.is_empty() {
+fn spot_verify_sample_from_view(
+    verify_view: &VerifyIndexView,
+    root: &Path,
+    sample_pct: f64,
+) -> Vec<String> {
+    if verify_view.files.is_empty() {
         return Vec::new();
     }
 
     // Deterministic pseudo-random sample: every Nth file
-    let total = all_paths.len();
+    let total = verify_view.files.len();
     let sample_size = ((total as f64 * sample_pct).ceil() as usize)
         .max(1)
         .min(total);
@@ -252,22 +315,21 @@ pub fn spot_verify_sample(index: &LiveIndex, root: &Path, sample_pct: f64) -> Ve
     };
     let step = step.max(1);
 
-    let sampled: HashSet<&str> = all_paths.iter().step_by(step).map(|p| p.as_str()).collect();
-
     let mut mismatches = Vec::new();
 
-    for rel_path in sampled {
-        let abs_path = root.join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+    for file in verify_view.files.iter().step_by(step) {
+        let abs_path = root.join(
+            file.relative_path
+                .replace('/', std::path::MAIN_SEPARATOR_STR),
+        );
         let bytes = match std::fs::read(&abs_path) {
             Ok(b) => b,
             Err(_) => continue,
         };
 
         let on_disk_hash = crate::hash::digest_hex(&bytes);
-        if let Some(indexed_file) = index.files.get(rel_path)
-            && on_disk_hash != indexed_file.content_hash
-        {
-            mismatches.push(rel_path.to_string());
+        if on_disk_hash != file.content_hash {
+            mismatches.push(file.relative_path.clone());
         }
     }
 
@@ -276,13 +338,45 @@ pub fn spot_verify_sample(index: &LiveIndex, root: &Path, sample_pct: f64) -> Ve
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
-/// Convert `LiveIndex` to `IndexSnapshot` (cloning all owned data).
-fn build_snapshot(index: &LiveIndex) -> IndexSnapshot {
-    let mut snap_files = HashMap::with_capacity(index.files.len());
+#[derive(Clone)]
+pub(crate) struct SnapshotBuildInput {
+    files: HashMap<String, Arc<IndexedFile>>,
+}
 
-    for (path, file) in &index.files {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VerifyFileView {
+    relative_path: String,
+    byte_len: u64,
+    content_hash: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VerifyIndexView {
+    files: Vec<VerifyFileView>,
+}
+
+fn capture_verify_view(index: &LiveIndex) -> VerifyIndexView {
+    let mut files: Vec<VerifyFileView> = index
+        .files
+        .iter()
+        .map(|(path, file)| VerifyFileView {
+            relative_path: path.clone(),
+            byte_len: file.byte_len,
+            content_hash: file.content_hash.clone(),
+        })
+        .collect();
+    files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    VerifyIndexView { files }
+}
+
+/// Convert captured live-index data to `IndexSnapshot`.
+fn build_snapshot(snapshot_input: SnapshotBuildInput, project_root: &Path) -> IndexSnapshot {
+    let mut snap_files = HashMap::with_capacity(snapshot_input.files.len());
+
+    for (path, file) in snapshot_input.files {
         // Try to get mtime from disk for the snapshot
-        let mtime_secs = std::fs::metadata(path)
+        let abs_path = project_root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let mtime_secs = std::fs::metadata(&abs_path)
             .ok()
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
@@ -294,6 +388,7 @@ fn build_snapshot(index: &LiveIndex) -> IndexSnapshot {
             IndexedFileSnapshot {
                 relative_path: file.relative_path.clone(),
                 language: file.language.clone(),
+                classification: file.classification,
                 content: file.content.clone(),
                 symbols: file.symbols.clone(),
                 parse_status: file.parse_status.clone(),
@@ -321,11 +416,14 @@ pub async fn background_verify(
     root: std::path::PathBuf,
     snapshot_mtimes: HashMap<String, i64>,
 ) {
+    index.mark_snapshot_verify_running();
+
     // 1. Stat-check all files (fast: just metadata reads)
-    let stat_result = {
+    let verify_view = {
         let guard = index.read().expect("lock not poisoned");
-        stat_check_files(&guard, &snapshot_mtimes, &root)
+        capture_verify_view(&guard)
     };
+    let stat_result = stat_check_files_from_view(&verify_view, &snapshot_mtimes, &root);
 
     let changed_count = stat_result.changed.len();
     let deleted_count = stat_result.deleted.len();
@@ -333,9 +431,8 @@ pub async fn background_verify(
 
     // 2. Remove deleted files
     if !stat_result.deleted.is_empty() {
-        let mut guard = index.write().expect("lock not poisoned");
         for path in &stat_result.deleted {
-            guard.remove_file(path);
+            index.remove_file(path);
         }
     }
 
@@ -366,18 +463,23 @@ pub async fn background_verify(
             None => continue,
         };
 
-        let result = crate::parsing::process_file(rel_path, &bytes, language);
+        let result = crate::parsing::process_file_with_classification(
+            rel_path,
+            &bytes,
+            language,
+            FileClassification::for_code_path(rel_path),
+        );
         let indexed_file = IndexedFile::from_parse_result(result, bytes);
 
-        let mut guard = index.write().expect("lock not poisoned");
-        guard.update_file(rel_path.clone(), indexed_file);
+        index.update_file(rel_path.clone(), indexed_file);
     }
 
     // 4. Spot-verify sample (10%) for content hash mismatches
-    let spot_mismatches = {
+    let verify_view = {
         let guard = index.read().expect("lock not poisoned");
-        spot_verify_sample(&guard, &root, 0.10)
+        capture_verify_view(&guard)
     };
+    let spot_mismatches = spot_verify_sample_from_view(&verify_view, &root, 0.10);
 
     let spot_count = spot_mismatches.len();
 
@@ -401,12 +503,18 @@ pub async fn background_verify(
             None => continue,
         };
 
-        let result = crate::parsing::process_file(rel_path, &bytes, language);
+        let result = crate::parsing::process_file_with_classification(
+            rel_path,
+            &bytes,
+            language,
+            FileClassification::for_code_path(rel_path),
+        );
         let indexed_file = IndexedFile::from_parse_result(result, bytes);
 
-        let mut guard = index.write().expect("lock not poisoned");
-        guard.update_file(rel_path.clone(), indexed_file);
+        index.update_file(rel_path.clone(), indexed_file);
     }
+
+    index.mark_snapshot_verify_completed();
 
     info!(
         "background verify complete: {} changed, {} deleted, {} new, {} spot-check mismatches",
@@ -420,8 +528,11 @@ pub async fn background_verify(
 mod tests {
     use super::*;
     use crate::domain::{LanguageId, ReferenceKind, ReferenceRecord, SymbolKind, SymbolRecord};
-    use crate::live_index::store::{IndexedFile, ParseStatus};
+    use crate::live_index::store::{
+        IndexLoadSource, IndexedFile, ParseStatus, SnapshotVerifyState,
+    };
     use std::collections::HashMap;
+    use std::sync::Arc;
     use std::time::{Duration, Instant, SystemTime};
     use tempfile::TempDir;
 
@@ -455,6 +566,7 @@ mod tests {
         IndexedFile {
             relative_path: path.to_string(),
             language: LanguageId::Rust,
+            classification: crate::domain::FileClassification::for_code_path(path),
             content: content.to_vec(),
             symbols: vec![make_symbol("my_func")],
             parse_status: ParseStatus::Parsed,
@@ -466,9 +578,9 @@ mod tests {
     }
 
     fn make_live_index_with_files(files: Vec<(&str, &[u8])>) -> LiveIndex {
-        let mut file_map = HashMap::new();
+        let mut file_map: HashMap<String, Arc<IndexedFile>> = HashMap::new();
         for (path, content) in files {
-            file_map.insert(path.to_string(), make_indexed_file(path, content));
+            file_map.insert(path.to_string(), Arc::new(make_indexed_file(path, content)));
         }
         let trigram_index = crate::live_index::trigram::TrigramIndex::build_from_files(&file_map);
         let mut index = LiveIndex {
@@ -478,10 +590,15 @@ mod tests {
             load_duration: Duration::ZERO,
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: false,
+            load_source: IndexLoadSource::FreshLoad,
+            snapshot_verify_state: SnapshotVerifyState::NotNeeded,
             reverse_index: HashMap::new(),
+            files_by_basename: HashMap::new(),
+            files_by_dir_component: HashMap::new(),
             trigram_index,
         };
         index.rebuild_reverse_index();
+        index.rebuild_path_indices();
         index
     }
 
@@ -491,7 +608,8 @@ mod tests {
     fn test_round_trip_preserves_files_symbols_references_content() {
         let tmp = TempDir::new().unwrap();
         let content = b"fn my_func() { other_func(); }";
-        let index = make_live_index_with_files(vec![("src/main.rs", content)]);
+        let index =
+            make_live_index_with_files(vec![("tests/generated/main.generated.rs", content)]);
 
         // Serialize
         serialize_index(&index, tmp.path()).expect("serialize should succeed");
@@ -504,13 +622,16 @@ mod tests {
         assert_eq!(loaded.files.len(), 1);
         let file = loaded
             .files
-            .get("src/main.rs")
+            .get("tests/generated/main.generated.rs")
             .expect("file should be present");
         assert_eq!(file.content, content);
         assert_eq!(file.symbols.len(), 1);
         assert_eq!(file.symbols[0].name, "my_func");
         assert_eq!(file.references.len(), 1);
         assert_eq!(file.references[0].name, "other_func");
+        assert!(file.classification.is_code());
+        assert!(file.classification.is_test);
+        assert!(file.classification.is_generated);
         assert_eq!(
             file.alias_map.get("Alias").map(|s| s.as_str()),
             Some("Original")
@@ -528,6 +649,108 @@ mod tests {
         let loaded = snapshot_to_live_index(snapshot);
 
         assert_eq!(loaded.files.len(), 0);
+    }
+
+    #[test]
+    fn test_snapshot_to_live_index_marks_snapshot_restore_pending_verify() {
+        let tmp = TempDir::new().unwrap();
+        let index = make_live_index_with_files(vec![("src/main.rs", b"fn main() {}")]);
+
+        serialize_index(&index, tmp.path()).expect("serialize should succeed");
+        let snapshot = load_snapshot(tmp.path()).expect("snapshot should load");
+        let loaded = snapshot_to_live_index(snapshot);
+
+        assert_eq!(loaded.load_source(), IndexLoadSource::SnapshotRestore);
+        assert_eq!(loaded.snapshot_verify_state(), SnapshotVerifyState::Pending);
+    }
+
+    #[tokio::test]
+    async fn test_background_verify_marks_snapshot_verify_completed() {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("src").join("main.rs");
+        std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        std::fs::write(&file_path, b"fn main() {}\n").unwrap();
+
+        let index = make_live_index_with_files(vec![("src/main.rs", b"fn main() {}\n")]);
+        serialize_index(&index, tmp.path()).expect("serialize should succeed");
+
+        let snapshot = load_snapshot(tmp.path()).expect("snapshot should load");
+        let snapshot_mtimes = snapshot
+            .files
+            .iter()
+            .map(|(path, file)| (path.clone(), file.mtime_secs))
+            .collect::<HashMap<_, _>>();
+        let loaded = snapshot_to_live_index(snapshot);
+        let shared = crate::live_index::SharedIndexHandle::shared(loaded);
+
+        {
+            let guard = shared.read().unwrap();
+            assert_eq!(guard.load_source(), IndexLoadSource::SnapshotRestore);
+            assert_eq!(guard.snapshot_verify_state(), SnapshotVerifyState::Pending);
+        }
+
+        background_verify(shared.clone(), tmp.path().to_path_buf(), snapshot_mtimes).await;
+
+        let guard = shared.read().unwrap();
+        assert_eq!(guard.load_source(), IndexLoadSource::SnapshotRestore);
+        assert_eq!(
+            guard.snapshot_verify_state(),
+            SnapshotVerifyState::Completed
+        );
+        drop(guard);
+
+        let published = shared.published_state();
+        assert_eq!(
+            published.snapshot_verify_state,
+            SnapshotVerifyState::Completed
+        );
+        assert!(
+            published.generation >= 2,
+            "expected published generation to advance through verify transitions"
+        );
+    }
+
+    #[test]
+    fn test_build_snapshot_resolves_mtime_against_project_root() {
+        let tmp = TempDir::new().unwrap();
+        let project_root = tmp.path().join("project");
+        let file_path = project_root.join("src").join("main.rs");
+        std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        std::fs::write(&file_path, b"fn main() {}\n").unwrap();
+
+        let index = make_live_index_with_files(vec![("src/main.rs", b"fn main() {}\n")]);
+        let snapshot = build_snapshot(capture_snapshot_build_input(&index), &project_root);
+
+        let expected_mtime = std::fs::metadata(&file_path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        assert_eq!(
+            snapshot.files.get("src/main.rs").unwrap().mtime_secs,
+            expected_mtime
+        );
+    }
+
+    #[test]
+    fn test_capture_verify_view_sorts_paths() {
+        let index = make_live_index_with_files(vec![
+            ("src/z.rs", b"fn z() {}\n"),
+            ("src/a.rs", b"fn a() {}\n"),
+            ("src/m.rs", b"fn m() {}\n"),
+        ]);
+
+        let view = capture_verify_view(&index);
+        let paths: Vec<&str> = view
+            .files
+            .iter()
+            .map(|file| file.relative_path.as_str())
+            .collect();
+
+        assert_eq!(paths, vec!["src/a.rs", "src/m.rs", "src/z.rs"]);
     }
 
     #[test]
@@ -553,14 +776,15 @@ mod tests {
     #[test]
     fn test_round_trip_preserves_parse_status_variants() {
         let tmp = TempDir::new().unwrap();
-        let mut file_map = HashMap::new();
+        let mut file_map: HashMap<String, Arc<IndexedFile>> = HashMap::new();
 
         // Parsed
         file_map.insert(
             "ok.rs".to_string(),
-            IndexedFile {
+            Arc::new(IndexedFile {
                 relative_path: "ok.rs".to_string(),
                 language: LanguageId::Rust,
+                classification: crate::domain::FileClassification::for_code_path("ok.rs"),
                 content: b"fn foo() {}".to_vec(),
                 symbols: vec![],
                 parse_status: ParseStatus::Parsed,
@@ -568,15 +792,16 @@ mod tests {
                 content_hash: "hash1".to_string(),
                 references: vec![],
                 alias_map: HashMap::new(),
-            },
+            }),
         );
 
         // PartialParse
         file_map.insert(
             "partial.rs".to_string(),
-            IndexedFile {
+            Arc::new(IndexedFile {
                 relative_path: "partial.rs".to_string(),
                 language: LanguageId::Rust,
+                classification: crate::domain::FileClassification::for_code_path("partial.rs"),
                 content: b"fn bad(".to_vec(),
                 symbols: vec![],
                 parse_status: ParseStatus::PartialParse {
@@ -586,15 +811,16 @@ mod tests {
                 content_hash: "hash2".to_string(),
                 references: vec![],
                 alias_map: HashMap::new(),
-            },
+            }),
         );
 
         // Failed
         file_map.insert(
             "fail.rb".to_string(),
-            IndexedFile {
+            Arc::new(IndexedFile {
                 relative_path: "fail.rb".to_string(),
                 language: LanguageId::Ruby,
+                classification: crate::domain::FileClassification::for_code_path("fail.rb"),
                 content: b"garbage".to_vec(),
                 symbols: vec![],
                 parse_status: ParseStatus::Failed {
@@ -604,7 +830,7 @@ mod tests {
                 content_hash: "hash3".to_string(),
                 references: vec![],
                 alias_map: HashMap::new(),
-            },
+            }),
         );
 
         let trigram_index = crate::live_index::trigram::TrigramIndex::build_from_files(&file_map);
@@ -615,10 +841,15 @@ mod tests {
             load_duration: Duration::ZERO,
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: false,
+            load_source: IndexLoadSource::FreshLoad,
+            snapshot_verify_state: SnapshotVerifyState::NotNeeded,
             reverse_index: HashMap::new(),
+            files_by_basename: HashMap::new(),
+            files_by_dir_component: HashMap::new(),
             trigram_index,
         };
         index.rebuild_reverse_index();
+        index.rebuild_path_indices();
 
         serialize_index(&index, tmp.path()).expect("serialize should succeed");
         let snapshot = load_snapshot(tmp.path()).expect("load should succeed");
@@ -716,12 +947,13 @@ mod tests {
         std::fs::write(&file_path, b"fn foo() {}").unwrap();
 
         // Build index with wrong byte_len to simulate a changed file
-        let mut file_map = HashMap::new();
+        let mut file_map: HashMap<String, Arc<IndexedFile>> = HashMap::new();
         file_map.insert(
             "a.rs".to_string(),
-            IndexedFile {
+            Arc::new(IndexedFile {
                 relative_path: "a.rs".to_string(),
                 language: LanguageId::Rust,
+                classification: crate::domain::FileClassification::for_code_path("a.rs"),
                 content: b"fn foo() {}".to_vec(),
                 symbols: vec![],
                 parse_status: ParseStatus::Parsed,
@@ -729,7 +961,7 @@ mod tests {
                 content_hash: "old_hash".to_string(),
                 references: vec![],
                 alias_map: HashMap::new(),
-            },
+            }),
         );
         let trigram_index = crate::live_index::trigram::TrigramIndex::build_from_files(&file_map);
         let mut index = LiveIndex {
@@ -739,10 +971,15 @@ mod tests {
             load_duration: Duration::ZERO,
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: false,
+            load_source: IndexLoadSource::FreshLoad,
+            snapshot_verify_state: SnapshotVerifyState::NotNeeded,
             reverse_index: HashMap::new(),
+            files_by_basename: HashMap::new(),
+            files_by_dir_component: HashMap::new(),
             trigram_index,
         };
         index.rebuild_reverse_index();
+        index.rebuild_path_indices();
 
         // mtime from disk
         let mtime = std::fs::metadata(&file_path)
@@ -768,12 +1005,13 @@ mod tests {
         let tmp = TempDir::new().unwrap();
 
         // Index has a file that doesn't exist on disk
-        let mut file_map = HashMap::new();
+        let mut file_map: HashMap<String, Arc<IndexedFile>> = HashMap::new();
         file_map.insert(
             "ghost.rs".to_string(),
-            IndexedFile {
+            Arc::new(IndexedFile {
                 relative_path: "ghost.rs".to_string(),
                 language: LanguageId::Rust,
+                classification: crate::domain::FileClassification::for_code_path("ghost.rs"),
                 content: b"fn ghost() {}".to_vec(),
                 symbols: vec![],
                 parse_status: ParseStatus::Parsed,
@@ -781,7 +1019,7 @@ mod tests {
                 content_hash: "hash".to_string(),
                 references: vec![],
                 alias_map: HashMap::new(),
-            },
+            }),
         );
         let trigram_index = crate::live_index::trigram::TrigramIndex::build_from_files(&file_map);
         let mut index = LiveIndex {
@@ -791,10 +1029,15 @@ mod tests {
             load_duration: Duration::ZERO,
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: false,
+            load_source: IndexLoadSource::FreshLoad,
+            snapshot_verify_state: SnapshotVerifyState::NotNeeded,
             reverse_index: HashMap::new(),
+            files_by_basename: HashMap::new(),
+            files_by_dir_component: HashMap::new(),
             trigram_index,
         };
         index.rebuild_reverse_index();
+        index.rebuild_path_indices();
 
         let result = stat_check_files(&index, &HashMap::new(), tmp.path());
         assert!(
@@ -828,12 +1071,13 @@ mod tests {
         // On-disk content is different from what's in the index
         std::fs::write(&file_path, b"fn modified() {}").unwrap();
 
-        let mut file_map = HashMap::new();
+        let mut file_map: HashMap<String, Arc<IndexedFile>> = HashMap::new();
         file_map.insert(
             "a.rs".to_string(),
-            IndexedFile {
+            Arc::new(IndexedFile {
                 relative_path: "a.rs".to_string(),
                 language: LanguageId::Rust,
+                classification: crate::domain::FileClassification::for_code_path("a.rs"),
                 content: b"fn original() {}".to_vec(), // old content
                 symbols: vec![],
                 parse_status: ParseStatus::Parsed,
@@ -841,7 +1085,7 @@ mod tests {
                 content_hash: crate::hash::digest_hex(b"fn original() {}"), // stale hash
                 references: vec![],
                 alias_map: HashMap::new(),
-            },
+            }),
         );
         let trigram_index = crate::live_index::trigram::TrigramIndex::build_from_files(&file_map);
         let mut index = LiveIndex {
@@ -851,10 +1095,15 @@ mod tests {
             load_duration: Duration::ZERO,
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: false,
+            load_source: IndexLoadSource::FreshLoad,
+            snapshot_verify_state: SnapshotVerifyState::NotNeeded,
             reverse_index: HashMap::new(),
+            files_by_basename: HashMap::new(),
+            files_by_dir_component: HashMap::new(),
             trigram_index,
         };
         index.rebuild_reverse_index();
+        index.rebuild_path_indices();
 
         // Sample 100% to ensure the file is included
         let mismatches = spot_verify_sample(&index, tmp.path(), 1.0);
@@ -872,12 +1121,13 @@ mod tests {
         std::fs::write(&file_path, content).unwrap();
 
         let hash = crate::hash::digest_hex(content);
-        let mut file_map = HashMap::new();
+        let mut file_map: HashMap<String, Arc<IndexedFile>> = HashMap::new();
         file_map.insert(
             "a.rs".to_string(),
-            IndexedFile {
+            Arc::new(IndexedFile {
                 relative_path: "a.rs".to_string(),
                 language: LanguageId::Rust,
+                classification: crate::domain::FileClassification::for_code_path("a.rs"),
                 content: content.to_vec(),
                 symbols: vec![],
                 parse_status: ParseStatus::Parsed,
@@ -885,7 +1135,7 @@ mod tests {
                 content_hash: hash,
                 references: vec![],
                 alias_map: HashMap::new(),
-            },
+            }),
         );
         let trigram_index = crate::live_index::trigram::TrigramIndex::build_from_files(&file_map);
         let mut index = LiveIndex {
@@ -895,10 +1145,15 @@ mod tests {
             load_duration: Duration::ZERO,
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: false,
+            load_source: IndexLoadSource::FreshLoad,
+            snapshot_verify_state: SnapshotVerifyState::NotNeeded,
             reverse_index: HashMap::new(),
+            files_by_basename: HashMap::new(),
+            files_by_dir_component: HashMap::new(),
             trigram_index,
         };
         index.rebuild_reverse_index();
+        index.rebuild_path_indices();
 
         let mismatches = spot_verify_sample(&index, tmp.path(), 1.0);
         assert!(mismatches.is_empty(), "no mismatch when hash is current");

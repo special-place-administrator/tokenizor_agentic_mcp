@@ -1,9 +1,11 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use crate::domain::{LanguageId, ReferenceKind, ReferenceRecord, SymbolRecord};
 use crate::watcher::{WatcherInfo, WatcherState};
 
+use super::search::PathScope;
 use super::store::{IndexState, IndexedFile, LiveIndex, ParseStatus};
 
 // ---------------------------------------------------------------------------
@@ -364,6 +366,27 @@ fn is_filtered_name(name: &str) -> bool {
         || JAVA_BUILTINS.contains(&name)
 }
 
+fn normalize_path_query(raw: &str) -> String {
+    let mut normalized = raw.trim().replace('\\', "/");
+    while normalized.starts_with("./") {
+        normalized = normalized[2..].to_string();
+    }
+    normalized.trim_matches('/').to_string()
+}
+
+fn tokenize_path_query(normalized_query: &str) -> Vec<String> {
+    normalized_query
+        .split(|ch: char| ch == '/' || ch.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_ascii_lowercase())
+        .collect()
+}
+
+fn path_has_component(path: &str, component: &str) -> bool {
+    path.split('/')
+        .any(|part| part.eq_ignore_ascii_case(component))
+}
+
 /// Summary health statistics for the LiveIndex.
 #[derive(Debug, Clone)]
 pub struct HealthStats {
@@ -383,23 +406,733 @@ pub struct HealthStats {
     pub debounce_window_ms: u64,
 }
 
+/// Owned entry used to render the repo outline after releasing the index lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoOutlineFileView {
+    pub relative_path: String,
+    pub language: LanguageId,
+    pub symbol_count: usize,
+}
+
+/// Owned compatibility/test view for file outline rendering.
+///
+/// Hot-path readers should prefer `capture_shared_file()` and format from `&IndexedFile`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileOutlineView {
+    pub relative_path: String,
+    pub symbols: Vec<SymbolRecord>,
+}
+
+/// Owned compatibility/test view for symbol detail rendering.
+///
+/// Hot-path readers should prefer `capture_shared_file()` and format from `&IndexedFile`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolDetailView {
+    pub relative_path: String,
+    pub content: Vec<u8>,
+    pub symbols: Vec<SymbolRecord>,
+}
+
+/// Owned compatibility/test view for file content rendering.
+///
+/// Hot-path readers should prefer `capture_shared_file()` and format from `&IndexedFile`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileContentView {
+    pub relative_path: String,
+    pub content: Vec<u8>,
+}
+
+/// Owned timestamp/path view used by `what_changed` timestamp mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhatChangedTimestampView {
+    pub loaded_secs: i64,
+    pub paths: Vec<String>,
+}
+
+/// Owned path-resolution result for `resolve_path`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvePathView {
+    EmptyHint,
+    Resolved { path: String },
+    NotFound { hint: String },
+    Ambiguous {
+        hint: String,
+        matches: Vec<String>,
+        overflow_count: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SearchFilesTier {
+    StrongPath,
+    Basename,
+    LoosePath,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchFilesHit {
+    pub tier: SearchFilesTier,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchFilesView {
+    EmptyQuery,
+    NotFound { query: String },
+    Found {
+        query: String,
+        total_matches: usize,
+        overflow_count: usize,
+        hits: Vec<SearchFilesHit>,
+    },
+}
+
+/// One rendered dependent-reference line captured under the read lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependentLineView {
+    pub line_number: u32,
+    pub line_content: String,
+    pub kind: String,
+}
+
+/// One dependent file entry captured for `find_dependents`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependentFileView {
+    pub file_path: String,
+    pub lines: Vec<DependentLineView>,
+}
+
+/// Owned grouped view for `find_dependents`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindDependentsView {
+    pub files: Vec<DependentFileView>,
+}
+
+/// One context line for a reference hit captured under the read lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceContextLineView {
+    pub line_number: u32,
+    pub text: String,
+    pub is_reference_line: bool,
+    pub enclosing_annotation: Option<String>,
+}
+
+/// One reference hit with its surrounding context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceHitView {
+    pub context_lines: Vec<ReferenceContextLineView>,
+}
+
+/// One file entry in a grouped references result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceFileView {
+    pub file_path: String,
+    pub hits: Vec<ReferenceHitView>,
+}
+
+/// Owned grouped view for `find_references`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindReferencesView {
+    pub total_refs: usize,
+    pub files: Vec<ReferenceFileView>,
+}
+
+/// One compact reference entry rendered inside a context-bundle section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextBundleReferenceView {
+    pub display_name: String,
+    pub file_path: String,
+    pub line_number: u32,
+    pub enclosing: Option<String>,
+}
+
+/// One owned section inside a captured context bundle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextBundleSectionView {
+    pub total_count: usize,
+    pub overflow_count: usize,
+    pub entries: Vec<ContextBundleReferenceView>,
+}
+
+/// Owned definition-and-sections view for `get_context_bundle`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextBundleFoundView {
+    pub body: String,
+    pub kind_label: String,
+    pub line_range: (u32, u32),
+    pub byte_count: usize,
+    pub callers: ContextBundleSectionView,
+    pub callees: ContextBundleSectionView,
+    pub type_usages: ContextBundleSectionView,
+}
+
+/// Owned result view for `get_context_bundle`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextBundleView {
+    FileNotFound {
+        path: String,
+    },
+    SymbolNotFound {
+        relative_path: String,
+        symbol_names: Vec<String>,
+        name: String,
+    },
+    Found(ContextBundleFoundView),
+}
+
+/// Owned repo outline view captured under a short read lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoOutlineView {
+    pub total_files: usize,
+    pub total_symbols: usize,
+    pub files: Vec<RepoOutlineFileView>,
+}
+
 impl LiveIndex {
     /// O(1) lookup of a file by its relative path.
     pub fn get_file(&self, relative_path: &str) -> Option<&IndexedFile> {
-        self.files.get(relative_path)
+        self.files.get(relative_path).map(|file| file.as_ref())
     }
 
     /// Returns the symbol slice for a file, or an empty slice if not found.
     pub fn symbols_for_file(&self, relative_path: &str) -> &[SymbolRecord] {
         self.files
             .get(relative_path)
-            .map(|f| f.symbols.as_slice())
+            .map(|file| file.symbols.as_slice())
             .unwrap_or(&[])
     }
 
     /// Iterate all (path, file) pairs in the index.
     pub fn all_files(&self) -> impl Iterator<Item = (&String, &IndexedFile)> {
-        self.files.iter()
+        self.files.iter().map(|(path, file)| (path, file.as_ref()))
+    }
+
+    /// Capture a shared immutable file entry under the read lock.
+    pub fn capture_shared_file(&self, relative_path: &str) -> Option<Arc<IndexedFile>> {
+        self.files.get(relative_path).cloned()
+    }
+
+    /// Capture one shared immutable file entry selected by an internal path scope.
+    pub fn capture_shared_file_for_scope(&self, path_scope: &PathScope) -> Option<Arc<IndexedFile>> {
+        match path_scope {
+            PathScope::Any => None,
+            PathScope::Exact(path) => self.capture_shared_file(path),
+            PathScope::Prefix(prefix) => {
+                let mut matching_paths: Vec<&String> = self
+                    .files
+                    .keys()
+                    .filter(|path| path.starts_with(prefix))
+                    .collect();
+                matching_paths.sort();
+                if matching_paths.len() == 1 {
+                    self.capture_shared_file(matching_paths[0])
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Capture an owned compatibility/test outline view.
+    ///
+    /// New hot-path readers should prefer `capture_shared_file()`.
+    pub fn capture_file_outline_view(&self, relative_path: &str) -> Option<FileOutlineView> {
+        let file = self.get_file(relative_path)?;
+        Some(FileOutlineView {
+            relative_path: file.relative_path.clone(),
+            symbols: file.symbols.clone(),
+        })
+    }
+
+    /// Capture an owned compatibility/test symbol-detail view.
+    ///
+    /// New hot-path readers should prefer `capture_shared_file()`.
+    pub fn capture_symbol_detail_view(&self, relative_path: &str) -> Option<SymbolDetailView> {
+        let file = self.get_file(relative_path)?;
+        Some(SymbolDetailView {
+            relative_path: file.relative_path.clone(),
+            content: file.content.clone(),
+            symbols: file.symbols.clone(),
+        })
+    }
+
+    /// Capture an owned compatibility/test file-content view.
+    ///
+    /// New hot-path readers should prefer `capture_shared_file()`.
+    pub fn capture_file_content_view(&self, relative_path: &str) -> Option<FileContentView> {
+        let file = self.get_file(relative_path)?;
+        Some(FileContentView {
+            relative_path: file.relative_path.clone(),
+            content: file.content.clone(),
+        })
+    }
+
+    /// Capture the data needed for `what_changed` timestamp mode without holding the read lock.
+    pub fn capture_what_changed_timestamp_view(&self) -> WhatChangedTimestampView {
+        use std::time::UNIX_EPOCH;
+
+        let loaded_secs = self
+            .loaded_at_system()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let mut paths: Vec<String> = self.all_files().map(|(path, _)| path.clone()).collect();
+        paths.sort();
+
+        WhatChangedTimestampView { loaded_secs, paths }
+    }
+
+    /// Resolve a path hint to one exact indexed path, or a bounded ambiguous result.
+    pub fn capture_resolve_path_view(&self, hint: &str) -> ResolvePathView {
+        const RESOLVE_PATH_AMBIGUOUS_CAP: usize = 10;
+        let normalized_hint = normalize_path_query(hint);
+        if normalized_hint.is_empty() {
+            return ResolvePathView::EmptyHint;
+        }
+
+        if self.get_file(&normalized_hint).is_some() {
+            return ResolvePathView::Resolved {
+                path: normalized_hint,
+            };
+        }
+
+        let normalized_hint_lower = normalized_hint.to_ascii_lowercase();
+        let parts: Vec<&str> = normalized_hint
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .collect();
+        let basename = parts.last().copied().unwrap_or("");
+        let dir_components = if parts.len() > 1 {
+            &parts[..parts.len() - 1]
+        } else {
+            &[][..]
+        };
+
+        let mut candidates: Vec<String> = self
+            .find_files_by_basename(basename)
+            .into_iter()
+            .map(|path| path.to_string())
+            .collect();
+
+        if candidates.is_empty() {
+            candidates = self
+                .all_files()
+                .map(|(path, _)| path.as_str())
+                .filter(|path| {
+                    let path_lower = path.to_ascii_lowercase();
+                    path_lower.ends_with(&normalized_hint_lower)
+                        || path_lower.contains(&normalized_hint_lower)
+                })
+                .map(|path| path.to_string())
+                .collect();
+        }
+
+        for component in dir_components {
+            let component_matches: HashSet<&str> =
+                self.find_files_by_dir_component(component).into_iter().collect();
+            candidates.retain(|path| component_matches.contains(path.as_str()));
+        }
+
+        candidates.sort_by(|left, right| {
+            let left_lower = left.to_ascii_lowercase();
+            let right_lower = right.to_ascii_lowercase();
+            let left_suffix = left_lower.ends_with(&normalized_hint_lower);
+            let right_suffix = right_lower.ends_with(&normalized_hint_lower);
+            right_suffix
+                .cmp(&left_suffix)
+                .then(left.len().cmp(&right.len()))
+                .then(left.cmp(right))
+        });
+        candidates.dedup();
+
+        match candidates.len() {
+            0 => ResolvePathView::NotFound {
+                hint: normalized_hint,
+            },
+            1 => ResolvePathView::Resolved {
+                path: candidates.pop().expect("single candidate"),
+            },
+            len => {
+                let overflow_count = len.saturating_sub(RESOLVE_PATH_AMBIGUOUS_CAP);
+                ResolvePathView::Ambiguous {
+                    hint: normalized_hint,
+                    matches: candidates
+                        .into_iter()
+                        .take(RESOLVE_PATH_AMBIGUOUS_CAP)
+                        .collect(),
+                    overflow_count,
+                }
+            }
+        }
+    }
+
+    /// Search for indexed files matching a path query with bounded tiered output.
+    pub fn capture_search_files_view(&self, query: &str, limit: usize) -> SearchFilesView {
+        let limit = limit.clamp(1, 50);
+        let normalized_query = normalize_path_query(query);
+        if normalized_query.is_empty() {
+            return SearchFilesView::EmptyQuery;
+        }
+
+        let normalized_query_lower = normalized_query.to_ascii_lowercase();
+        let tokens = tokenize_path_query(&normalized_query);
+        let basename_token = tokens.last().map(String::as_str).unwrap_or("");
+        let component_tokens = if tokens.len() > 1 {
+            &tokens[..tokens.len() - 1]
+        } else {
+            &[][..]
+        };
+        let has_path_context = normalized_query.contains('/');
+
+        let mut strong_hits: Vec<String> = self
+            .all_files()
+            .map(|(path, _)| path.as_str())
+            .filter(|path| {
+                let path_lower = path.to_ascii_lowercase();
+                path_lower == normalized_query_lower
+                    || (has_path_context && path_lower.ends_with(&normalized_query_lower))
+            })
+            .map(|path| path.to_string())
+            .collect();
+
+        let basename_hits: Vec<String> = if basename_token.is_empty() {
+            Vec::new()
+        } else {
+            self.find_files_by_basename(basename_token)
+                .into_iter()
+                .map(|path| path.to_string())
+                .collect()
+        };
+
+        if !component_tokens.is_empty() {
+            strong_hits.extend(
+                basename_hits
+                    .iter()
+                    .filter(|path| {
+                        component_tokens
+                            .iter()
+                            .all(|component| path_has_component(path, component))
+                    })
+                    .cloned(),
+            );
+        }
+
+        strong_hits.sort_by(|left, right| {
+            let left_lower = left.to_ascii_lowercase();
+            let right_lower = right.to_ascii_lowercase();
+            let left_exact = left_lower == normalized_query_lower;
+            let right_exact = right_lower == normalized_query_lower;
+            let left_suffix = has_path_context && left_lower.ends_with(&normalized_query_lower);
+            let right_suffix = has_path_context && right_lower.ends_with(&normalized_query_lower);
+            right_exact
+                .cmp(&left_exact)
+                .then(right_suffix.cmp(&left_suffix))
+                .then(left.len().cmp(&right.len()))
+                .then(left.cmp(right))
+        });
+        strong_hits.dedup();
+
+        let strong_set: HashSet<&str> = strong_hits.iter().map(String::as_str).collect();
+        let mut basename_only_hits: Vec<String> = basename_hits
+            .into_iter()
+            .filter(|path| !strong_set.contains(path.as_str()))
+            .collect();
+        basename_only_hits.sort_by(|left, right| {
+            left.len().cmp(&right.len()).then(left.cmp(right))
+        });
+        basename_only_hits.dedup();
+
+        let strong_or_basename_set: HashSet<&str> = strong_hits
+            .iter()
+            .chain(basename_only_hits.iter())
+            .map(String::as_str)
+            .collect();
+        let mut loose_hits: Vec<String> = self
+            .all_files()
+            .map(|(path, _)| path.as_str())
+            .filter(|path| !strong_or_basename_set.contains(*path))
+            .filter(|path| {
+                let path_lower = path.to_ascii_lowercase();
+                tokens.iter().all(|token| path_lower.contains(token))
+            })
+            .map(|path| path.to_string())
+            .collect();
+        loose_hits.sort_by(|left, right| {
+            left.len().cmp(&right.len()).then(left.cmp(right))
+        });
+        loose_hits.dedup();
+
+        let total_matches = strong_hits.len() + basename_only_hits.len() + loose_hits.len();
+        if total_matches == 0 {
+            return SearchFilesView::NotFound {
+                query: normalized_query,
+            };
+        }
+
+        let mut hits: Vec<SearchFilesHit> = Vec::new();
+        hits.extend(strong_hits.into_iter().map(|path| SearchFilesHit {
+            tier: SearchFilesTier::StrongPath,
+            path,
+        }));
+        hits.extend(basename_only_hits.into_iter().map(|path| SearchFilesHit {
+            tier: SearchFilesTier::Basename,
+            path,
+        }));
+        hits.extend(loose_hits.into_iter().map(|path| SearchFilesHit {
+            tier: SearchFilesTier::LoosePath,
+            path,
+        }));
+
+        let overflow_count = total_matches.saturating_sub(limit);
+        hits.truncate(limit);
+
+        SearchFilesView::Found {
+            query: normalized_query,
+            total_matches,
+            overflow_count,
+            hits,
+        }
+    }
+
+    /// Capture the grouped data needed for `find_dependents` without holding the read lock.
+    pub fn capture_find_dependents_view(&self, target_path: &str) -> FindDependentsView {
+        let deps = self.find_dependents_for_file(target_path);
+        let mut by_file: std::collections::BTreeMap<String, Vec<DependentLineView>> =
+            std::collections::BTreeMap::new();
+
+        for (file_path, reference) in deps {
+            let line_number = reference.line_range.0 + 1;
+            let line_content = self
+                .get_file(file_path)
+                .map(|file| {
+                    String::from_utf8_lossy(&file.content)
+                        .lines()
+                        .nth(reference.line_range.0 as usize)
+                        .unwrap_or("")
+                        .to_string()
+                })
+                .unwrap_or_default();
+
+            by_file
+                .entry(file_path.to_string())
+                .or_default()
+                .push(DependentLineView {
+                    line_number,
+                    line_content,
+                    kind: reference.kind.to_string(),
+                });
+        }
+
+        FindDependentsView {
+            files: by_file
+                .into_iter()
+                .map(|(file_path, lines)| DependentFileView { file_path, lines })
+                .collect(),
+        }
+    }
+
+    /// Capture the grouped data needed for `find_references` without holding the read lock.
+    pub fn capture_find_references_view(
+        &self,
+        name: &str,
+        kind_filter: Option<&str>,
+    ) -> FindReferencesView {
+        let kind_enum = match kind_filter {
+            Some("call") => Some(ReferenceKind::Call),
+            Some("import") => Some(ReferenceKind::Import),
+            Some("type_usage") => Some(ReferenceKind::TypeUsage),
+            Some("macro_use") => Some(ReferenceKind::MacroUse),
+            Some("all") | None => None,
+            _ => None,
+        };
+        let refs = self.find_references_for_name(name, kind_enum, false);
+        let mut by_file: std::collections::BTreeMap<String, Vec<ReferenceHitView>> =
+            std::collections::BTreeMap::new();
+
+        for (file_path, reference) in &refs {
+            let Some(file) = self.get_file(file_path) else {
+                continue;
+            };
+            let content = String::from_utf8_lossy(&file.content);
+            let content_lines: Vec<&str> = content.lines().collect();
+            let ref_line_0 = reference.line_range.0 as usize;
+            let ctx_start = ref_line_0.saturating_sub(1);
+            let ctx_end = if content_lines.is_empty() {
+                0
+            } else {
+                (ref_line_0 + 1).min(content_lines.len() - 1)
+            };
+            let enclosing_annotation = reference
+                .enclosing_symbol_index
+                .and_then(|idx| file.symbols.get(idx as usize))
+                .map(|sym| format!("  [in {} {}]", sym.kind, sym.name));
+
+            let context_lines = if content_lines.is_empty() {
+                Vec::new()
+            } else {
+                content_lines[ctx_start..=ctx_end]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, line)| {
+                        let zero_based_line = ctx_start + i;
+                        ReferenceContextLineView {
+                            line_number: (zero_based_line + 1) as u32,
+                            text: (*line).to_string(),
+                            is_reference_line: zero_based_line == ref_line_0,
+                            enclosing_annotation: if zero_based_line == ref_line_0 {
+                                enclosing_annotation.clone()
+                            } else {
+                                None
+                            },
+                        }
+                    })
+                    .collect()
+            };
+
+            by_file
+                .entry((*file_path).to_string())
+                .or_default()
+                .push(ReferenceHitView { context_lines });
+        }
+
+        FindReferencesView {
+            total_refs: refs.len(),
+            files: by_file
+                .into_iter()
+                .map(|(file_path, hits)| ReferenceFileView { file_path, hits })
+                .collect(),
+        }
+    }
+
+    /// Capture the full owned data needed for `get_context_bundle`.
+    pub fn capture_context_bundle_view(
+        &self,
+        path: &str,
+        name: &str,
+        kind_filter: Option<&str>,
+    ) -> ContextBundleView {
+        use crate::domain::ReferenceKind;
+
+        const CONTEXT_BUNDLE_SECTION_CAP: usize = 20;
+
+        let Some(file) = self.get_file(path) else {
+            return ContextBundleView::FileNotFound {
+                path: path.to_string(),
+            };
+        };
+
+        let Some((sym_idx, sym_rec)) = file.symbols.iter().enumerate().find(|(_, s)| {
+            s.name == name
+                && kind_filter
+                    .map(|k| s.kind.to_string().eq_ignore_ascii_case(k))
+                    .unwrap_or(true)
+        }) else {
+            return ContextBundleView::SymbolNotFound {
+                relative_path: file.relative_path.clone(),
+                symbol_names: file
+                    .symbols
+                    .iter()
+                    .map(|symbol| symbol.name.clone())
+                    .collect(),
+                name: name.to_string(),
+            };
+        };
+
+        let start = sym_rec.byte_range.0 as usize;
+        let end = sym_rec.byte_range.1 as usize;
+        let body = if end <= file.content.len() {
+            String::from_utf8_lossy(&file.content[start..end]).into_owned()
+        } else {
+            String::from_utf8_lossy(&file.content).into_owned()
+        };
+        let byte_count = end.saturating_sub(start);
+
+        let capture_section = |refs: &[(&str, &ReferenceRecord)]| -> ContextBundleSectionView {
+            let entries: Vec<ContextBundleReferenceView> = refs
+                .iter()
+                .take(CONTEXT_BUNDLE_SECTION_CAP)
+                .map(|(file_path, reference)| {
+                    let enclosing = self.get_file(file_path).and_then(|f| {
+                        reference
+                            .enclosing_symbol_index
+                            .and_then(|idx| f.symbols.get(idx as usize))
+                            .map(|symbol| format!("in {} {}", symbol.kind, symbol.name))
+                    });
+
+                    ContextBundleReferenceView {
+                        display_name: reference
+                            .qualified_name
+                            .as_deref()
+                            .unwrap_or(&reference.name)
+                            .to_string(),
+                        file_path: (*file_path).to_string(),
+                        line_number: reference.line_range.0 + 1,
+                        enclosing,
+                    }
+                })
+                .collect();
+
+            ContextBundleSectionView {
+                total_count: refs.len(),
+                overflow_count: refs.len().saturating_sub(entries.len()),
+                entries,
+            }
+        };
+
+        let callers = self.find_references_for_name(name, Some(ReferenceKind::Call), false);
+        let callees = self.callees_for_symbol(path, sym_idx);
+        let callee_pairs: Vec<(&str, &ReferenceRecord)> =
+            callees.iter().map(|reference| (path, *reference)).collect();
+        let type_usages =
+            self.find_references_for_name(name, Some(ReferenceKind::TypeUsage), false);
+
+        ContextBundleView::Found(ContextBundleFoundView {
+            body,
+            kind_label: sym_rec.kind.to_string(),
+            line_range: sym_rec.line_range,
+            byte_count,
+            callers: capture_section(&callers),
+            callees: capture_section(&callee_pairs),
+            type_usages: capture_section(&type_usages),
+        })
+    }
+
+    /// Capture the data needed to render `repo_outline` without holding the read lock.
+    pub fn capture_repo_outline_view(&self) -> RepoOutlineView {
+        let mut files: Vec<RepoOutlineFileView> = self
+            .all_files()
+            .map(|(relative_path, file)| RepoOutlineFileView {
+                relative_path: relative_path.clone(),
+                language: file.language.clone(),
+                symbol_count: file.symbols.len(),
+            })
+            .collect();
+        files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+
+        let total_symbols = files.iter().map(|file| file.symbol_count).sum();
+
+        RepoOutlineView {
+            total_files: files.len(),
+            total_symbols,
+            files,
+        }
+    }
+
+    /// Return sorted relative paths matching a basename, case-insensitively.
+    pub fn find_files_by_basename(&self, basename: &str) -> Vec<&str> {
+        self.files_by_basename
+            .get(&basename.to_ascii_lowercase())
+            .map(|paths| paths.iter().map(|path| path.as_str()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Return sorted relative paths containing the given directory component, case-insensitively.
+    pub fn find_files_by_dir_component(&self, component: &str) -> Vec<&str> {
+        self.files_by_dir_component
+            .get(&component.to_ascii_lowercase())
+            .map(|paths| paths.iter().map(|path| path.as_str()).collect())
+            .unwrap_or_default()
     }
 
     /// Number of indexed files.
@@ -725,6 +1458,7 @@ impl LiveIndex {
 
 #[cfg(test)]
 mod tests {
+    use super::{ResolvePathView, SearchFilesHit, SearchFilesTier, SearchFilesView};
     use crate::domain::{LanguageId, ReferenceKind, ReferenceRecord, SymbolKind, SymbolRecord};
     use crate::live_index::store::{
         CircuitBreakerState, IndexState, IndexedFile, LiveIndex, ParseStatus,
@@ -752,6 +1486,7 @@ mod tests {
         IndexedFile {
             relative_path: path.to_string(),
             language: LanguageId::Rust,
+            classification: crate::domain::FileClassification::for_code_path(path),
             content: b"fn test() {}".to_vec(),
             symbols,
             parse_status: status,
@@ -778,8 +1513,10 @@ mod tests {
             cb.should_abort();
         }
 
-        let files_map: std::collections::HashMap<String, IndexedFile> =
-            files.into_iter().map(|(p, f)| (p.to_string(), f)).collect();
+        let files_map: std::collections::HashMap<String, std::sync::Arc<IndexedFile>> = files
+            .into_iter()
+            .map(|(p, f)| (p.to_string(), std::sync::Arc::new(f)))
+            .collect();
         let trigram_index = crate::live_index::trigram::TrigramIndex::build_from_files(&files_map);
         let mut index = LiveIndex {
             files: files_map,
@@ -788,11 +1525,16 @@ mod tests {
             load_duration: Duration::from_millis(50),
             cb_state: cb,
             is_empty: false,
+            load_source: crate::live_index::store::IndexLoadSource::FreshLoad,
+            snapshot_verify_state: crate::live_index::store::SnapshotVerifyState::NotNeeded,
             reverse_index: std::collections::HashMap::new(),
+            files_by_basename: std::collections::HashMap::new(),
+            files_by_dir_component: std::collections::HashMap::new(),
             trigram_index,
         };
         // Rebuild the reverse index so xref query tests work.
         index.rebuild_reverse_index();
+        index.rebuild_path_indices();
         index
     }
 
@@ -823,6 +1565,7 @@ mod tests {
         IndexedFile {
             relative_path: path.to_string(),
             language: LanguageId::Rust,
+            classification: crate::domain::FileClassification::for_code_path(path),
             content: b"fn test() {}".to_vec(),
             symbols: vec![],
             parse_status: ParseStatus::Parsed,
@@ -843,6 +1586,7 @@ mod tests {
         IndexedFile {
             relative_path: path.to_string(),
             language,
+            classification: crate::domain::FileClassification::for_code_path(path),
             content: content.as_bytes().to_vec(),
             symbols,
             parse_status: ParseStatus::Parsed,
@@ -894,6 +1638,551 @@ mod tests {
         let index = make_index(vec![("a.rs", f1), ("b.rs", f2)], false);
         let pairs: Vec<_> = index.all_files().collect();
         assert_eq!(pairs.len(), 2);
+    }
+
+    #[test]
+    fn test_capture_repo_outline_view_sorts_paths_and_counts_symbols() {
+        let f1 = make_indexed_file(
+            "src/zeta.rs",
+            vec![make_symbol("zeta"), make_symbol("helper")],
+            ParseStatus::Parsed,
+        );
+        let f2 = make_indexed_file(
+            "src/alpha.rs",
+            vec![make_symbol("alpha")],
+            ParseStatus::Parsed,
+        );
+        let index = make_index(vec![("src/zeta.rs", f1), ("src/alpha.rs", f2)], false);
+
+        let view = index.capture_repo_outline_view();
+
+        assert_eq!(view.total_files, 2);
+        assert_eq!(view.total_symbols, 3);
+        assert_eq!(
+            view.files
+                .iter()
+                .map(|file| file.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src/alpha.rs", "src/zeta.rs"]
+        );
+        assert_eq!(view.files[0].symbol_count, 1);
+        assert_eq!(view.files[1].symbol_count, 2);
+    }
+
+    #[test]
+    fn test_capture_file_outline_view_clones_path_and_symbols() {
+        let f = make_indexed_file(
+            "src/main.rs",
+            vec![make_symbol("main"), make_symbol("helper")],
+            ParseStatus::Parsed,
+        );
+        let index = make_index(vec![("src/main.rs", f)], false);
+
+        let view = index
+            .capture_file_outline_view("src/main.rs")
+            .expect("captured outline view");
+
+        assert_eq!(view.relative_path, "src/main.rs");
+        assert_eq!(
+            view.symbols
+                .iter()
+                .map(|symbol| symbol.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["main", "helper"]
+        );
+    }
+
+    #[test]
+    fn test_capture_symbol_detail_view_clones_content_and_symbols() {
+        let f = make_indexed_file(
+            "src/lib.rs",
+            vec![make_symbol("foo"), make_symbol("bar")],
+            ParseStatus::Parsed,
+        );
+        let index = make_index(vec![("src/lib.rs", f)], false);
+
+        let view = index
+            .capture_symbol_detail_view("src/lib.rs")
+            .expect("captured symbol detail view");
+
+        assert_eq!(view.relative_path, "src/lib.rs");
+        assert_eq!(view.content, b"fn test() {}".to_vec());
+        assert_eq!(
+            view.symbols
+                .iter()
+                .map(|symbol| symbol.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["foo", "bar"]
+        );
+    }
+
+    #[test]
+    fn test_capture_file_content_view_clones_path_and_content() {
+        let f = make_indexed_file("src/lib.rs", vec![], ParseStatus::Parsed);
+        let index = make_index(vec![("src/lib.rs", f)], false);
+
+        let view = index
+            .capture_file_content_view("src/lib.rs")
+            .expect("captured file content view");
+
+        assert_eq!(view.relative_path, "src/lib.rs");
+        assert_eq!(view.content, b"fn test() {}".to_vec());
+    }
+
+    #[test]
+    fn test_capture_shared_file_returns_same_arc_entry() {
+        let f = make_indexed_file("src/lib.rs", vec![], ParseStatus::Parsed);
+        let index = make_index(vec![("src/lib.rs", f)], false);
+
+        let shared = index
+            .capture_shared_file("src/lib.rs")
+            .expect("captured shared file");
+        let stored = index.files.get("src/lib.rs").expect("stored file");
+
+        assert!(std::sync::Arc::ptr_eq(stored, &shared));
+        assert_eq!(shared.relative_path, "src/lib.rs");
+        assert_eq!(shared.content, b"fn test() {}".to_vec());
+    }
+
+    #[test]
+    fn test_capture_shared_file_for_scope_exact_returns_same_arc_entry() {
+        let f = make_indexed_file("src/lib.rs", vec![], ParseStatus::Parsed);
+        let index = make_index(vec![("src/lib.rs", f)], false);
+
+        let shared = index
+            .capture_shared_file_for_scope(&super::PathScope::exact("src/lib.rs"))
+            .expect("captured scoped shared file");
+        let stored = index.files.get("src/lib.rs").expect("stored file");
+
+        assert!(std::sync::Arc::ptr_eq(stored, &shared));
+    }
+
+    #[test]
+    fn test_capture_shared_file_for_scope_unique_prefix_returns_only_match() {
+        let index = make_index(
+            vec![
+                (
+                    "src/lib.rs",
+                    make_indexed_file("src/lib.rs", vec![], ParseStatus::Parsed),
+                ),
+                (
+                    "src/main.rs",
+                    make_indexed_file("src/main.rs", vec![], ParseStatus::Parsed),
+                ),
+                (
+                    "tests/lib_test.rs",
+                    make_indexed_file("tests/lib_test.rs", vec![], ParseStatus::Parsed),
+                ),
+            ],
+            false,
+        );
+
+        let unique = index
+            .capture_shared_file_for_scope(&super::PathScope::prefix("tests/"))
+            .expect("unique prefix should resolve");
+        assert_eq!(unique.relative_path, "tests/lib_test.rs");
+
+        let ambiguous = index.capture_shared_file_for_scope(&super::PathScope::prefix("src/"));
+        assert!(ambiguous.is_none(), "ambiguous prefix should not resolve");
+
+        let any = index.capture_shared_file_for_scope(&super::PathScope::any());
+        assert!(any.is_none(), "Any scope should not guess a single file");
+    }
+
+    #[test]
+    fn test_capture_what_changed_timestamp_view_sorts_paths() {
+        let f1 = make_indexed_file("src/z.rs", vec![], ParseStatus::Parsed);
+        let f2 = make_indexed_file("src/a.rs", vec![], ParseStatus::Parsed);
+        let index = make_index(vec![("src/z.rs", f1), ("src/a.rs", f2)], false);
+
+        let view = index.capture_what_changed_timestamp_view();
+
+        assert!(view.loaded_secs >= 0);
+        assert_eq!(
+            view.paths,
+            vec!["src/a.rs".to_string(), "src/z.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_capture_resolve_path_view_returns_exact_path_match() {
+        let index = make_index(
+            vec![(
+                "src/protocol/tools.rs",
+                make_indexed_file("src/protocol/tools.rs", vec![], ParseStatus::Parsed),
+            )],
+            false,
+        );
+
+        let view = index.capture_resolve_path_view("./src\\protocol\\tools.rs");
+
+        assert_eq!(
+            view,
+            ResolvePathView::Resolved {
+                path: "src/protocol/tools.rs".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_capture_resolve_path_view_uses_basename_and_dir_component_narrowing() {
+        let index = make_index(
+            vec![
+                (
+                    "src/protocol/tools.rs",
+                    make_indexed_file("src/protocol/tools.rs", vec![], ParseStatus::Parsed),
+                ),
+                (
+                    "src/sidecar/tools.rs",
+                    make_indexed_file("src/sidecar/tools.rs", vec![], ParseStatus::Parsed),
+                ),
+            ],
+            false,
+        );
+
+        let view = index.capture_resolve_path_view("protocol/tools.rs");
+
+        assert_eq!(
+            view,
+            ResolvePathView::Resolved {
+                path: "src/protocol/tools.rs".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_capture_resolve_path_view_falls_back_to_partial_path_match() {
+        let index = make_index(
+            vec![(
+                "src/protocol/tools.rs",
+                make_indexed_file("src/protocol/tools.rs", vec![], ParseStatus::Parsed),
+            )],
+            false,
+        );
+
+        let view = index.capture_resolve_path_view("protocol/tools");
+
+        assert_eq!(
+            view,
+            ResolvePathView::Resolved {
+                path: "src/protocol/tools.rs".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_capture_resolve_path_view_returns_bounded_ambiguous_matches() {
+        let index = make_index(
+            vec![
+                (
+                    "src/lib.rs",
+                    make_indexed_file("src/lib.rs", vec![], ParseStatus::Parsed),
+                ),
+                (
+                    "tests/lib.rs",
+                    make_indexed_file("tests/lib.rs", vec![], ParseStatus::Parsed),
+                ),
+            ],
+            false,
+        );
+
+        let view = index.capture_resolve_path_view("lib.rs");
+
+        assert_eq!(
+            view,
+            ResolvePathView::Ambiguous {
+                hint: "lib.rs".to_string(),
+                matches: vec!["src/lib.rs".to_string(), "tests/lib.rs".to_string()],
+                overflow_count: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn test_capture_search_files_view_groups_tiers_and_caps_results() {
+        let index = make_index(
+            vec![
+                (
+                    "src/protocol/tools.rs",
+                    make_indexed_file("src/protocol/tools.rs", vec![], ParseStatus::Parsed),
+                ),
+                (
+                    "src/sidecar/tools.rs",
+                    make_indexed_file("src/sidecar/tools.rs", vec![], ParseStatus::Parsed),
+                ),
+                (
+                    "src/protocol/tools_helper.rs",
+                    make_indexed_file("src/protocol/tools_helper.rs", vec![], ParseStatus::Parsed),
+                ),
+            ],
+            false,
+        );
+
+        let view = index.capture_search_files_view("protocol/tools.rs", 2);
+
+        assert_eq!(
+            view,
+            SearchFilesView::Found {
+                query: "protocol/tools.rs".to_string(),
+                total_matches: 2,
+                overflow_count: 0,
+                hits: vec![
+                    SearchFilesHit {
+                        tier: SearchFilesTier::StrongPath,
+                        path: "src/protocol/tools.rs".to_string(),
+                    },
+                    SearchFilesHit {
+                        tier: SearchFilesTier::Basename,
+                        path: "src/sidecar/tools.rs".to_string(),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn test_capture_search_files_view_returns_loose_path_matches_for_component_query() {
+        let index = make_index(
+            vec![
+                (
+                    "src/live_index/query.rs",
+                    make_indexed_file("src/live_index/query.rs", vec![], ParseStatus::Parsed),
+                ),
+                (
+                    "src/live_index/store.rs",
+                    make_indexed_file("src/live_index/store.rs", vec![], ParseStatus::Parsed),
+                ),
+            ],
+            false,
+        );
+
+        let view = index.capture_search_files_view("live_index", 20);
+
+        assert_eq!(
+            view,
+            SearchFilesView::Found {
+                query: "live_index".to_string(),
+                total_matches: 2,
+                overflow_count: 0,
+                hits: vec![
+                    SearchFilesHit {
+                        tier: SearchFilesTier::LoosePath,
+                        path: "src/live_index/query.rs".to_string(),
+                    },
+                    SearchFilesHit {
+                        tier: SearchFilesTier::LoosePath,
+                        path: "src/live_index/store.rs".to_string(),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn test_capture_find_dependents_view_groups_files_and_lines() {
+        let target = make_file_with_refs_and_content(
+            "src/db.rs",
+            LanguageId::Rust,
+            "pub fn connect() {}\n",
+            vec![],
+            vec![SymbolRecord {
+                name: "connect".to_string(),
+                kind: SymbolKind::Function,
+                depth: 0,
+                sort_order: 0,
+                byte_range: (0, 18),
+                line_range: (0, 0),
+            }],
+        );
+        let importer = make_file_with_refs_and_content(
+            "src/app.rs",
+            LanguageId::Rust,
+            "use crate::db;\nfn run() { connect(); }\n",
+            vec![
+                make_ref("db", Some("crate::db"), ReferenceKind::Import, None, 0),
+                make_ref("connect", None, ReferenceKind::Call, Some(0), 100),
+            ],
+            vec![SymbolRecord {
+                name: "run".to_string(),
+                kind: SymbolKind::Function,
+                depth: 0,
+                sort_order: 0,
+                byte_range: (15, 38),
+                line_range: (1, 1),
+            }],
+        );
+        let index = make_index(vec![("src/db.rs", target), ("src/app.rs", importer)], false);
+
+        let view = index.capture_find_dependents_view("src/db.rs");
+
+        assert_eq!(view.files.len(), 1);
+        assert_eq!(view.files[0].file_path, "src/app.rs");
+        assert_eq!(view.files[0].lines[0].line_number, 2);
+        assert!(view.files[0].lines[0].line_content.contains("connect"));
+    }
+
+    #[test]
+    fn test_capture_find_references_view_groups_context_lines() {
+        let target = make_file_with_refs_and_content(
+            "src/lib.rs",
+            LanguageId::Rust,
+            "fn process() {}\n",
+            vec![],
+            vec![SymbolRecord {
+                name: "process".to_string(),
+                kind: SymbolKind::Function,
+                depth: 0,
+                sort_order: 0,
+                byte_range: (0, 14),
+                line_range: (0, 0),
+            }],
+        );
+        let caller = make_file_with_refs_and_content(
+            "src/app.rs",
+            LanguageId::Rust,
+            "fn run() {\n    process();\n}\n",
+            vec![make_ref("process", None, ReferenceKind::Call, Some(0), 100)],
+            vec![SymbolRecord {
+                name: "run".to_string(),
+                kind: SymbolKind::Function,
+                depth: 0,
+                sort_order: 0,
+                byte_range: (0, 28),
+                line_range: (0, 2),
+            }],
+        );
+        let index = make_index(vec![("src/lib.rs", target), ("src/app.rs", caller)], false);
+
+        let view = index.capture_find_references_view("process", Some("call"));
+
+        assert_eq!(view.total_refs, 1);
+        assert_eq!(view.files.len(), 1);
+        assert_eq!(view.files[0].file_path, "src/app.rs");
+        assert_eq!(view.files[0].hits[0].context_lines[1].line_number, 2);
+        assert!(
+            view.files[0].hits[0].context_lines[1]
+                .text
+                .contains("process")
+        );
+        assert!(
+            view.files[0].hits[0].context_lines[1]
+                .enclosing_annotation
+                .as_deref()
+                .unwrap_or("")
+                .contains("run")
+        );
+    }
+
+    #[test]
+    fn test_capture_context_bundle_view_collects_owned_sections() {
+        let target = make_file_with_refs_and_content(
+            "src/lib.rs",
+            LanguageId::Rust,
+            "fn process() {\n    helper();\n}\nfn helper() {}\n",
+            vec![make_ref("helper", None, ReferenceKind::Call, Some(0), 100)],
+            vec![
+                SymbolRecord {
+                    name: "process".to_string(),
+                    kind: SymbolKind::Function,
+                    depth: 0,
+                    sort_order: 0,
+                    byte_range: (0, 30),
+                    line_range: (0, 2),
+                },
+                SymbolRecord {
+                    name: "helper".to_string(),
+                    kind: SymbolKind::Function,
+                    depth: 0,
+                    sort_order: 1,
+                    byte_range: (31, 45),
+                    line_range: (3, 3),
+                },
+            ],
+        );
+        let caller = make_file_with_refs_and_content(
+            "src/app.rs",
+            LanguageId::Rust,
+            "fn run() {\n    process();\n    let value: process;\n}\n",
+            vec![
+                make_ref("process", None, ReferenceKind::Call, Some(0), 100),
+                make_ref("process", None, ReferenceKind::TypeUsage, Some(0), 200),
+            ],
+            vec![SymbolRecord {
+                name: "run".to_string(),
+                kind: SymbolKind::Function,
+                depth: 0,
+                sort_order: 0,
+                byte_range: (0, 52),
+                line_range: (0, 3),
+            }],
+        );
+        let index = make_index(vec![("src/lib.rs", target), ("src/app.rs", caller)], false);
+
+        let view = index.capture_context_bundle_view("src/lib.rs", "process", None);
+
+        let super::ContextBundleView::Found(found) = view else {
+            panic!("expected found context bundle view");
+        };
+
+        assert!(found.body.contains("fn process"));
+        assert_eq!(found.kind_label, "fn");
+        assert_eq!(found.callers.total_count, 1);
+        assert_eq!(found.callers.entries[0].file_path, "src/app.rs");
+        assert_eq!(found.callers.entries[0].line_number, 2);
+        assert!(
+            found.callers.entries[0]
+                .enclosing
+                .as_deref()
+                .unwrap_or("")
+                .contains("run")
+        );
+        assert_eq!(found.callees.total_count, 1);
+        assert_eq!(found.callees.entries[0].display_name, "helper");
+        assert_eq!(found.type_usages.total_count, 1);
+    }
+
+    #[test]
+    fn test_find_files_by_basename_returns_sorted_paths() {
+        let f1 = make_indexed_file("src/lib.rs", vec![], ParseStatus::Parsed);
+        let f2 = make_indexed_file("tests/lib.rs", vec![], ParseStatus::Parsed);
+        let f3 = make_indexed_file("src/main.rs", vec![], ParseStatus::Parsed);
+        let index = make_index(
+            vec![
+                ("tests/lib.rs", f2),
+                ("src/main.rs", f3),
+                ("src/lib.rs", f1),
+            ],
+            false,
+        );
+
+        assert_eq!(
+            index.find_files_by_basename("LIB.RS"),
+            vec!["src/lib.rs", "tests/lib.rs"]
+        );
+    }
+
+    #[test]
+    fn test_find_files_by_dir_component_returns_sorted_paths() {
+        let f1 = make_indexed_file("src/live_index/mod.rs", vec![], ParseStatus::Parsed);
+        let f2 = make_indexed_file("src/live_index/store.rs", vec![], ParseStatus::Parsed);
+        let f3 = make_indexed_file("tests/store.rs", vec![], ParseStatus::Parsed);
+        let index = make_index(
+            vec![
+                ("src/live_index/store.rs", f2),
+                ("tests/store.rs", f3),
+                ("src/live_index/mod.rs", f1),
+            ],
+            false,
+        );
+
+        assert_eq!(
+            index.find_files_by_dir_component("live_index"),
+            vec!["src/live_index/mod.rs", "src/live_index/store.rs"]
+        );
+        assert_eq!(
+            index.find_files_by_dir_component("SRC"),
+            vec!["src/live_index/mod.rs", "src/live_index/store.rs"]
+        );
     }
 
     #[test]
@@ -969,7 +2258,11 @@ mod tests {
             load_duration: Duration::from_millis(10),
             cb_state: cb,
             is_empty: false,
+            load_source: crate::live_index::store::IndexLoadSource::FreshLoad,
+            snapshot_verify_state: crate::live_index::store::SnapshotVerifyState::NotNeeded,
             reverse_index: std::collections::HashMap::new(),
+            files_by_basename: std::collections::HashMap::new(),
+            files_by_dir_component: std::collections::HashMap::new(),
             trigram_index: crate::live_index::trigram::TrigramIndex::new(),
         };
         assert!(!index.is_ready());
@@ -999,7 +2292,11 @@ mod tests {
             load_duration: Duration::from_millis(10),
             cb_state: cb,
             is_empty: false,
+            load_source: crate::live_index::store::IndexLoadSource::FreshLoad,
+            snapshot_verify_state: crate::live_index::store::SnapshotVerifyState::NotNeeded,
             reverse_index: std::collections::HashMap::new(),
+            files_by_basename: std::collections::HashMap::new(),
+            files_by_dir_component: std::collections::HashMap::new(),
             trigram_index: crate::live_index::trigram::TrigramIndex::new(),
         };
 

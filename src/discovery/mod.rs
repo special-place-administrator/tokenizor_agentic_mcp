@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::domain::LanguageId;
+use crate::domain::{FileClassification, LanguageId};
 use crate::error::Result;
 
 /// A file found during directory traversal that has a recognized language extension.
@@ -12,6 +12,8 @@ pub struct DiscoveredFile {
     pub absolute_path: PathBuf,
     /// Language inferred from the file extension.
     pub language: LanguageId,
+    /// Deterministic semantic-lane classification captured at discovery time.
+    pub classification: FileClassification,
 }
 
 /// Discover all source files under `root` that have a recognized language extension.
@@ -42,6 +44,7 @@ pub fn discover_files(root: &Path) -> Result<Vec<DiscoveredFile>> {
             let relative_path = relative.to_string_lossy().replace('\\', "/");
 
             Some(DiscoveredFile {
+                classification: FileClassification::for_code_path(&relative_path),
                 relative_path,
                 absolute_path: path,
                 language,
@@ -274,6 +277,39 @@ mod tests {
         assert_eq!(
             lower, sorted,
             "files should be in case-insensitive sorted order"
+        );
+    }
+
+    #[test]
+    fn test_discover_files_assigns_classification_tags_from_path() {
+        let tmp = TempDir::new().unwrap();
+        create_file(tmp.path(), "tests/unit_spec.rs", "fn spec_case() {}");
+        create_file(tmp.path(), "vendor/pkg/lib.rs", "fn vendored() {}");
+        create_file(
+            tmp.path(),
+            "src/generated/client.generated.rs",
+            "fn generated() {}",
+        );
+
+        let files = discover_files(tmp.path()).unwrap();
+        let by_path: std::collections::HashMap<&str, &DiscoveredFile> = files
+            .iter()
+            .map(|file| (file.relative_path.as_str(), file))
+            .collect();
+
+        assert!(
+            by_path["tests/unit_spec.rs"].classification.is_test,
+            "tests path should set is_test"
+        );
+        assert!(
+            by_path["vendor/pkg/lib.rs"].classification.is_vendor,
+            "vendor path should set is_vendor"
+        );
+        assert!(
+            by_path["src/generated/client.generated.rs"]
+                .classification
+                .is_generated,
+            "generated path should set is_generated"
         );
     }
 

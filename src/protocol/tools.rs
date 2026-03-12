@@ -23,7 +23,7 @@ use rmcp::{tool, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::live_index::store::IndexState;
+use crate::live_index::{IndexedFile, search, store::IndexState};
 use crate::protocol::format;
 use crate::sidecar::handlers::{
     ImpactParams, OutlineParams, SymbolContextParams, impact_tool_text, outline_tool_text,
@@ -95,6 +95,22 @@ pub struct SearchTextInput {
     pub terms: Option<Vec<String>>,
     /// Interpret `query` as a regex pattern instead of a literal substring.
     pub regex: Option<bool>,
+}
+
+/// Input for `search_files`.
+#[derive(Deserialize, Serialize, JsonSchema)]
+pub struct SearchFilesInput {
+    /// Filename, folder name, or partial path.
+    pub query: String,
+    /// Optional maximum number of matches to return (default 20, capped at 50).
+    pub limit: Option<u32>,
+}
+
+/// Input for `resolve_path`.
+#[derive(Deserialize, Serialize, JsonSchema)]
+pub struct ResolvePathInput {
+    /// Filename, partial path, or ambiguous path hint.
+    pub hint: String,
 }
 
 /// Input for `index_folder`.
@@ -297,6 +313,22 @@ fn sidecar_state_for_server(server: &TokenizorServer) -> SidecarState {
     }
 }
 
+enum CapturedGetSymbolsEntry {
+    SymbolLookup {
+        file: Arc<IndexedFile>,
+        name: String,
+        kind: Option<String>,
+    },
+    CodeSlice {
+        file: Arc<IndexedFile>,
+        start_byte: usize,
+        end_byte: Option<usize>,
+    },
+    FileNotFound {
+        path: String,
+    },
+}
+
 // ─── Tool handlers ───────────────────────────────────────────────────────────
 
 /// Loading guard helper — returns `Some(message)` when index is NOT ready.
@@ -316,6 +348,23 @@ macro_rules! loading_guard {
     };
 }
 
+fn loading_guard_message_from_published(
+    published: &crate::live_index::PublishedIndexState,
+) -> Option<String> {
+    match published.status {
+        crate::live_index::PublishedIndexStatus::Ready => None,
+        crate::live_index::PublishedIndexStatus::Empty => Some(format::empty_guard_message()),
+        crate::live_index::PublishedIndexStatus::Loading => Some(format::loading_guard_message()),
+        crate::live_index::PublishedIndexStatus::Degraded => Some(format!(
+            "Index degraded: {}",
+            published
+                .degraded_summary
+                .as_deref()
+                .unwrap_or("circuit breaker tripped")
+        )),
+    }
+}
+
 #[tool_router(vis = "pub(crate)")]
 impl TokenizorServer {
     /// Return the symbol outline for a file. Shows functions, structs, classes with line ranges.
@@ -326,11 +375,15 @@ impl TokenizorServer {
         if let Some(result) = self.proxy_tool_call("get_file_outline", &params.0).await {
             return result;
         }
-        let guard = self.index.read().expect("lock poisoned");
-        loading_guard!(guard);
-        let result = format::file_outline(&guard, &params.0.path);
-        drop(guard);
-        result
+        let file = {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
+            guard.capture_shared_file(&params.0.path)
+        };
+        match file {
+            Some(file) => format::file_outline_from_indexed_file(file.as_ref()),
+            None => format::not_found_file(&params.0.path),
+        }
     }
 
     /// Look up a specific symbol by file path and name. Returns full source code.
@@ -341,16 +394,19 @@ impl TokenizorServer {
         if let Some(result) = self.proxy_tool_call("get_symbol", &params.0).await {
             return result;
         }
-        let guard = self.index.read().expect("lock poisoned");
-        loading_guard!(guard);
-        let result = format::symbol_detail(
-            &guard,
-            &params.0.path,
-            &params.0.name,
-            params.0.kind.as_deref(),
-        );
-        drop(guard);
-        result
+        let file = {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
+            guard.capture_shared_file(&params.0.path)
+        };
+        match file {
+            Some(file) => format::symbol_detail_from_indexed_file(
+                file.as_ref(),
+                &params.0.name,
+                params.0.kind.as_deref(),
+            ),
+            None => format::not_found_file(&params.0.path),
+        }
     }
 
     /// Batch lookup of symbols or code slices. Each target can be a symbol name or byte range.
@@ -361,38 +417,54 @@ impl TokenizorServer {
         if let Some(result) = self.proxy_tool_call("get_symbols", &params.0).await {
             return result;
         }
-        let guard = self.index.read().expect("lock poisoned");
-        loading_guard!(guard);
+        let captured = {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
 
-        let mut results: Vec<String> = Vec::new();
-        for target in &params.0.targets {
-            let entry = match target.name.as_deref() {
-                Some(name) => {
-                    // Symbol lookup
-                    format::symbol_detail(&guard, &target.path, name, target.kind.as_deref())
+            params
+                .0
+                .targets
+                .iter()
+                .map(|target| match target.name.as_deref() {
+                    Some(name) => match guard.capture_shared_file(&target.path) {
+                        Some(file) => CapturedGetSymbolsEntry::SymbolLookup {
+                            file,
+                            name: name.to_string(),
+                            kind: target.kind.clone(),
+                        },
+                        None => CapturedGetSymbolsEntry::FileNotFound {
+                            path: target.path.clone(),
+                        },
+                    },
+                    None => match guard.capture_shared_file(&target.path) {
+                        None => CapturedGetSymbolsEntry::FileNotFound {
+                            path: target.path.clone(),
+                        },
+                        Some(file) => CapturedGetSymbolsEntry::CodeSlice {
+                            file,
+                            start_byte: target.start_byte.unwrap_or(0) as usize,
+                            end_byte: target.end_byte.map(|e| e as usize),
+                        },
+                    },
+                })
+                .collect::<Vec<_>>()
+        };
+
+        captured
+            .into_iter()
+            .map(|entry| match entry {
+                CapturedGetSymbolsEntry::SymbolLookup { file, name, kind } => {
+                    format::symbol_detail_from_indexed_file(file.as_ref(), &name, kind.as_deref())
                 }
-                None => {
-                    // Code slice by byte range
-                    match guard.get_file(&target.path) {
-                        None => format::not_found_file(&target.path),
-                        Some(file) => {
-                            let start = target.start_byte.unwrap_or(0) as usize;
-                            let end = target
-                                .end_byte
-                                .map(|e| e as usize)
-                                .unwrap_or(file.content.len());
-                            let end = end.min(file.content.len());
-                            let slice = &file.content[start.min(end)..end];
-                            let text = String::from_utf8_lossy(slice).into_owned();
-                            format!("{}\n{}", target.path, text)
-                        }
-                    }
-                }
-            };
-            results.push(entry);
-        }
-        drop(guard);
-        results.join("\n---\n")
+                CapturedGetSymbolsEntry::CodeSlice {
+                    file,
+                    start_byte,
+                    end_byte,
+                } => format::code_slice_from_indexed_file(file.as_ref(), start_byte, end_byte),
+                CapturedGetSymbolsEntry::FileNotFound { path } => format::not_found_file(&path),
+            })
+            .collect::<Vec<_>>()
+            .join("\n---\n")
     }
 
     /// Show the file tree with language and symbol counts per file.
@@ -404,11 +476,12 @@ impl TokenizorServer {
         {
             return result;
         }
-        let guard = self.index.read().expect("lock poisoned");
-        loading_guard!(guard);
-        let result = format::repo_outline(&guard, &self.project_name.clone());
-        drop(guard);
-        result
+        let published = self.index.published_state();
+        if let Some(message) = loading_guard_message_from_published(&published) {
+            return message;
+        }
+        let view = self.index.published_repo_outline();
+        format::repo_outline_view(&view, &self.project_name)
     }
 
     /// Show the compact repo map used for session-start enrichment.
@@ -521,15 +594,12 @@ impl TokenizorServer {
         if let Some(result) = self.proxy_tool_call("search_symbols", &params.0).await {
             return result;
         }
-        let guard = self.index.read().expect("lock poisoned");
-        loading_guard!(guard);
-        let result = format::search_symbols_result_with_kind(
-            &guard,
-            &params.0.query,
-            params.0.kind.as_deref(),
-        );
-        drop(guard);
-        result
+        let result = {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
+            search::search_symbols(&guard, &params.0.query, params.0.kind.as_deref(), 50)
+        };
+        format::search_symbols_result_view(&result, &params.0.query)
     }
 
     /// Full-text search across all indexed file contents.
@@ -538,16 +608,47 @@ impl TokenizorServer {
         if let Some(result) = self.proxy_tool_call("search_text", &params.0).await {
             return result;
         }
-        let guard = self.index.read().expect("lock poisoned");
-        loading_guard!(guard);
-        let result = format::search_text_result_with_options(
-            &guard,
-            params.0.query.as_deref(),
-            params.0.terms.as_deref(),
-            params.0.regex.unwrap_or(false),
-        );
-        drop(guard);
-        result
+        let result = {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
+            search::search_text(
+                &guard,
+                params.0.query.as_deref(),
+                params.0.terms.as_deref(),
+                params.0.regex.unwrap_or(false),
+            )
+        };
+        format::search_text_result_view(result)
+    }
+
+    /// Search indexed file paths using bounded ranked code-lane discovery.
+    #[tool(description = "Search indexed file paths using bounded ranked code-lane discovery.")]
+    pub(crate) async fn search_files(&self, params: Parameters<SearchFilesInput>) -> String {
+        if let Some(result) = self.proxy_tool_call("search_files", &params.0).await {
+            return result;
+        }
+        let view = {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
+            guard.capture_search_files_view(&params.0.query, params.0.limit.unwrap_or(20) as usize)
+        };
+        format::search_files_result_view(&view)
+    }
+
+    /// Resolve filenames, partial paths, and ambiguous path hints to one exact indexed project path.
+    #[tool(
+        description = "Resolve filenames, partial paths, and ambiguous path hints to one exact indexed project path."
+    )]
+    pub(crate) async fn resolve_path(&self, params: Parameters<ResolvePathInput>) -> String {
+        if let Some(result) = self.proxy_tool_call("resolve_path", &params.0).await {
+            return result;
+        }
+        let view = {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
+            guard.capture_resolve_path_view(&params.0.hint)
+        };
+        format::resolve_path_result_view(&view)
     }
 
     /// Report server health: index status, file counts, load duration, watcher state.
@@ -562,11 +663,9 @@ impl TokenizorServer {
         if let Some(result) = self.proxy_tool_call_without_params("health").await {
             return result;
         }
-        let guard = self.index.read().expect("lock poisoned");
+        let published = self.index.published_state();
         let watcher_guard = self.watcher_info.lock().unwrap();
-        let mut result = format::health_report_with_watcher(&guard, &watcher_guard);
-        drop(watcher_guard);
-        drop(guard);
+        let mut result = format::health_report_from_published_state(&published, &watcher_guard);
 
         // Append token savings section if the sidecar's TokenStats are available.
         if let Some(ref stats) = self.token_stats {
@@ -590,12 +689,11 @@ impl TokenizorServer {
             return result;
         }
         let root = PathBuf::from(&params.0.path);
-        let mut guard = self.index.write().expect("lock poisoned");
-        match guard.reload(&root) {
+        match self.index.reload(&root) {
             Ok(()) => {
-                let file_count = guard.file_count();
-                let symbol_count = guard.symbol_count();
-                drop(guard);
+                let published = self.index.published_state();
+                let file_count = published.file_count;
+                let symbol_count = published.symbol_count;
 
                 // Restart the file watcher at the new root so freshness continues.
                 crate::watcher::restart_watcher(
@@ -626,11 +724,12 @@ impl TokenizorServer {
 
         match mode {
             WhatChangedMode::Timestamp(since_ts) => {
-                let guard = self.index.read().expect("lock poisoned");
-                loading_guard!(guard);
-                let result = format::what_changed_result(&guard, since_ts);
-                drop(guard);
-                result
+                let view = {
+                    let guard = self.index.read().expect("lock poisoned");
+                    loading_guard!(guard);
+                    guard.capture_what_changed_timestamp_view()
+                };
+                format::what_changed_timestamp_view(&view, since_ts)
             }
             WhatChangedMode::Uncommitted => {
                 let guard = self.index.read().expect("lock poisoned");
@@ -678,16 +777,25 @@ impl TokenizorServer {
         if let Some(result) = self.proxy_tool_call("get_file_content", &params.0).await {
             return result;
         }
-        let guard = self.index.read().expect("lock poisoned");
-        loading_guard!(guard);
-        let result = format::file_content(
-            &guard,
-            &params.0.path,
+        let options = search::FileContentOptions::for_explicit_path_read(
+            params.0.path.clone(),
             params.0.start_line,
             params.0.end_line,
         );
-        drop(guard);
-        result
+        let file = {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
+            guard.capture_shared_file_for_scope(&options.path_scope)
+        };
+        match file {
+            Some(file) => {
+                format::file_content_from_indexed_file_with_context(
+                    file.as_ref(),
+                    options.content_context,
+                )
+            }
+            None => format::not_found_file(&params.0.path),
+        }
     }
 
     /// Find all references (call sites, imports, type usages) for a symbol across the codebase.
@@ -698,12 +806,13 @@ impl TokenizorServer {
         if let Some(result) = self.proxy_tool_call("find_references", &params.0).await {
             return result;
         }
-        let guard = self.index.read().expect("lock poisoned");
-        loading_guard!(guard);
         let input = &params.0;
-        let result = format::find_references_result(&guard, &input.name, input.kind.as_deref());
-        drop(guard);
-        result
+        let view = {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
+            guard.capture_find_references_view(&input.name, input.kind.as_deref())
+        };
+        format::find_references_result_view(&view, &input.name)
     }
 
     /// Find all files that import or depend on the given file.
@@ -712,12 +821,13 @@ impl TokenizorServer {
         if let Some(result) = self.proxy_tool_call("find_dependents", &params.0).await {
             return result;
         }
-        let guard = self.index.read().expect("lock poisoned");
-        loading_guard!(guard);
         let input = &params.0;
-        let result = format::find_dependents_result(&guard, &input.path);
-        drop(guard);
-        result
+        let view = {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
+            guard.capture_find_dependents_view(&input.path)
+        };
+        format::find_dependents_result_view(&view, &input.path)
     }
 
     /// Browse the source file tree with symbol counts per file and directory.
@@ -726,13 +836,14 @@ impl TokenizorServer {
         if let Some(result) = self.proxy_tool_call("get_file_tree", &params.0).await {
             return result;
         }
-        let guard = self.index.read().expect("lock poisoned");
-        loading_guard!(guard);
+        let published = self.index.published_state();
+        if let Some(message) = loading_guard_message_from_published(&published) {
+            return message;
+        }
         let path = params.0.path.as_deref().unwrap_or("");
         let depth = params.0.depth.unwrap_or(2).min(5);
-        let result = format::file_tree(&guard, path, depth);
-        drop(guard);
-        result
+        let view = self.index.published_repo_outline();
+        format::file_tree_view(&view.files, path, depth)
     }
 
     /// Get full context for a symbol: definition body, callers, callees, and type usages in one call.
@@ -746,13 +857,13 @@ impl TokenizorServer {
         if let Some(result) = self.proxy_tool_call("get_context_bundle", &params.0).await {
             return result;
         }
-        let guard = self.index.read().expect("lock poisoned");
-        loading_guard!(guard);
         let input = &params.0;
-        let result =
-            format::context_bundle_result(&guard, &input.path, &input.name, input.kind.as_deref());
-        drop(guard);
-        result
+        let view = {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
+            guard.capture_context_bundle_view(&input.path, &input.name, input.kind.as_deref())
+        };
+        format::context_bundle_result_view(&view)
     }
 }
 
@@ -765,7 +876,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::sync::{Arc, RwLock};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use crate::domain::{LanguageId, ReferenceKind, ReferenceRecord, SymbolKind, SymbolRecord};
@@ -793,6 +904,7 @@ mod tests {
             IndexedFile {
                 relative_path: path.to_string(),
                 language: LanguageId::Rust,
+                classification: crate::domain::FileClassification::for_code_path(path),
                 content: content.to_vec(),
                 symbols,
                 parse_status: ParseStatus::Parsed,
@@ -817,7 +929,10 @@ mod tests {
 
     fn make_live_index_ready(files: Vec<(String, IndexedFile)>) -> LiveIndex {
         use crate::live_index::trigram::TrigramIndex;
-        let files_map = files.into_iter().collect::<HashMap<_, _>>();
+        let files_map = files
+            .into_iter()
+            .map(|(path, file)| (path, std::sync::Arc::new(file)))
+            .collect::<HashMap<_, _>>();
         let trigram_index = TrigramIndex::build_from_files(&files_map);
         let mut index = LiveIndex {
             files: files_map,
@@ -826,10 +941,15 @@ mod tests {
             load_duration: Duration::from_millis(10),
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: false,
+            load_source: crate::live_index::store::IndexLoadSource::FreshLoad,
+            snapshot_verify_state: crate::live_index::store::SnapshotVerifyState::NotNeeded,
             reverse_index: HashMap::new(),
+            files_by_basename: HashMap::new(),
+            files_by_dir_component: HashMap::new(),
             trigram_index,
         };
         index.rebuild_reverse_index();
+        index.rebuild_path_indices();
         index
     }
 
@@ -842,7 +962,11 @@ mod tests {
             load_duration: Duration::ZERO,
             cb_state: CircuitBreakerState::new(0.20),
             is_empty: true,
+            load_source: crate::live_index::store::IndexLoadSource::EmptyBootstrap,
+            snapshot_verify_state: crate::live_index::store::SnapshotVerifyState::NotNeeded,
             reverse_index: HashMap::new(),
+            files_by_basename: HashMap::new(),
+            files_by_dir_component: HashMap::new(),
             trigram_index: TrigramIndex::new(),
         }
     }
@@ -864,7 +988,11 @@ mod tests {
             load_duration: Duration::ZERO,
             cb_state: cb,
             is_empty: false,
+            load_source: crate::live_index::store::IndexLoadSource::FreshLoad,
+            snapshot_verify_state: crate::live_index::store::SnapshotVerifyState::NotNeeded,
             reverse_index: HashMap::new(),
+            files_by_basename: HashMap::new(),
+            files_by_dir_component: HashMap::new(),
             trigram_index: TrigramIndex::new(),
         }
     }
@@ -872,7 +1000,7 @@ mod tests {
     fn make_server_with_root(index: LiveIndex, repo_root: Option<PathBuf>) -> TokenizorServer {
         use crate::watcher::WatcherInfo;
         use std::sync::Mutex;
-        let shared = Arc::new(RwLock::new(index));
+        let shared = crate::live_index::SharedIndexHandle::shared(index);
         let watcher_info = Arc::new(Mutex::new(WatcherInfo::default()));
         TokenizorServer::new(
             shared,
@@ -1032,6 +1160,13 @@ mod tests {
             result.contains("test_project"),
             "repo outline should use project_name, got: {result}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_get_repo_outline_loading_guard_empty() {
+        let server = make_server(make_live_index_empty());
+        let result = server.get_repo_outline().await;
+        assert_eq!(result, crate::protocol::format::empty_guard_message());
     }
 
     #[tokio::test]
@@ -1335,6 +1470,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_search_files_returns_ranked_paths() {
+        let server = make_server(make_live_index_ready(vec![
+            make_file("src/protocol/tools.rs", b"fn a() {}", vec![]),
+            make_file("src/sidecar/tools.rs", b"fn b() {}", vec![]),
+            make_file("src/protocol/tools_helper.rs", b"fn c() {}", vec![]),
+        ]));
+        let result = server
+            .search_files(Parameters(super::SearchFilesInput {
+                query: "protocol/tools.rs".to_string(),
+                limit: Some(20),
+            }))
+            .await;
+        assert!(result.contains("2 matching files"), "got: {result}");
+        assert!(result.contains("── Strong path matches ──"), "got: {result}");
+        assert!(result.contains("── Basename matches ──"), "got: {result}");
+        assert!(result.contains("src/protocol/tools.rs"), "got: {result}");
+        assert!(result.contains("src/sidecar/tools.rs"), "got: {result}");
+        assert!(!result.contains("tools_helper.rs"), "got: {result}");
+    }
+
+    #[tokio::test]
+    async fn test_search_files_not_found() {
+        let server = make_server(make_live_index_ready(vec![]));
+        let result = server
+            .search_files(Parameters(super::SearchFilesInput {
+                query: "README.md".to_string(),
+                limit: None,
+            }))
+            .await;
+        assert_eq!(result, "No indexed source files matching 'README.md'");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_path_returns_exact_match() {
+        let (key, file) = make_file("src/protocol/tools.rs", b"fn tool() {}", vec![]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server
+            .resolve_path(Parameters(super::ResolvePathInput {
+                hint: "src/protocol/tools.rs".to_string(),
+            }))
+            .await;
+        assert_eq!(result, "src/protocol/tools.rs");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_path_returns_ambiguous_matches() {
+        let server = make_server(make_live_index_ready(vec![
+            make_file("src/lib.rs", b"fn src_lib() {}", vec![]),
+            make_file("tests/lib.rs", b"fn test_lib() {}", vec![]),
+        ]));
+        let result = server
+            .resolve_path(Parameters(super::ResolvePathInput {
+                hint: "lib.rs".to_string(),
+            }))
+            .await;
+        assert!(result.contains("Ambiguous path hint 'lib.rs'"), "got: {result}");
+        assert!(result.contains("src/lib.rs"), "got: {result}");
+        assert!(result.contains("tests/lib.rs"), "got: {result}");
+    }
+
+    #[tokio::test]
     async fn test_health_returns_status_fields() {
         let (key, file) = make_file("src/lib.rs", b"fn foo() {}", vec![]);
         let server = make_server(make_live_index_ready(vec![(key, file)]));
@@ -1363,6 +1559,10 @@ mod tests {
         assert!(
             !result.starts_with("Index"),
             "should not return guard message, got: {result}"
+        );
+        assert!(
+            result.contains("fn bar() {"),
+            "symbol lookup branch should return symbol body, got: {result}"
         );
     }
 
@@ -1511,6 +1711,21 @@ mod tests {
         assert_eq!(result, "File not found: nonexistent.rs");
     }
 
+    #[tokio::test]
+    async fn test_get_file_content_line_range_preserves_public_contract() {
+        let content = b"line 1\nline 2\nline 3\nline 4";
+        let (key, file) = make_file("src/lib.rs", content, vec![]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server
+            .get_file_content(Parameters(super::GetFileContentInput {
+                path: "src/lib.rs".to_string(),
+                start_line: Some(2),
+                end_line: Some(3),
+            }))
+            .await;
+        assert_eq!(result, "line 2\nline 3");
+    }
+
     // ── INFR-05: No v1 tools in server ──────────────────────────────────────
 
     #[test]
@@ -1542,12 +1757,12 @@ mod tests {
     }
 
     #[test]
-    fn test_exactly_18_tools_registered() {
+    fn test_exactly_20_tools_registered() {
         let server = make_server(make_live_index_ready(vec![]));
         let tool_count = server.tool_router.list_all().len();
         assert_eq!(
-            tool_count, 18,
-            "server must expose exactly 18 tools after adding shared hook-parity tools; found {tool_count}"
+            tool_count, 20,
+            "server must expose exactly 20 tools after adding search_files; found {tool_count}"
         );
     }
 
@@ -1618,6 +1833,19 @@ mod tests {
             }))
             .await;
         assert_eq!(result, crate::protocol::format::empty_guard_message());
+    }
+
+    #[tokio::test]
+    async fn test_get_context_bundle_delegates_to_formatter() {
+        let server = make_server(make_live_index_ready(vec![]));
+        let result = server
+            .get_context_bundle(Parameters(super::GetContextBundleInput {
+                path: "src/nonexistent.rs".to_string(),
+                name: "process".to_string(),
+                kind: None,
+            }))
+            .await;
+        assert!(result.contains("File not found"), "got: {result}");
     }
 
     #[tokio::test]
