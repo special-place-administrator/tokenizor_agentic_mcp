@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.9.1...v0.10.0) (2026-03-12)
+
+
+### Features
+
+* git temporal intelligence with churn, ownership, and co-change analysis ([d4cd579](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/d4cd579e6f842db7cc2aadd14700d42dd997d411))
+
 ## [0.9.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.9.0...v0.9.1) (2026-03-12)
 
 
