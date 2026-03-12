@@ -51,7 +51,7 @@ At the time of this README rewrite, `cargo test` is green in this repository.
 - `search_text` with literal, OR-term, and regex search plus `path_prefix`, `language`, `limit`, `max_per_file`, `glob`, `exclude_glob`, symmetric `context`, `case_sensitive`, `whole_word`, generated/test suppression, and relevance-ranked results (files sorted by match count rather than alphabetically)
 - `get_file_content` with full-file reads, explicit line ranges, optional `show_line_numbers` and `header` for full-file or explicit-range reads, `around_line`, first-match `around_match`, exact-path `around_symbol`, and exact-path line-oriented chunked reads via `chunk_index` plus `max_lines`; error messages show valid parameter combinations for the attempted mode
 - exact-selector reference navigation through `find_references`, `get_symbol_context`, and `get_context_bundle` using `path`, symbol kind, and symbol line; `find_references` supports `limit` and `max_per_file` for bounded output
-- `find_dependents` with module- and namespace-aware attribution and `limit`/`max_per_file` output bounds
+- `find_dependents` with module- and namespace-aware attribution, `limit`/`max_per_file` output bounds, and optional `format` parameter for Mermaid flowchart or Graphviz DOT graph output
 - prompt-submit hook routing that can use file hints, basename/extensionless aliases, module aliases, qualified symbol aliases, and `:line` hints to choose the right file or symbol more reliably
 
 ### MCP surface implemented today
