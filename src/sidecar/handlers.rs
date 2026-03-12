@@ -904,7 +904,7 @@ fn find_prompt_file_hint(
             }));
         }
 
-        if let Some(module_alias) = prompt_module_alias(path, &file.language) {
+        if let Some(module_alias) = prompt_file_module_alias(path, &file.language) {
             if prompt_contains_exact_alias(prompt, &module_alias) {
                 if let Some(existing) = &module_match {
                     if existing.path != path.as_str() {
@@ -1007,7 +1007,7 @@ fn find_prompt_qualified_symbol_hint(
     let mut qualified_symbol_ambiguous = false;
 
     for (path, file) in guard.all_files() {
-        let Some(module_alias) = prompt_module_alias(path, &file.language) else {
+        let Some(module_alias) = prompt_symbol_module_alias(path, &file.language) else {
             continue;
         };
 
@@ -1192,11 +1192,57 @@ fn prompt_module_alias(path: &str, language: &LanguageId) -> Option<String> {
     }
 }
 
+fn prompt_file_module_alias(path: &str, language: &LanguageId) -> Option<String> {
+    if let Some(alias) = prompt_module_alias(path, language) {
+        return Some(alias);
+    }
+
+    let alias = match language {
+        LanguageId::JavaScript | LanguageId::TypeScript => {
+            let mut components: Vec<String> = std::path::Path::new(path)
+                .components()
+                .filter_map(|component| component.as_os_str().to_str().map(String::from))
+                .collect();
+
+            if let Some(last) = components.last_mut()
+                && let Some(stem) = std::path::Path::new(last.as_str())
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+            {
+                *last = stem.to_string();
+            }
+
+            if matches!(components.last().map(|value| value.as_str()), Some("index")) {
+                components.pop();
+            }
+
+            if components.is_empty() {
+                None
+            } else {
+                Some(components.join("/"))
+            }
+        }
+        _ => None,
+    }?;
+
+    if alias.contains('/') {
+        Some(alias)
+    } else {
+        None
+    }
+}
+
+fn prompt_symbol_module_alias(path: &str, language: &LanguageId) -> Option<String> {
+    prompt_file_module_alias(path, language)
+}
+
 fn prompt_qualified_symbol_alias(module_alias: &str, symbol_name: &str) -> Option<String> {
     let separator = if module_alias.contains("::") {
         "::"
     } else if module_alias.contains('.') {
         "."
+    } else if module_alias.contains('/') {
+        "/"
     } else {
         return None;
     };
@@ -2520,6 +2566,220 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_prompt_context_handler_slash_module_alias_without_line_prefers_exact_file_hint() {
+        let target = IndexedFile {
+            relative_path: "src/utils/index.ts".to_string(),
+            language: LanguageId::TypeScript,
+            classification: crate::domain::FileClassification::for_code_path("src/utils/index.ts"),
+            content: b"export function connect() {}\n".to_vec(),
+            symbols: vec![make_symbol("connect", SymbolKind::Function, 1, 1)],
+            parse_status: ParseStatus::Parsed,
+            byte_len: 28,
+            content_hash: "utils-ts".to_string(),
+            references: vec![],
+            alias_map: HashMap::new(),
+        };
+        let dependent = IndexedFile {
+            relative_path: "src/app.ts".to_string(),
+            language: LanguageId::TypeScript,
+            classification: crate::domain::FileClassification::for_code_path("src/app.ts"),
+            content: b"import { connect } from 'src/utils';\nconnect();\n".to_vec(),
+            symbols: vec![make_symbol("run", SymbolKind::Function, 2, 2)],
+            parse_status: ParseStatus::Parsed,
+            byte_len: 49,
+            content_hash: "app-ts".to_string(),
+            references: vec![
+                ReferenceRecord {
+                    name: "utils".to_string(),
+                    qualified_name: Some("src/utils".to_string()),
+                    kind: ReferenceKind::Import,
+                    byte_range: (24, 33),
+                    line_range: (0, 0),
+                    enclosing_symbol_index: None,
+                },
+                ReferenceRecord {
+                    name: "connect".to_string(),
+                    qualified_name: Some("src/utils/connect".to_string()),
+                    kind: ReferenceKind::Call,
+                    byte_range: (36, 42),
+                    line_range: (1, 1),
+                    enclosing_symbol_index: Some(0),
+                },
+            ],
+            alias_map: HashMap::new(),
+        };
+        let unrelated = make_indexed_file(
+            "src/other.ts",
+            vec![make_symbol("run", SymbolKind::Function, 1, 1)],
+            vec![make_reference("connect", ReferenceKind::Call, 1)],
+            ParseStatus::Parsed,
+        );
+        let state = make_state(vec![
+            ("src/utils/index.ts", target),
+            ("src/app.ts", dependent),
+            ("src/other.ts", unrelated),
+        ]);
+
+        let result = prompt_context_handler(
+            State(state),
+            Query(PromptContextParams {
+                text: "inspect src/utils connect".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !result.contains("Ambiguous symbol selector"),
+            "slash module aliases without line should still resolve the exact file hint: {result}"
+        );
+        assert!(
+            result.contains("src/app.ts"),
+            "slash module aliases without line should still return symbol context results: {result}"
+        );
+        assert!(
+            !result.contains("src/other.ts"),
+            "slash module aliases without line should exclude unrelated same-name hits: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prompt_context_handler_slash_module_alias_file_only_prefers_exact_outline() {
+        let target = IndexedFile {
+            relative_path: "src/utils/index.ts".to_string(),
+            language: LanguageId::TypeScript,
+            classification: crate::domain::FileClassification::for_code_path("src/utils/index.ts"),
+            content: b"export function connect() {}\n".to_vec(),
+            symbols: vec![make_symbol("connect", SymbolKind::Function, 1, 1)],
+            parse_status: ParseStatus::Parsed,
+            byte_len: 28,
+            content_hash: "utils-ts".to_string(),
+            references: vec![],
+            alias_map: HashMap::new(),
+        };
+        let unrelated = make_indexed_file(
+            "src/other.ts",
+            vec![make_symbol("connect", SymbolKind::Function, 1, 1)],
+            vec![],
+            ParseStatus::Parsed,
+        );
+        let state = make_state(vec![
+            ("src/utils/index.ts", target),
+            ("src/other.ts", unrelated),
+        ]);
+
+        let result = prompt_context_handler(
+            State(state),
+            Query(PromptContextParams {
+                text: "inspect src/utils".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            result.contains("src/utils/index.ts"),
+            "slash module aliases should resolve file-only prompts to the exact outline: {result}"
+        );
+        assert!(
+            !result.contains("src/other.ts"),
+            "slash module aliases should not outline unrelated files: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prompt_context_handler_partial_slash_module_alias_without_line_does_not_activate() {
+        let target = IndexedFile {
+            relative_path: "src/utils/index.ts".to_string(),
+            language: LanguageId::TypeScript,
+            classification: crate::domain::FileClassification::for_code_path("src/utils/index.ts"),
+            content: b"export function connect() {}\n".to_vec(),
+            symbols: vec![make_symbol("connect", SymbolKind::Function, 1, 1)],
+            parse_status: ParseStatus::Parsed,
+            byte_len: 28,
+            content_hash: "utils-ts".to_string(),
+            references: vec![],
+            alias_map: HashMap::new(),
+        };
+        let dependent = IndexedFile {
+            relative_path: "src/app.ts".to_string(),
+            language: LanguageId::TypeScript,
+            classification: crate::domain::FileClassification::for_code_path("src/app.ts"),
+            content: b"import { connect } from 'src/utils';\nconnect();\n".to_vec(),
+            symbols: vec![make_symbol("run", SymbolKind::Function, 2, 2)],
+            parse_status: ParseStatus::Parsed,
+            byte_len: 49,
+            content_hash: "app-ts".to_string(),
+            references: vec![
+                ReferenceRecord {
+                    name: "utils".to_string(),
+                    qualified_name: Some("src/utils".to_string()),
+                    kind: ReferenceKind::Import,
+                    byte_range: (24, 33),
+                    line_range: (0, 0),
+                    enclosing_symbol_index: None,
+                },
+                ReferenceRecord {
+                    name: "connect".to_string(),
+                    qualified_name: Some("src/utils/connect".to_string()),
+                    kind: ReferenceKind::Call,
+                    byte_range: (36, 42),
+                    line_range: (1, 1),
+                    enclosing_symbol_index: Some(0),
+                },
+            ],
+            alias_map: HashMap::new(),
+        };
+        let unrelated = make_indexed_file(
+            "src/other.ts",
+            vec![make_symbol("run", SymbolKind::Function, 1, 1)],
+            vec![make_reference("connect", ReferenceKind::Call, 1)],
+            ParseStatus::Parsed,
+        );
+        let state = make_state(vec![
+            ("src/utils/index.ts", target),
+            ("src/app.ts", dependent),
+            ("src/other.ts", unrelated),
+        ]);
+
+        let partial = prompt_context_handler(
+            State(state.clone()),
+            Query(PromptContextParams {
+                text: "inspect src/utilsx connect".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            partial.contains("src/app.ts"),
+            "partial slash module aliases should stay on the fallback path: {partial}"
+        );
+        assert!(
+            partial.contains("src/other.ts"),
+            "partial slash module aliases should not collapse to one exact file: {partial}"
+        );
+
+        let continued = prompt_context_handler(
+            State(state),
+            Query(PromptContextParams {
+                text: "inspect src/utils/more connect".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            continued.contains("src/app.ts"),
+            "continued slash module aliases should stay on the fallback path: {continued}"
+        );
+        assert!(
+            continued.contains("src/other.ts"),
+            "continued slash module aliases should not collapse to one exact file: {continued}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_prompt_context_handler_qualified_symbol_alias_prefers_exact_selector() {
         let src_target = make_indexed_file(
             "src/db.rs",
@@ -2833,6 +3093,178 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_prompt_context_handler_slash_qualified_symbol_alias_prefers_exact_selector() {
+        let target = IndexedFile {
+            relative_path: "src/utils/index.ts".to_string(),
+            language: LanguageId::TypeScript,
+            classification: crate::domain::FileClassification::for_code_path(
+                "src/utils/index.ts",
+            ),
+            content: b"export function connect() {}\n".to_vec(),
+            symbols: vec![make_symbol("connect", SymbolKind::Function, 1, 1)],
+            parse_status: ParseStatus::Parsed,
+            byte_len: 28,
+            content_hash: "utils-ts".to_string(),
+            references: vec![],
+            alias_map: HashMap::new(),
+        };
+        let dependent = IndexedFile {
+            relative_path: "src/app.ts".to_string(),
+            language: LanguageId::TypeScript,
+            classification: crate::domain::FileClassification::for_code_path("src/app.ts"),
+            content: b"import { connect } from 'src/utils';\nconnect();\n".to_vec(),
+            symbols: vec![make_symbol("run", SymbolKind::Function, 2, 2)],
+            parse_status: ParseStatus::Parsed,
+            byte_len: 49,
+            content_hash: "app-ts".to_string(),
+            references: vec![
+                ReferenceRecord {
+                    name: "utils".to_string(),
+                    qualified_name: Some("src/utils".to_string()),
+                    kind: ReferenceKind::Import,
+                    byte_range: (24, 33),
+                    line_range: (0, 0),
+                    enclosing_symbol_index: None,
+                },
+                ReferenceRecord {
+                    name: "connect".to_string(),
+                    qualified_name: Some("src/utils/connect".to_string()),
+                    kind: ReferenceKind::Call,
+                    byte_range: (36, 42),
+                    line_range: (1, 1),
+                    enclosing_symbol_index: Some(0),
+                },
+            ],
+            alias_map: HashMap::new(),
+        };
+        let unrelated = IndexedFile {
+            relative_path: "src/other.ts".to_string(),
+            language: LanguageId::TypeScript,
+            classification: crate::domain::FileClassification::for_code_path("src/other.ts"),
+            content: b"connect();\n".to_vec(),
+            symbols: vec![make_symbol("run", SymbolKind::Function, 1, 1)],
+            parse_status: ParseStatus::Parsed,
+            byte_len: 10,
+            content_hash: "other-ts".to_string(),
+            references: vec![make_reference("connect", ReferenceKind::Call, 1)],
+            alias_map: HashMap::new(),
+        };
+        let state = make_state(vec![
+            ("src/utils/index.ts", target),
+            ("src/app.ts", dependent),
+            ("src/other.ts", unrelated),
+        ]);
+
+        let result = prompt_context_handler(
+            State(state),
+            Query(PromptContextParams {
+                text: "inspect src/utils/connect".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            result.contains("src/app.ts"),
+            "slash qualified symbol aliases should keep exact-selector matches: {result}"
+        );
+        assert!(
+            !result.contains("src/other.ts"),
+            "slash qualified symbol aliases should drop unrelated same-name hits: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prompt_context_handler_slash_qualified_symbol_alias_line_hint_disambiguates_selector(
+    ) {
+        let target = IndexedFile {
+            relative_path: "src/utils/index.ts".to_string(),
+            language: LanguageId::TypeScript,
+            classification: crate::domain::FileClassification::for_code_path(
+                "src/utils/index.ts",
+            ),
+            content: b"export function connect() {}\n\nexport function connect() {}\n".to_vec(),
+            symbols: vec![
+                make_symbol("connect", SymbolKind::Function, 1, 1),
+                make_symbol("connect", SymbolKind::Function, 3, 3),
+            ],
+            parse_status: ParseStatus::Parsed,
+            byte_len: 57,
+            content_hash: "utils-ts-lines".to_string(),
+            references: vec![],
+            alias_map: HashMap::new(),
+        };
+        let dependent = IndexedFile {
+            relative_path: "src/app.ts".to_string(),
+            language: LanguageId::TypeScript,
+            classification: crate::domain::FileClassification::for_code_path("src/app.ts"),
+            content: b"import { connect } from 'src/utils';\nconnect();\n".to_vec(),
+            symbols: vec![make_symbol("run", SymbolKind::Function, 2, 2)],
+            parse_status: ParseStatus::Parsed,
+            byte_len: 49,
+            content_hash: "app-ts".to_string(),
+            references: vec![
+                ReferenceRecord {
+                    name: "utils".to_string(),
+                    qualified_name: Some("src/utils".to_string()),
+                    kind: ReferenceKind::Import,
+                    byte_range: (24, 33),
+                    line_range: (0, 0),
+                    enclosing_symbol_index: None,
+                },
+                ReferenceRecord {
+                    name: "connect".to_string(),
+                    qualified_name: Some("src/utils/connect".to_string()),
+                    kind: ReferenceKind::Call,
+                    byte_range: (36, 42),
+                    line_range: (1, 1),
+                    enclosing_symbol_index: Some(0),
+                },
+            ],
+            alias_map: HashMap::new(),
+        };
+        let unrelated = IndexedFile {
+            relative_path: "src/other.ts".to_string(),
+            language: LanguageId::TypeScript,
+            classification: crate::domain::FileClassification::for_code_path("src/other.ts"),
+            content: b"connect();\n".to_vec(),
+            symbols: vec![make_symbol("run", SymbolKind::Function, 1, 1)],
+            parse_status: ParseStatus::Parsed,
+            byte_len: 10,
+            content_hash: "other-ts".to_string(),
+            references: vec![make_reference("connect", ReferenceKind::Call, 1)],
+            alias_map: HashMap::new(),
+        };
+        let state = make_state(vec![
+            ("src/utils/index.ts", target),
+            ("src/app.ts", dependent),
+            ("src/other.ts", unrelated),
+        ]);
+
+        let result = prompt_context_handler(
+            State(state),
+            Query(PromptContextParams {
+                text: "inspect src/utils/connect:3".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !result.contains("Ambiguous symbol selector"),
+            "slash qualified symbol aliases should allow direct line-hint disambiguation: {result}"
+        );
+        assert!(
+            result.contains("src/app.ts"),
+            "slash qualified symbol aliases with line hints should keep exact-selector matches: {result}"
+        );
+        assert!(
+            !result.contains("src/other.ts"),
+            "slash qualified symbol aliases with line hints should drop unrelated same-name hits: {result}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_prompt_context_handler_continued_dotted_qualified_symbol_alias_does_not_activate()
     {
         let target = IndexedFile {
@@ -2910,6 +3342,89 @@ mod tests {
         assert!(
             result.contains("pkg/other.py"),
             "continued dotted aliases should not collapse to one exact file: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prompt_context_handler_continued_slash_qualified_symbol_alias_does_not_activate()
+    {
+        let target = IndexedFile {
+            relative_path: "src/utils/index.ts".to_string(),
+            language: LanguageId::TypeScript,
+            classification: crate::domain::FileClassification::for_code_path(
+                "src/utils/index.ts",
+            ),
+            content: b"export function connect() {}\n".to_vec(),
+            symbols: vec![make_symbol("connect", SymbolKind::Function, 1, 1)],
+            parse_status: ParseStatus::Parsed,
+            byte_len: 28,
+            content_hash: "utils-ts".to_string(),
+            references: vec![],
+            alias_map: HashMap::new(),
+        };
+        let dependent = IndexedFile {
+            relative_path: "src/app.ts".to_string(),
+            language: LanguageId::TypeScript,
+            classification: crate::domain::FileClassification::for_code_path("src/app.ts"),
+            content: b"import { connect } from 'src/utils';\nconnect();\n".to_vec(),
+            symbols: vec![make_symbol("run", SymbolKind::Function, 2, 2)],
+            parse_status: ParseStatus::Parsed,
+            byte_len: 49,
+            content_hash: "app-ts".to_string(),
+            references: vec![
+                ReferenceRecord {
+                    name: "utils".to_string(),
+                    qualified_name: Some("src/utils".to_string()),
+                    kind: ReferenceKind::Import,
+                    byte_range: (24, 33),
+                    line_range: (0, 0),
+                    enclosing_symbol_index: None,
+                },
+                ReferenceRecord {
+                    name: "connect".to_string(),
+                    qualified_name: Some("src/utils/connect".to_string()),
+                    kind: ReferenceKind::Call,
+                    byte_range: (36, 42),
+                    line_range: (1, 1),
+                    enclosing_symbol_index: Some(0),
+                },
+            ],
+            alias_map: HashMap::new(),
+        };
+        let unrelated = IndexedFile {
+            relative_path: "src/other.ts".to_string(),
+            language: LanguageId::TypeScript,
+            classification: crate::domain::FileClassification::for_code_path("src/other.ts"),
+            content: b"connect();\n".to_vec(),
+            symbols: vec![make_symbol("run", SymbolKind::Function, 1, 1)],
+            parse_status: ParseStatus::Parsed,
+            byte_len: 10,
+            content_hash: "other-ts".to_string(),
+            references: vec![make_reference("connect", ReferenceKind::Call, 1)],
+            alias_map: HashMap::new(),
+        };
+        let state = make_state(vec![
+            ("src/utils/index.ts", target),
+            ("src/app.ts", dependent),
+            ("src/other.ts", unrelated),
+        ]);
+
+        let result = prompt_context_handler(
+            State(state),
+            Query(PromptContextParams {
+                text: "inspect src/utils/connect/more connect".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            result.contains("src/app.ts"),
+            "continued slash aliases should stay on the fallback path: {result}"
+        );
+        assert!(
+            result.contains("src/other.ts"),
+            "continued slash aliases should not collapse to one exact file: {result}"
         );
     }
 
@@ -3062,6 +3577,72 @@ mod tests {
         assert!(
             result.contains("Ambiguous symbol selector"),
             "unrelated colon numbers should not disambiguate dotted qualified symbol aliases: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prompt_context_handler_slash_qualified_symbol_alias_ignores_unrelated_colon_numbers(
+    ) {
+        let target = IndexedFile {
+            relative_path: "src/utils/index.ts".to_string(),
+            language: LanguageId::TypeScript,
+            classification: crate::domain::FileClassification::for_code_path(
+                "src/utils/index.ts",
+            ),
+            content: b"export function connect() {}\n\nexport function connect() {}\n".to_vec(),
+            symbols: vec![
+                make_symbol("connect", SymbolKind::Function, 1, 1),
+                make_symbol("connect", SymbolKind::Function, 3, 3),
+            ],
+            parse_status: ParseStatus::Parsed,
+            byte_len: 57,
+            content_hash: "utils-ts-lines".to_string(),
+            references: vec![],
+            alias_map: HashMap::new(),
+        };
+        let dependent = IndexedFile {
+            relative_path: "src/app.ts".to_string(),
+            language: LanguageId::TypeScript,
+            classification: crate::domain::FileClassification::for_code_path("src/app.ts"),
+            content: b"import { connect } from 'src/utils';\nconnect();\n".to_vec(),
+            symbols: vec![make_symbol("run", SymbolKind::Function, 2, 2)],
+            parse_status: ParseStatus::Parsed,
+            byte_len: 49,
+            content_hash: "app-ts".to_string(),
+            references: vec![
+                ReferenceRecord {
+                    name: "utils".to_string(),
+                    qualified_name: Some("src/utils".to_string()),
+                    kind: ReferenceKind::Import,
+                    byte_range: (24, 33),
+                    line_range: (0, 0),
+                    enclosing_symbol_index: None,
+                },
+                ReferenceRecord {
+                    name: "connect".to_string(),
+                    qualified_name: Some("src/utils/connect".to_string()),
+                    kind: ReferenceKind::Call,
+                    byte_range: (36, 42),
+                    line_range: (1, 1),
+                    enclosing_symbol_index: Some(0),
+                },
+            ],
+            alias_map: HashMap::new(),
+        };
+        let state = make_state(vec![("src/utils/index.ts", target), ("src/app.ts", dependent)]);
+
+        let result = prompt_context_handler(
+            State(state),
+            Query(PromptContextParams {
+                text: "inspect src/utils/connect build:3".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            result.contains("Ambiguous symbol selector"),
+            "unrelated colon numbers should not disambiguate slash qualified symbol aliases: {result}"
         );
     }
 
