@@ -2,7 +2,7 @@
 doc_type: task
 task_id: 137
 title: P1 get_file_content contextual resource parity shell
-status: in_progress
+status: done
 sprint: tokenizor-upgrade-foundation
 parent_plan: 05-P-validation-and-backlog.md
 prev_task: 136-T-p1-get-file-content-contextual-resource-parity-contract-research.md
@@ -46,7 +46,9 @@ updated: 2026-03-12
 
 ## Completion Notes
 
-- pending
+- extended the file-content resource template with `around_line`, `around_match`, and `context_lines`
+- threaded those contextual fields through the resource URI parser into `GetFileContentInput`
+- added focused resource tests for both contextual URI modes while keeping the ordinary-read resource test green
 
 ## Carry Forward To Next Task
 
