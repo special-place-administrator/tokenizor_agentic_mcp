@@ -733,6 +733,30 @@ fn test_get_file_content_with_line_range() {
     );
 }
 
+#[test]
+fn test_get_file_content_with_around_line() {
+    use tokenizor_agentic_mcp::live_index::search::ContentContext;
+    use tokenizor_agentic_mcp::protocol::format;
+
+    let dir = tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "lines.rs",
+        "line one\nline two\nline three\nline four\nline five",
+    );
+
+    let shared = LiveIndex::load(dir.path()).unwrap();
+    let index = shared.read().unwrap();
+    let file = index.capture_shared_file("lines.rs").unwrap();
+
+    let result = format::file_content_from_indexed_file_with_context(
+        file.as_ref(),
+        ContentContext::around_line(3, Some(1)),
+    );
+
+    assert_eq!(result, "2: line two\n3: line three\n4: line four");
+}
+
 // ============================================================================
 // Phase 7 Plan 03: Persistence Integration Tests
 // ============================================================================
@@ -765,7 +789,10 @@ fn test_persist_round_trip() {
     let snapshot =
         persist::load_snapshot(dir.path()).expect("snapshot should be loadable after serialize");
 
-    assert_eq!(snapshot.version, 2, "snapshot version should match current schema");
+    assert_eq!(
+        snapshot.version, 2,
+        "snapshot version should match current schema"
+    );
     assert_eq!(snapshot.files.len(), 2, "snapshot should contain 2 files");
     assert!(
         snapshot.files.contains_key("main.rs"),

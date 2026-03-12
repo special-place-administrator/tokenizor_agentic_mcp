@@ -121,6 +121,8 @@ impl Default for ResultLimit {
 pub struct ContentContext {
     pub start_line: Option<u32>,
     pub end_line: Option<u32>,
+    pub around_line: Option<u32>,
+    pub context_lines: Option<u32>,
 }
 
 impl ContentContext {
@@ -128,6 +130,17 @@ impl ContentContext {
         Self {
             start_line,
             end_line,
+            around_line: None,
+            context_lines: None,
+        }
+    }
+
+    pub const fn around_line(around_line: u32, context_lines: Option<u32>) -> Self {
+        Self {
+            start_line: None,
+            end_line: None,
+            around_line: Some(around_line),
+            context_lines,
         }
     }
 }
@@ -279,6 +292,17 @@ impl FileContentOptions {
         }
     }
 
+    pub fn for_explicit_path_read_around_line(
+        path: impl Into<String>,
+        around_line: u32,
+        context_lines: Option<u32>,
+    ) -> Self {
+        Self {
+            path_scope: PathScope::exact(path),
+            content_context: ContentContext::around_line(around_line, context_lines),
+        }
+    }
+
     pub fn exact_lines(
         path: impl Into<String>,
         start_line: Option<u32>,
@@ -325,7 +349,10 @@ pub struct TextSearchResult {
 pub enum TextSearchError {
     EmptyRegexQuery,
     EmptyQueryOrTerms,
-    InvalidRegex { pattern: String, error: String },
+    InvalidRegex {
+        pattern: String,
+        error: String,
+    },
     InvalidGlob {
         field: &'static str,
         pattern: String,
@@ -462,7 +489,13 @@ pub fn search_text(
     terms: Option<&[String]>,
     regex: bool,
 ) -> Result<TextSearchResult, TextSearchError> {
-    search_text_with_options(index, query, terms, regex, &TextSearchOptions::for_current_code_search())
+    search_text_with_options(
+        index,
+        query,
+        terms,
+        regex,
+        &TextSearchOptions::for_current_code_search(),
+    )
 }
 
 pub fn search_text_with_options(
@@ -718,7 +751,10 @@ fn build_context_rendered_lines(
         return Vec::new();
     }
 
-    let lines: Vec<&str> = content.lines().map(|line| line.trim_end_matches('\r')).collect();
+    let lines: Vec<&str> = content
+        .lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .collect();
     if lines.is_empty() {
         return Vec::new();
     }
@@ -737,7 +773,10 @@ fn build_context_rendered_lines(
         windows.push((start, end));
     }
 
-    let match_lines: HashSet<usize> = matches.iter().map(|line_match| line_match.line_number).collect();
+    let match_lines: HashSet<usize> = matches
+        .iter()
+        .map(|line_match| line_match.line_number)
+        .collect();
     let mut rendered: Vec<TextDisplayLine> = Vec::new();
 
     for (window_idx, (start, end)) in windows.into_iter().enumerate() {
@@ -1007,7 +1046,8 @@ mod tests {
 
     #[test]
     fn test_search_module_text_search_with_options_respects_scope_and_path() {
-        let mut text_classification = crate::domain::FileClassification::for_code_path("docs/readme.md");
+        let mut text_classification =
+            crate::domain::FileClassification::for_code_path("docs/readme.md");
         text_classification.class = FileClass::Text;
         let index = make_index(vec![
             make_file_with_classification(
@@ -1091,11 +1131,8 @@ mod tests {
         );
         file_a.language = LanguageId::TypeScript;
 
-        let (path_b, mut file_b) = make_file(
-            "src/lib.ts",
-            "needle four\nneedle five\n",
-            Vec::new(),
-        );
+        let (path_b, mut file_b) =
+            make_file("src/lib.ts", "needle four\nneedle five\n", Vec::new());
         file_b.language = LanguageId::TypeScript;
 
         let (path_c, file_c) = make_file(
@@ -1104,11 +1141,8 @@ mod tests {
             Vec::new(),
         );
 
-        let (path_d, file_d) = make_file(
-            "src/lib.rs",
-            "needle rust\nneedle rust two\n",
-            Vec::new(),
-        );
+        let (path_d, file_d) =
+            make_file("src/lib.rs", "needle rust\nneedle rust two\n", Vec::new());
 
         let index = make_index(vec![
             (path_a, file_a),
@@ -1331,11 +1365,7 @@ mod tests {
 
     #[test]
     fn test_search_module_text_search_regex_can_opt_into_case_insensitive_matching() {
-        let index = make_index(vec![make_file(
-            "src/lib.rs",
-            "needle lower\n",
-            Vec::new(),
-        )]);
+        let index = make_index(vec![make_file("src/lib.rs", "needle lower\n", Vec::new())]);
         let result = search_text_with_options(
             &index,
             Some("Needle"),
@@ -1354,11 +1384,7 @@ mod tests {
 
     #[test]
     fn test_search_module_text_search_rejects_regex_whole_word_combination() {
-        let index = make_index(vec![make_file(
-            "src/lib.rs",
-            "needle lower\n",
-            Vec::new(),
-        )]);
+        let index = make_index(vec![make_file("src/lib.rs", "needle lower\n", Vec::new())]);
         let result = search_text_with_options(
             &index,
             Some("needle"),
@@ -1380,10 +1406,28 @@ mod tests {
     fn test_explicit_path_read_options_are_exact() {
         let options = FileContentOptions::for_explicit_path_read("src/lib.rs", Some(2), Some(4));
 
-        assert_eq!(options.path_scope, PathScope::Exact("src/lib.rs".to_string()));
+        assert_eq!(
+            options.path_scope,
+            PathScope::Exact("src/lib.rs".to_string())
+        );
         assert_eq!(
             options.content_context,
             ContentContext::line_range(Some(2), Some(4))
+        );
+    }
+
+    #[test]
+    fn test_explicit_path_read_around_line_options_are_exact() {
+        let options =
+            FileContentOptions::for_explicit_path_read_around_line("src/lib.rs", 3, Some(1));
+
+        assert_eq!(
+            options.path_scope,
+            PathScope::Exact("src/lib.rs".to_string())
+        );
+        assert_eq!(
+            options.content_context,
+            ContentContext::around_line(3, Some(1))
         );
     }
 }

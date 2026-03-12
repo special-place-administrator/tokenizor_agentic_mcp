@@ -2,11 +2,11 @@
 doc_type: task
 task_id: 125
 title: P1 get_file_content around_line shell
-status: in_progress
+status: done
 sprint: tokenizor-upgrade-foundation
 parent_plan: 05-P-validation-and-backlog.md
 prev_task: 124-T-p1-get-file-content-around-line-contract-research.md
-next_task:
+next_task: 126-T-p1-get-file-content-around-match-contract-research.md
 created: 2026-03-12
 updated: 2026-03-12
 ---
@@ -47,19 +47,23 @@ updated: 2026-03-12
 
 ## Completion Notes
 
-- pending
+- extended `GetFileContentInput` with `around_line` and `context_lines`
+- added deterministic validation that rejects mixing `around_line` with explicit `start_line` / `end_line`
+- added exact-path around-line content context and numbered excerpt rendering
+- preserved existing raw full-file and explicit line-range output contracts
+- covered the new mode in tool, formatter, search-option, and live-index integration tests
 
 ## Carry Forward To Next Task
 
 Next task:
 
-- `TBD`
+- `126-T-p1-get-file-content-around-match-contract-research.md`
 
 Carry forward:
 
 - keep `around_line` exact-path only
 - preserve existing full-file and explicit line-range compatibility
-- avoid broadening this slice into `around_match`, chunking, or non-code file reads
+- avoid broadening this slice into chunking or non-code file reads while the next `around_match` contract is chosen
 
 Open points:
 

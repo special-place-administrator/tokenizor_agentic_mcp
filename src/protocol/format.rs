@@ -5,8 +5,8 @@
 use crate::live_index::{
     ContextBundleSectionView, ContextBundleView, FileContentView, FileOutlineView,
     FindDependentsView, FindReferencesView, HealthStats, IndexedFile, LiveIndex,
-    PublishedIndexState, RepoOutlineFileView, RepoOutlineView, ResolvePathView,
-    SearchFilesTier, SearchFilesView, SymbolDetailView, WhatChangedTimestampView, search,
+    PublishedIndexState, RepoOutlineFileView, RepoOutlineView, ResolvePathView, SearchFilesTier,
+    SearchFilesView, SymbolDetailView, WhatChangedTimestampView, search,
 };
 
 /// Format the file outline for a given path.
@@ -499,7 +499,9 @@ pub fn repo_outline(index: &LiveIndex, project_name: &str) -> String {
     repo_outline_view(&view, project_name)
 }
 
-fn repo_outline_display_labels(files: &[RepoOutlineFileView]) -> std::collections::HashMap<String, String> {
+fn repo_outline_display_labels(
+    files: &[RepoOutlineFileView],
+) -> std::collections::HashMap<String, String> {
     fn basename(path: &str) -> &str {
         path.rsplit('/').next().unwrap_or(path)
     }
@@ -517,7 +519,11 @@ fn repo_outline_display_labels(files: &[RepoOutlineFileView]) -> std::collection
     for paths in by_basename.into_values() {
         let split_paths: Vec<Vec<&str>> = paths
             .iter()
-            .map(|path| path.split('/').filter(|segment| !segment.is_empty()).collect())
+            .map(|path| {
+                path.split('/')
+                    .filter(|segment| !segment.is_empty())
+                    .collect()
+            })
             .collect();
         let max_depth = split_paths.iter().map(Vec::len).max().unwrap_or(1);
         let mut resolved: Vec<Option<String>> = vec![None; split_paths.len()];
@@ -826,10 +832,9 @@ pub fn file_content(
 ) -> String {
     let options = search::FileContentOptions::for_explicit_path_read(path, start_line, end_line);
     match index.capture_shared_file_for_scope(&options.path_scope) {
-        Some(file) => file_content_from_indexed_file_with_context(
-            file.as_ref(),
-            options.content_context,
-        ),
+        Some(file) => {
+            file_content_from_indexed_file_with_context(file.as_ref(), options.content_context)
+        }
         None => not_found_file(path),
     }
 }
@@ -849,7 +854,7 @@ pub fn file_content_from_indexed_file_with_context(
     file: &IndexedFile,
     context: search::ContentContext,
 ) -> String {
-    render_file_content_bytes(&file.content, context.start_line, context.end_line)
+    render_file_content_bytes(&file.content, context)
 }
 
 /// Compatibility renderer for `FileContentView`.
@@ -860,23 +865,34 @@ pub fn file_content_view(
     start_line: Option<u32>,
     end_line: Option<u32>,
 ) -> String {
-    render_file_content_bytes(&view.content, start_line, end_line)
+    render_file_content_bytes(
+        &view.content,
+        search::ContentContext::line_range(start_line, end_line),
+    )
 }
 
-fn render_file_content_bytes(
-    content: &[u8],
-    start_line: Option<u32>,
-    end_line: Option<u32>,
-) -> String {
-    let content = String::from_utf8_lossy(content);
+const DEFAULT_AROUND_LINE_CONTEXT_LINES: u32 = 2;
 
-    match (start_line, end_line) {
+fn render_file_content_bytes(content: &[u8], context: search::ContentContext) -> String {
+    let content = String::from_utf8_lossy(content);
+    let lines: Vec<&str> = content.lines().collect();
+
+    if let Some(around_line) = context.around_line {
+        return render_numbered_around_line_excerpt(
+            &lines,
+            around_line,
+            context
+                .context_lines
+                .unwrap_or(DEFAULT_AROUND_LINE_CONTEXT_LINES),
+        );
+    }
+
+    match (context.start_line, context.end_line) {
         (None, None) => content.into_owned(),
         (start, end) => {
             let start_idx = start.map(|s| s.saturating_sub(1) as usize).unwrap_or(0);
             let end_idx = end.map(|e| e as usize).unwrap_or(usize::MAX);
 
-            let lines: Vec<&str> = content.lines().collect();
             let sliced: Vec<&str> = lines
                 .iter()
                 .enumerate()
@@ -891,6 +907,30 @@ fn render_file_content_bytes(
             sliced.join("\n")
         }
     }
+}
+
+fn render_numbered_around_line_excerpt(
+    lines: &[&str],
+    around_line: u32,
+    context_lines: u32,
+) -> String {
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    let anchor = around_line.max(1) as usize;
+    let context = context_lines as usize;
+    let start = anchor.saturating_sub(context).max(1);
+    let end = anchor.saturating_add(context).min(lines.len());
+
+    if start > end || start > lines.len() {
+        return String::new();
+    }
+
+    (start..=end)
+        .map(|line_number| format!("{line_number}: {}", lines[line_number - 1]))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// "File not found: {path}"
@@ -1641,11 +1681,26 @@ mod tests {
 
         let rendered = search_text_result_view(result);
 
-        assert!(rendered.contains("src/lib.rs"), "file header missing: {rendered}");
-        assert!(rendered.contains("  2: line 2"), "context line missing: {rendered}");
-        assert!(rendered.contains("> 3: needle 3"), "match marker missing: {rendered}");
-        assert!(rendered.contains("  ..."), "window separator missing: {rendered}");
-        assert!(rendered.contains("> 9: needle 9"), "later match missing: {rendered}");
+        assert!(
+            rendered.contains("src/lib.rs"),
+            "file header missing: {rendered}"
+        );
+        assert!(
+            rendered.contains("  2: line 2"),
+            "context line missing: {rendered}"
+        );
+        assert!(
+            rendered.contains("> 3: needle 3"),
+            "match marker missing: {rendered}"
+        );
+        assert!(
+            rendered.contains("  ..."),
+            "window separator missing: {rendered}"
+        );
+        assert!(
+            rendered.contains("> 9: needle 9"),
+            "later match missing: {rendered}"
+        );
     }
 
     // --- repo_outline tests ---
@@ -1679,11 +1734,7 @@ mod tests {
         let index = make_index(vec![
             make_file("src/live_index/mod.rs", b"fn foo() {}", vec![sym.clone()]),
             make_file("src/protocol/mod.rs", b"fn foo() {}", vec![sym.clone()]),
-            make_file(
-                "src/parsing/languages/mod.rs",
-                b"fn foo() {}",
-                vec![sym],
-            ),
+            make_file("src/parsing/languages/mod.rs", b"fn foo() {}", vec![sym]),
         ]);
 
         let result = repo_outline(&index, "proj");
@@ -1698,11 +1749,7 @@ mod tests {
     fn test_repo_outline_deeper_collisions_expand_beyond_one_parent() {
         let sym = make_symbol("foo", SymbolKind::Function, 0, 1, 3);
         let index = make_index(vec![
-            make_file(
-                "src/alpha/shared/mod.rs",
-                b"fn foo() {}",
-                vec![sym.clone()],
-            ),
+            make_file("src/alpha/shared/mod.rs", b"fn foo() {}", vec![sym.clone()]),
             make_file("tests/beta/shared/mod.rs", b"fn foo() {}", vec![sym]),
         ]);
 
@@ -2079,6 +2126,20 @@ mod tests {
         assert_eq!(shared_result, live_result);
     }
 
+    #[test]
+    fn test_file_content_from_indexed_file_with_context_renders_numbered_around_line_excerpt() {
+        let content = b"line 1\nline 2\nline 3\nline 4\nline 5";
+        let (key, file) = make_file("src/main.rs", content, vec![]);
+        let index = make_index(vec![(key, file)]);
+
+        let result = file_content_from_indexed_file_with_context(
+            index.capture_shared_file("src/main.rs").unwrap().as_ref(),
+            search::ContentContext::around_line(3, Some(1)),
+        );
+
+        assert_eq!(result, "2: line 2\n3: line 3\n4: line 4");
+    }
+
     // --- guard messages ---
 
     #[test]
@@ -2419,7 +2480,10 @@ mod tests {
             candidate_lines: vec![1, 10],
         });
 
-        assert!(result.contains("Ambiguous symbol selector"), "got: {result}");
+        assert!(
+            result.contains("Ambiguous symbol selector"),
+            "got: {result}"
+        );
         assert!(result.contains("1"), "got: {result}");
         assert!(result.contains("10"), "got: {result}");
     }

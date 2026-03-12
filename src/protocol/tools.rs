@@ -173,6 +173,10 @@ pub struct GetFileContentInput {
     pub start_line: Option<u32>,
     /// Last line to include (1-indexed, inclusive).
     pub end_line: Option<u32>,
+    /// Center the read around this 1-indexed line.
+    pub around_line: Option<u32>,
+    /// Number of lines of symmetric context to include around `around_line`.
+    pub context_lines: Option<u32>,
 }
 
 /// Input for `find_references`.
@@ -450,6 +454,30 @@ fn search_text_options_from_input(
         context: input.context.map(|context| context as usize),
         case_sensitive: input.case_sensitive,
         whole_word: input.whole_word.unwrap_or(false),
+    })
+}
+
+fn file_content_options_from_input(
+    input: &GetFileContentInput,
+) -> Result<search::FileContentOptions, String> {
+    if input.around_line.is_some() && (input.start_line.is_some() || input.end_line.is_some()) {
+        return Err(
+            "Invalid get_file_content request: `around_line` cannot be combined with `start_line` or `end_line`."
+                .to_string(),
+        );
+    }
+
+    Ok(match input.around_line {
+        Some(around_line) => search::FileContentOptions::for_explicit_path_read_around_line(
+            input.path.clone(),
+            around_line,
+            input.context_lines,
+        ),
+        None => search::FileContentOptions::for_explicit_path_read(
+            input.path.clone(),
+            input.start_line,
+            input.end_line,
+        ),
     })
 }
 
@@ -943,23 +971,20 @@ impl TokenizorServer {
         if let Some(result) = self.proxy_tool_call("get_file_content", &params.0).await {
             return result;
         }
-        let options = search::FileContentOptions::for_explicit_path_read(
-            params.0.path.clone(),
-            params.0.start_line,
-            params.0.end_line,
-        );
+        let options = match file_content_options_from_input(&params.0) {
+            Ok(options) => options,
+            Err(message) => return message,
+        };
         let file = {
             let guard = self.index.read().expect("lock poisoned");
             loading_guard!(guard);
             guard.capture_shared_file_for_scope(&options.path_scope)
         };
         match file {
-            Some(file) => {
-                format::file_content_from_indexed_file_with_context(
-                    file.as_ref(),
-                    options.content_context,
-                )
-            }
+            Some(file) => format::file_content_from_indexed_file_with_context(
+                file.as_ref(),
+                options.content_context,
+            ),
             None => format::not_found_file(&params.0.path),
         }
     }
@@ -1597,7 +1622,10 @@ mod tests {
             }))
             .await;
 
-        assert!(result.contains("src/service.rs"), "expected dependent hit: {result}");
+        assert!(
+            result.contains("src/service.rs"),
+            "expected dependent hit: {result}"
+        );
         assert!(
             !result.contains("src/other.rs"),
             "unrelated same-name file should be excluded: {result}"
@@ -1626,7 +1654,10 @@ mod tests {
             }))
             .await;
 
-        assert!(result.contains("Ambiguous symbol selector"), "got: {result}");
+        assert!(
+            result.contains("Ambiguous symbol selector"),
+            "got: {result}"
+        );
         assert!(result.contains("1"), "got: {result}");
         assert!(result.contains("2"), "got: {result}");
     }
@@ -1796,7 +1827,10 @@ mod tests {
             }))
             .await;
 
-        assert!(result.contains("class Job"), "expected primary hit: {result}");
+        assert!(
+            result.contains("class Job"),
+            "expected primary hit: {result}"
+        );
         assert!(
             !result.contains("JobGenerated"),
             "generated symbol noise should be hidden by default: {result}"
@@ -1839,7 +1873,10 @@ mod tests {
             }))
             .await;
 
-        assert!(result.contains("class Job"), "expected primary hit: {result}");
+        assert!(
+            result.contains("class Job"),
+            "expected primary hit: {result}"
+        );
         assert!(
             result.contains("JobGenerated"),
             "generated symbol should be visible when opted in: {result}"
@@ -1882,7 +1919,10 @@ mod tests {
             }))
             .await;
 
-        assert!(result.contains("class Job"), "expected primary hit: {result}");
+        assert!(
+            result.contains("class Job"),
+            "expected primary hit: {result}"
+        );
         assert!(
             !result.contains("JobGenerated"),
             "generated noise should stay hidden without explicit opt-in: {result}"
@@ -1926,14 +1966,26 @@ mod tests {
             }))
             .await;
 
-        assert!(result.contains("1 matches in 1 files"), "expected bounded output: {result}");
-        assert!(result.contains("class JobCard"), "expected scoped class hit: {result}");
-        assert!(!result.contains("JobList"), "limit should truncate later hits: {result}");
+        assert!(
+            result.contains("1 matches in 1 files"),
+            "expected bounded output: {result}"
+        );
+        assert!(
+            result.contains("class JobCard"),
+            "expected scoped class hit: {result}"
+        );
+        assert!(
+            !result.contains("JobList"),
+            "limit should truncate later hits: {result}"
+        );
         assert!(
             !result.contains("src/models/job.rs"),
             "path scope should exclude rust model: {result}"
         );
-        assert!(!result.contains("fn JobRunner"), "kind filter should exclude function: {result}");
+        assert!(
+            !result.contains("fn JobRunner"),
+            "kind filter should exclude function: {result}"
+        );
     }
 
     #[tokio::test]
@@ -2029,7 +2081,10 @@ mod tests {
             }))
             .await;
 
-        assert!(result.contains("src/real.rs"), "expected visible file: {result}");
+        assert!(
+            result.contains("src/real.rs"),
+            "expected visible file: {result}"
+        );
         assert!(
             !result.contains("tests/generated/noise.rs"),
             "generated/test noise should be hidden by default: {result}"
@@ -2038,11 +2093,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_text_tool_respects_scope_language_and_caps() {
-        let mut ts_app = make_file("src/app.ts", b"needle one\nneedle two\nneedle three\n", vec![]);
+        let mut ts_app = make_file(
+            "src/app.ts",
+            b"needle one\nneedle two\nneedle three\n",
+            vec![],
+        );
         ts_app.1.language = LanguageId::TypeScript;
         let mut ts_lib = make_file("src/lib.ts", b"needle four\nneedle five\n", vec![]);
         ts_lib.1.language = LanguageId::TypeScript;
-        let noise = make_file("tests/generated/noise.ts", b"needle hidden\nneedle hidden two\n", vec![]);
+        let noise = make_file(
+            "tests/generated/noise.ts",
+            b"needle hidden\nneedle hidden two\n",
+            vec![],
+        );
         let rust = make_file("src/lib.rs", b"needle rust\nneedle rust two\n", vec![]);
         let server = make_server(make_live_index_ready(vec![ts_app, ts_lib, noise, rust]));
 
@@ -2067,13 +2130,22 @@ mod tests {
 
         assert!(result.contains("src/app.ts"), "expected app.ts: {result}");
         assert!(result.contains("src/lib.ts"), "expected lib.ts: {result}");
-        assert!(!result.contains("needle three"), "per-file cap should truncate app.ts: {result}");
-        assert!(!result.contains("needle five"), "total cap should truncate final result set: {result}");
+        assert!(
+            !result.contains("needle three"),
+            "per-file cap should truncate app.ts: {result}"
+        );
+        assert!(
+            !result.contains("needle five"),
+            "total cap should truncate final result set: {result}"
+        );
         assert!(
             !result.contains("tests/generated/noise.ts"),
             "noise file should be excluded: {result}"
         );
-        assert!(!result.contains("src/lib.rs"), "language filter should exclude Rust: {result}");
+        assert!(
+            !result.contains("src/lib.rs"),
+            "language filter should exclude Rust: {result}"
+        );
     }
 
     #[tokio::test]
@@ -2103,8 +2175,14 @@ mod tests {
             }))
             .await;
 
-        assert!(result.contains("  2: line 2"), "context line missing: {result}");
-        assert!(result.contains("> 3: needle 3"), "match marker missing: {result}");
+        assert!(
+            result.contains("  2: line 2"),
+            "context line missing: {result}"
+        );
+        assert!(
+            result.contains("> 3: needle 3"),
+            "match marker missing: {result}"
+        );
         assert!(result.contains("  ..."), "separator missing: {result}");
     }
 
@@ -2211,7 +2289,10 @@ mod tests {
             }))
             .await;
 
-        assert!(result.contains("  1: Needle"), "exact whole-word match missing: {result}");
+        assert!(
+            result.contains("  1: Needle"),
+            "exact whole-word match missing: {result}"
+        );
         assert!(
             result.contains("  4: Needle suffix"),
             "whole-word prefix match on a line should remain visible: {result}"
@@ -2273,7 +2354,10 @@ mod tests {
             }))
             .await;
         assert!(result.contains("2 matching files"), "got: {result}");
-        assert!(result.contains("── Strong path matches ──"), "got: {result}");
+        assert!(
+            result.contains("── Strong path matches ──"),
+            "got: {result}"
+        );
         assert!(result.contains("── Basename matches ──"), "got: {result}");
         assert!(result.contains("src/protocol/tools.rs"), "got: {result}");
         assert!(result.contains("src/sidecar/tools.rs"), "got: {result}");
@@ -2315,7 +2399,10 @@ mod tests {
                 hint: "lib.rs".to_string(),
             }))
             .await;
-        assert!(result.contains("Ambiguous path hint 'lib.rs'"), "got: {result}");
+        assert!(
+            result.contains("Ambiguous path hint 'lib.rs'"),
+            "got: {result}"
+        );
         assert!(result.contains("src/lib.rs"), "got: {result}");
         assert!(result.contains("tests/lib.rs"), "got: {result}");
     }
@@ -2480,6 +2567,8 @@ mod tests {
                 path: "src/lib.rs".to_string(),
                 start_line: None,
                 end_line: None,
+                around_line: None,
+                context_lines: None,
             }))
             .await;
         assert!(
@@ -2496,6 +2585,8 @@ mod tests {
                 path: "nonexistent.rs".to_string(),
                 start_line: None,
                 end_line: None,
+                around_line: None,
+                context_lines: None,
             }))
             .await;
         assert_eq!(result, "File not found: nonexistent.rs");
@@ -2511,9 +2602,48 @@ mod tests {
                 path: "src/lib.rs".to_string(),
                 start_line: Some(2),
                 end_line: Some(3),
+                around_line: None,
+                context_lines: None,
             }))
             .await;
         assert_eq!(result, "line 2\nline 3");
+    }
+
+    #[tokio::test]
+    async fn test_get_file_content_around_line_renders_numbered_excerpt() {
+        let content = b"line 1\nline 2\nline 3\nline 4\nline 5";
+        let (key, file) = make_file("src/lib.rs", content, vec![]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server
+            .get_file_content(Parameters(super::GetFileContentInput {
+                path: "src/lib.rs".to_string(),
+                start_line: None,
+                end_line: None,
+                around_line: Some(3),
+                context_lines: Some(1),
+            }))
+            .await;
+        assert_eq!(result, "2: line 2\n3: line 3\n4: line 4");
+    }
+
+    #[tokio::test]
+    async fn test_get_file_content_rejects_around_line_with_explicit_range() {
+        let content = b"line 1\nline 2\nline 3";
+        let (key, file) = make_file("src/lib.rs", content, vec![]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server
+            .get_file_content(Parameters(super::GetFileContentInput {
+                path: "src/lib.rs".to_string(),
+                start_line: Some(2),
+                end_line: None,
+                around_line: Some(2),
+                context_lines: Some(1),
+            }))
+            .await;
+        assert_eq!(
+            result,
+            "Invalid get_file_content request: `around_line` cannot be combined with `start_line` or `end_line`."
+        );
     }
 
     // ── INFR-05: No v1 tools in server ──────────────────────────────────────
@@ -2685,7 +2815,10 @@ mod tests {
             }))
             .await;
 
-        assert!(result.contains("src/service.rs"), "expected dependent hit: {result}");
+        assert!(
+            result.contains("src/service.rs"),
+            "expected dependent hit: {result}"
+        );
         assert!(
             !result.contains("src/other.rs"),
             "unrelated same-name file should be excluded: {result}"
@@ -2713,7 +2846,10 @@ mod tests {
             }))
             .await;
 
-        assert!(result.contains("Ambiguous symbol selector"), "got: {result}");
+        assert!(
+            result.contains("Ambiguous symbol selector"),
+            "got: {result}"
+        );
         assert!(result.contains("1"), "got: {result}");
         assert!(result.contains("2"), "got: {result}");
     }
@@ -2774,7 +2910,10 @@ mod tests {
             }))
             .await;
 
-        assert!(result.contains("src/service.rs"), "expected dependent hit: {result}");
+        assert!(
+            result.contains("src/service.rs"),
+            "expected dependent hit: {result}"
+        );
         assert!(
             !result.contains("src/other.rs"),
             "unrelated same-name file should be excluded: {result}"
@@ -2803,7 +2942,10 @@ mod tests {
             }))
             .await;
 
-        assert!(result.contains("Ambiguous symbol selector"), "got: {result}");
+        assert!(
+            result.contains("Ambiguous symbol selector"),
+            "got: {result}"
+        );
         assert!(result.contains("1"), "got: {result}");
         assert!(result.contains("10"), "got: {result}");
     }

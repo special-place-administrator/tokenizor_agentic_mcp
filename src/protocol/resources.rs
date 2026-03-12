@@ -152,6 +152,8 @@ impl TokenizorServer {
                     path,
                     start_line,
                     end_line,
+                    around_line: None,
+                    context_lines: None,
                 }))
                 .await
             }
