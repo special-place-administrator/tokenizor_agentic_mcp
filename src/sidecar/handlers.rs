@@ -435,34 +435,46 @@ async fn handle_edit_impact(
     let indexed = crate::live_index::store::IndexedFile::from_parse_result(result, bytes);
     state.index.update_file(path.to_string(), indexed);
 
-    // Compute symbol diff.
+    // Compute symbol diff using positional proximity for duplicate name+kind pairs.
+    let mut matched_pre = vec![false; pre_symbols.len()];
+    let mut matched_post = vec![false; post_symbols.len()];
+    let mut changed_post: Vec<usize> = Vec::new();
+
+    for (pi, ps) in post_symbols.iter().enumerate() {
+        // Find the closest unmatched pre-symbol with the same name+kind.
+        let best = pre_symbols
+            .iter()
+            .enumerate()
+            .filter(|(i, pr)| !matched_pre[*i] && pr.name == ps.name && pr.kind == ps.kind)
+            .min_by_key(|(_, pr)| {
+                (pr.line_range.0 as i64 - ps.line_range.0 as i64).unsigned_abs()
+            });
+        if let Some((pri, pr)) = best {
+            matched_pre[pri] = true;
+            matched_post[pi] = true;
+            if pr.line_range != ps.line_range || pr.byte_range != ps.byte_range {
+                changed_post.push(pi);
+            }
+        }
+    }
+
     let added: Vec<&SymbolSnapshot> = post_symbols
         .iter()
-        .filter(|ps| {
-            !pre_symbols
-                .iter()
-                .any(|pr| pr.name == ps.name && pr.kind == ps.kind)
-        })
+        .enumerate()
+        .filter(|(i, _)| !matched_post[*i])
+        .map(|(_, s)| s)
         .collect();
 
     let removed: Vec<&SymbolSnapshot> = pre_symbols
         .iter()
-        .filter(|pr| {
-            !post_symbols
-                .iter()
-                .any(|ps| ps.name == pr.name && ps.kind == pr.kind)
-        })
+        .enumerate()
+        .filter(|(i, _)| !matched_pre[*i])
+        .map(|(_, s)| s)
         .collect();
 
-    let changed: Vec<&SymbolSnapshot> = post_symbols
+    let changed: Vec<&SymbolSnapshot> = changed_post
         .iter()
-        .filter(|ps| {
-            pre_symbols.iter().any(|pr| {
-                pr.name == ps.name
-                    && pr.kind == ps.kind
-                    && (pr.line_range != ps.line_range || pr.byte_range != ps.byte_range)
-            })
-        })
+        .map(|&i| &post_symbols[i])
         .collect();
 
     // Update cache with post-edit snapshot.

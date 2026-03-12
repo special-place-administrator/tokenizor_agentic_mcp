@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use globset::{GlobBuilder, GlobMatcher};
 
-use crate::domain::{FileClass, FileClassification, LanguageId};
+use crate::domain::{FileClass, FileClassification, LanguageId, SymbolKind};
 use crate::live_index::LiveIndex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -814,7 +814,7 @@ fn compile_literal_whole_word_matcher(terms: &[String], case_sensitive: bool) ->
 
 fn collect_text_matches<F>(
     index: &LiveIndex,
-    mut candidate_paths: Vec<String>,
+    candidate_paths: Vec<String>,
     mut is_match: F,
     label: String,
     options: &TextSearchOptions,
@@ -822,12 +822,61 @@ fn collect_text_matches<F>(
 where
     F: FnMut(&str) -> bool,
 {
-    candidate_paths.sort();
+    // First pass: count matches per file for relevance ranking.
+    let mut path_counts: Vec<(String, usize)> = Vec::new();
+    for path in &candidate_paths {
+        let file = match index.get_file(path) {
+            Some(file) => file,
+            None => continue,
+        };
+        let content_str = String::from_utf8_lossy(&file.content);
 
+        // Pre-compute Rust test module line ranges for noise filtering.
+        let test_ranges: Vec<(u32, u32)> =
+            if !options.noise_policy.include_tests && file.language == LanguageId::Rust {
+                file.symbols
+                    .iter()
+                    .filter(|s| s.name == "tests" && s.kind == SymbolKind::Module)
+                    .map(|s| s.line_range)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+        let count = content_str
+            .lines()
+            .enumerate()
+            .filter(|(line_idx, line)| {
+                let line = line.trim_end_matches('\r');
+                if !is_match(line) {
+                    return false;
+                }
+                // Skip matches inside Rust #[cfg(test)] modules.
+                if !test_ranges.is_empty() {
+                    let line_num = (*line_idx + 1) as u32;
+                    if test_ranges
+                        .iter()
+                        .any(|&(start, end)| line_num >= start && line_num <= end)
+                    {
+                        return false;
+                    }
+                }
+                true
+            })
+            .count();
+        if count > 0 {
+            path_counts.push((path.clone(), count));
+        }
+    }
+
+    // Sort by match count descending, alphabetical tiebreak.
+    path_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    // Second pass: collect actual matches from ranked files with limits.
     let mut files: Vec<TextFileMatches> = Vec::new();
     let mut total_matches = 0usize;
 
-    for path in &candidate_paths {
+    for (path, _) in &path_counts {
         if total_matches >= options.total_limit {
             break;
         }
@@ -843,10 +892,32 @@ where
             break;
         }
 
+        // Pre-compute Rust test module line ranges for noise filtering.
+        let test_ranges: Vec<(u32, u32)> =
+            if !options.noise_policy.include_tests && file.language == LanguageId::Rust {
+                file.symbols
+                    .iter()
+                    .filter(|s| s.name == "tests" && s.kind == SymbolKind::Module)
+                    .map(|s| s.line_range)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
         let mut matches: Vec<TextLineMatch> = Vec::new();
         for (line_idx, line) in content_str.lines().enumerate() {
             let line = line.trim_end_matches('\r');
             if is_match(line) {
+                // Skip matches inside Rust #[cfg(test)] modules.
+                if !test_ranges.is_empty() {
+                    let line_num = (line_idx + 1) as u32;
+                    if test_ranges
+                        .iter()
+                        .any(|&(start, end)| line_num >= start && line_num <= end)
+                    {
+                        continue;
+                    }
+                }
                 matches.push(TextLineMatch {
                     line_number: line_idx + 1,
                     line: line.to_string(),

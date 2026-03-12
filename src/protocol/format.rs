@@ -2,6 +2,33 @@
 ///
 /// All functions take `&LiveIndex` (or data derived from it) and return `String`.
 /// No I/O, no async. Output matches the locked formats defined in CONTEXT.md.
+
+/// Budget limits for reference/dependent output to prevent unbounded token usage.
+pub struct OutputLimits {
+    /// Maximum number of files to include in the output.
+    pub max_files: usize,
+    /// Maximum number of reference/hit lines per file.
+    pub max_per_file: usize,
+}
+
+impl OutputLimits {
+    pub fn new(max_files: u32, max_per_file: u32) -> Self {
+        Self {
+            max_files: max_files.min(100) as usize,
+            max_per_file: max_per_file.min(50) as usize,
+        }
+    }
+}
+
+impl Default for OutputLimits {
+    fn default() -> Self {
+        Self {
+            max_files: 20,
+            max_per_file: 10,
+        }
+    }
+}
+
 use crate::live_index::{
     ContextBundleSectionView, ContextBundleView, FileContentView, FileOutlineView,
     FindDependentsView, FindReferencesView, HealthStats, IndexedFile, LiveIndex,
@@ -1236,22 +1263,33 @@ fn not_found_symbol_names(relative_path: &str, symbol_names: &[String], name: &s
 /// Output format matches CONTEXT.md decision AD-6 (compact human-readable).
 pub fn find_references_result(index: &LiveIndex, name: &str, kind_filter: Option<&str>) -> String {
     let view = index.capture_find_references_view(name, kind_filter);
-    find_references_result_view(&view, name)
+    find_references_result_view(&view, name, &OutputLimits::default())
 }
 
-pub fn find_references_result_view(view: &FindReferencesView, name: &str) -> String {
+pub fn find_references_result_view(
+    view: &FindReferencesView,
+    name: &str,
+    limits: &OutputLimits,
+) -> String {
     if view.total_refs == 0 {
         return format!("No references found for \"{name}\"");
     }
 
     let total = view.total_refs;
-    let file_count = view.files.len();
-    let mut lines = vec![format!("{total} references in {file_count} files")];
+    let total_files = view.files.len();
+    let shown_files = total_files.min(limits.max_files);
+    let mut lines = vec![format!("{total} references in {total_files} files")];
     lines.push(String::new()); // blank line
 
-    for file in &view.files {
+    for file in view.files.iter().take(limits.max_files) {
         lines.push(file.file_path.clone());
+        let mut hit_count = 0usize;
+        let mut truncated_hits = 0usize;
         for hit in &file.hits {
+            if hit_count >= limits.max_per_file {
+                truncated_hits += 1;
+                continue;
+            }
             for line in &hit.context_lines {
                 if line.is_reference_line {
                     if let Some(annotation) = &line.enclosing_annotation {
@@ -1266,8 +1304,17 @@ pub fn find_references_result_view(view: &FindReferencesView, name: &str) -> Str
                     lines.push(format!("  {}: {}", line.line_number, line.text));
                 }
             }
+            hit_count += 1;
+        }
+        if truncated_hits > 0 {
+            lines.push(format!("  ... and {truncated_hits} more references"));
         }
         lines.push(String::new()); // blank line between files
+    }
+
+    let remaining_files = total_files.saturating_sub(shown_files);
+    if remaining_files > 0 {
+        lines.push(format!("... and {remaining_files} more files"));
     }
 
     while lines.last().map(|l| l.is_empty()).unwrap_or(false) {
@@ -1282,27 +1329,43 @@ pub fn find_references_result_view(view: &FindReferencesView, name: &str) -> Str
 /// Output format: compact list grouped by importing file, each with import line.
 pub fn find_dependents_result(index: &LiveIndex, path: &str) -> String {
     let view = index.capture_find_dependents_view(path);
-    find_dependents_result_view(&view, path)
+    find_dependents_result_view(&view, path, &OutputLimits::default())
 }
 
-pub fn find_dependents_result_view(view: &FindDependentsView, path: &str) -> String {
+pub fn find_dependents_result_view(
+    view: &FindDependentsView,
+    path: &str,
+    limits: &OutputLimits,
+) -> String {
     if view.files.is_empty() {
         return format!("No dependents found for \"{path}\"");
     }
 
-    let file_count = view.files.len();
-    let mut lines = vec![format!("{file_count} files depend on {path}")];
+    let total_files = view.files.len();
+    let shown_files = total_files.min(limits.max_files);
+    let mut lines = vec![format!("{total_files} files depend on {path}")];
     lines.push(String::new()); // blank line
 
-    for file in &view.files {
+    for file in view.files.iter().take(limits.max_files) {
         lines.push(file.file_path.clone());
-        for line in &file.lines {
+        let total_refs = file.lines.len();
+        let shown_refs = total_refs.min(limits.max_per_file);
+        for line in file.lines.iter().take(limits.max_per_file) {
             lines.push(format!(
                 "  {}: {}   [{}]",
                 line.line_number, line.line_content, line.kind
             ));
         }
+        let remaining_refs = total_refs.saturating_sub(shown_refs);
+        if remaining_refs > 0 {
+            lines.push(format!("  ... and {remaining_refs} more references"));
+        }
         lines.push(String::new()); // blank line between files
+    }
+
+    let remaining_files = total_files.saturating_sub(shown_files);
+    if remaining_files > 0 {
+        lines.push(format!("... and {remaining_files} more files"));
     }
 
     // Remove trailing blank line
@@ -2715,6 +2778,7 @@ mod tests {
         let captured_result = find_references_result_view(
             &index.capture_find_references_view("process", None),
             "process",
+            &OutputLimits::default(),
         );
 
         assert_eq!(captured_result, live_result);
@@ -2765,6 +2829,7 @@ mod tests {
         let captured_result = find_dependents_result_view(
             &index.capture_find_dependents_view("src/db.rs"),
             "src/db.rs",
+            &OutputLimits::default(),
         );
 
         assert_eq!(captured_result, live_result);

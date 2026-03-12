@@ -48,10 +48,10 @@ At the time of this README rewrite, `cargo test` is green in this repository.
 - `search_files` for ranked path discovery
 - `resolve_path` for exact path resolution from filenames and partial hints
 - `search_symbols` with `kind`, `path_prefix`, `language`, `limit`, `include_generated`, and `include_tests`
-- `search_text` with literal, OR-term, and regex search plus `path_prefix`, `language`, `limit`, `max_per_file`, `glob`, `exclude_glob`, symmetric `context`, `case_sensitive`, `whole_word`, and generated/test suppression
-- `get_file_content` with full-file reads, explicit line ranges, optional ordinary-read `show_line_numbers` and `header`, `around_line`, first-match `around_match`, exact-path `around_symbol`, and exact-path line-oriented chunked reads via `chunk_index` plus `max_lines`
-- exact-selector reference navigation through `find_references`, `get_symbol_context`, and `get_context_bundle` using `path`, symbol kind, and symbol line
-- `find_dependents` with module- and namespace-aware attribution
+- `search_text` with literal, OR-term, and regex search plus `path_prefix`, `language`, `limit`, `max_per_file`, `glob`, `exclude_glob`, symmetric `context`, `case_sensitive`, `whole_word`, generated/test suppression, and relevance-ranked results (files sorted by match count rather than alphabetically)
+- `get_file_content` with full-file reads, explicit line ranges, optional `show_line_numbers` and `header` for full-file or explicit-range reads, `around_line`, first-match `around_match`, exact-path `around_symbol`, and exact-path line-oriented chunked reads via `chunk_index` plus `max_lines`; error messages show valid parameter combinations for the attempted mode
+- exact-selector reference navigation through `find_references`, `get_symbol_context`, and `get_context_bundle` using `path`, symbol kind, and symbol line; `find_references` supports `limit` and `max_per_file` for bounded output
+- `find_dependents` with module- and namespace-aware attribution and `limit`/`max_per_file` output bounds
 - prompt-submit hook routing that can use file hints, basename/extensionless aliases, module aliases, qualified symbol aliases, and `:line` hints to choose the right file or symbol more reliably
 
 ### MCP surface implemented today
@@ -164,7 +164,7 @@ If Tokenizor later adds an embedding-backed text lane or hybrid retrieval layer,
 ## Why It Is Already Better Than Earlier Revisions
 
 - shell fallback is reduced by `search_files`, `resolve_path`, scoped `search_text`, and contextual `get_file_content`
-- search lanes now have scope controls and noise suppression that make larger repositories much more usable
+- search lanes now have scope controls, noise suppression (including inline Rust `#[cfg(test)]` module filtering), and relevance ranking that make larger repositories much more usable
 - exact-selector reference queries avoid many of the common-name collisions that made earlier navigation noisy
 - the local daemon lets multiple terminals share one project view instead of rebuilding local state repeatedly
 - hook and resource surfaces give the model cheap orientation before expensive tool usage

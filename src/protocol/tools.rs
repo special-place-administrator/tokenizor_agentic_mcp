@@ -206,6 +206,10 @@ pub struct FindReferencesInput {
     pub symbol_kind: Option<String>,
     /// Optional selected symbol line from `search_symbols`.
     pub symbol_line: Option<u32>,
+    /// Maximum number of files to show (default 20, capped at 100).
+    pub limit: Option<u32>,
+    /// Maximum number of reference hits per file (default 10, capped at 50).
+    pub max_per_file: Option<u32>,
 }
 
 /// Input for `find_dependents`.
@@ -213,6 +217,10 @@ pub struct FindReferencesInput {
 pub struct FindDependentsInput {
     /// Relative file path to find dependents for.
     pub path: String,
+    /// Maximum number of dependent files to show (default 20, capped at 100).
+    pub limit: Option<u32>,
+    /// Maximum number of reference lines per file (default 10, capped at 50).
+    pub max_per_file: Option<u32>,
 }
 
 /// Input for `get_file_tree`.
@@ -500,14 +508,14 @@ fn file_content_options_from_input(
             || input.max_lines.is_some()
         {
             return Err(
-                "Invalid get_file_content request: `around_symbol` cannot be combined with `start_line`, `end_line`, `around_line`, `around_match`, `chunk_index`, or `max_lines`."
+                "Invalid get_file_content request: `around_symbol` cannot be combined with `start_line`, `end_line`, `around_line`, `around_match`, `chunk_index`, or `max_lines`. Valid with `around_symbol`: `symbol_line`, `context_lines`."
                     .to_string(),
             );
         }
 
         if ordinary_read_formatting_requested {
             return Err(
-                "Invalid get_file_content request: `show_line_numbers` and `header` are only supported for ordinary full-file or explicit-range reads."
+                "Invalid get_file_content request: `show_line_numbers` and `header` are only supported for full-file reads or explicit-range reads (`start_line`/`end_line`)."
                     .to_string(),
             );
         }
@@ -553,14 +561,14 @@ fn file_content_options_from_input(
             || input.around_match.is_some()
         {
             return Err(
-                "Invalid get_file_content request: chunked reads cannot be combined with `start_line`, `end_line`, `around_line`, or `around_match`."
+                "Invalid get_file_content request: chunked reads (`chunk_index` + `max_lines`) cannot be combined with `start_line`, `end_line`, `around_line`, or `around_match`."
                     .to_string(),
             );
         }
 
         if ordinary_read_formatting_requested {
             return Err(
-                "Invalid get_file_content request: `show_line_numbers` and `header` are only supported for ordinary full-file or explicit-range reads."
+                "Invalid get_file_content request: `show_line_numbers` and `header` are only supported for full-file reads or explicit-range reads (`start_line`/`end_line`)."
                     .to_string(),
             );
         }
@@ -582,14 +590,14 @@ fn file_content_options_from_input(
 
         if input.start_line.is_some() || input.end_line.is_some() || input.around_line.is_some() {
             return Err(
-                "Invalid get_file_content request: `around_match` cannot be combined with `start_line`, `end_line`, or `around_line`."
+                "Invalid get_file_content request: `around_match` cannot be combined with `start_line`, `end_line`, or `around_line`. Valid with `around_match`: `context_lines`."
                     .to_string(),
             );
         }
 
         if ordinary_read_formatting_requested {
             return Err(
-                "Invalid get_file_content request: `show_line_numbers` and `header` are only supported for ordinary full-file or explicit-range reads."
+                "Invalid get_file_content request: `show_line_numbers` and `header` are only supported for full-file reads or explicit-range reads (`start_line`/`end_line`)."
                     .to_string(),
             );
         }
@@ -605,14 +613,14 @@ fn file_content_options_from_input(
 
     if input.around_line.is_some() && (input.start_line.is_some() || input.end_line.is_some()) {
         return Err(
-            "Invalid get_file_content request: `around_line` cannot be combined with `start_line` or `end_line`."
+            "Invalid get_file_content request: `around_line` cannot be combined with `start_line` or `end_line`. Valid with `around_line`: `context_lines`."
                 .to_string(),
         );
     }
 
     if input.around_line.is_some() && ordinary_read_formatting_requested {
         return Err(
-            "Invalid get_file_content request: `show_line_numbers` and `header` are only supported for ordinary full-file or explicit-range reads."
+            "Invalid get_file_content request: `show_line_numbers` and `header` are only supported for full-file reads or explicit-range reads (`start_line`/`end_line`)."
                 .to_string(),
         );
     }
@@ -1168,8 +1176,12 @@ impl TokenizorServer {
                 Ok(guard.capture_find_references_view(&input.name, input.kind.as_deref()))
             }
         };
+        let limits = format::OutputLimits::new(
+            input.limit.unwrap_or(20),
+            input.max_per_file.unwrap_or(10),
+        );
         match result {
-            Ok(view) => format::find_references_result_view(&view, &input.name),
+            Ok(view) => format::find_references_result_view(&view, &input.name, &limits),
             Err(error) => error,
         }
     }
@@ -1186,7 +1198,11 @@ impl TokenizorServer {
             loading_guard!(guard);
             guard.capture_find_dependents_view(&input.path)
         };
-        format::find_dependents_result_view(&view, &input.path)
+        let limits = format::OutputLimits::new(
+            input.limit.unwrap_or(20),
+            input.max_per_file.unwrap_or(10),
+        );
+        format::find_dependents_result_view(&view, &input.path, &limits)
     }
 
     /// Browse the source file tree with symbol counts per file and directory.
@@ -2988,7 +3004,7 @@ mod tests {
             .await;
         assert_eq!(
             result,
-            "Invalid get_file_content request: `show_line_numbers` and `header` are only supported for ordinary full-file or explicit-range reads."
+            "Invalid get_file_content request: `show_line_numbers` and `header` are only supported for full-file reads or explicit-range reads (`start_line`/`end_line`)."
         );
     }
 
@@ -3015,7 +3031,7 @@ mod tests {
             .await;
         assert_eq!(
             result,
-            "Invalid get_file_content request: `around_line` cannot be combined with `start_line` or `end_line`."
+            "Invalid get_file_content request: `around_line` cannot be combined with `start_line` or `end_line`. Valid with `around_line`: `context_lines`."
         );
     }
 
@@ -3265,7 +3281,7 @@ mod tests {
             .await;
         assert_eq!(
             result,
-            "Invalid get_file_content request: chunked reads cannot be combined with `start_line`, `end_line`, `around_line`, or `around_match`."
+            "Invalid get_file_content request: chunked reads (`chunk_index` + `max_lines`) cannot be combined with `start_line`, `end_line`, `around_line`, or `around_match`."
         );
     }
 
@@ -3319,7 +3335,7 @@ mod tests {
             .await;
         assert_eq!(
             result,
-            "Invalid get_file_content request: `around_symbol` cannot be combined with `start_line`, `end_line`, `around_line`, `around_match`, `chunk_index`, or `max_lines`."
+            "Invalid get_file_content request: `around_symbol` cannot be combined with `start_line`, `end_line`, `around_line`, `around_match`, `chunk_index`, or `max_lines`. Valid with `around_symbol`: `symbol_line`, `context_lines`."
         );
     }
 
@@ -3373,7 +3389,7 @@ mod tests {
             .await;
         assert_eq!(
             result,
-            "Invalid get_file_content request: `around_match` cannot be combined with `start_line`, `end_line`, or `around_line`."
+            "Invalid get_file_content request: `around_match` cannot be combined with `start_line`, `end_line`, or `around_line`. Valid with `around_match`: `context_lines`."
         );
     }
 
@@ -3460,6 +3476,8 @@ mod tests {
                 path: None,
                 symbol_kind: None,
                 symbol_line: None,
+                limit: None,
+                max_per_file: None,
             }))
             .await;
         assert_eq!(result, crate::protocol::format::empty_guard_message());
@@ -3471,6 +3489,8 @@ mod tests {
         let result = server
             .find_dependents(Parameters(super::FindDependentsInput {
                 path: "src/lib.rs".to_string(),
+                limit: None,
+                max_per_file: None,
             }))
             .await;
         assert_eq!(result, crate::protocol::format::empty_guard_message());
@@ -3595,6 +3615,8 @@ mod tests {
                 path: None,
                 symbol_kind: None,
                 symbol_line: None,
+                limit: None,
+                max_per_file: None,
             }))
             .await;
         // Should get "No references found" not a guard message
@@ -3638,6 +3660,8 @@ mod tests {
                 path: Some("src/db.rs".to_string()),
                 symbol_kind: Some("fn".to_string()),
                 symbol_line: Some(1),
+                limit: None,
+                max_per_file: None,
             }))
             .await;
 
@@ -3670,6 +3694,8 @@ mod tests {
                 path: Some("src/db.rs".to_string()),
                 symbol_kind: Some("fn".to_string()),
                 symbol_line: None,
+                limit: None,
+                max_per_file: None,
             }))
             .await;
 
@@ -3687,6 +3713,8 @@ mod tests {
         let result = server
             .find_dependents(Parameters(super::FindDependentsInput {
                 path: "src/nonexistent.rs".to_string(),
+                limit: None,
+                max_per_file: None,
             }))
             .await;
         assert!(result.contains("No dependents found"), "got: {result}");
