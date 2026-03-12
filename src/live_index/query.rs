@@ -249,6 +249,116 @@ fn matches_target_import(
         || matches_target_module(language, &reference.name, module_path)
 }
 
+fn parse_reference_kind_filter(kind_filter: Option<&str>) -> Option<ReferenceKind> {
+    match kind_filter {
+        Some("call") => Some(ReferenceKind::Call),
+        Some("import") => Some(ReferenceKind::Import),
+        Some("type_usage") => Some(ReferenceKind::TypeUsage),
+        Some("macro_use") => Some(ReferenceKind::MacroUse),
+        Some("all") | None => None,
+        _ => None,
+    }
+}
+
+fn matches_exact_symbol_qualified_name(
+    language: &LanguageId,
+    qualified_name: &str,
+    target_name: &str,
+    module_path: Option<&str>,
+) -> bool {
+    let separator = match language {
+        LanguageId::Python => ".",
+        LanguageId::JavaScript | LanguageId::TypeScript => "/",
+        _ => "::",
+    };
+
+    module_path
+        .map(|module_path| qualified_name == format!("{module_path}{separator}{target_name}"))
+        .unwrap_or(false)
+}
+
+fn matches_exact_symbol_reference(
+    reference: &ReferenceRecord,
+    target_name: &str,
+    target_language: &LanguageId,
+    module_path: Option<&str>,
+    kind_filter: Option<ReferenceKind>,
+) -> bool {
+    if let Some(kind_filter) = kind_filter
+        && reference.kind != kind_filter
+    {
+        return false;
+    }
+
+    reference.name == target_name
+        || reference
+            .qualified_name
+            .as_deref()
+            .map(|qualified_name| {
+                matches_exact_symbol_qualified_name(
+                    target_language,
+                    qualified_name,
+                    target_name,
+                    module_path,
+                )
+            })
+            .unwrap_or(false)
+}
+
+enum SymbolSelectorMatch<'a> {
+    Selected(usize, &'a SymbolRecord),
+    NotFound,
+    Ambiguous(Vec<u32>),
+}
+
+fn resolve_symbol_selector<'a>(
+    file: &'a IndexedFile,
+    name: &str,
+    symbol_kind: Option<&str>,
+    symbol_line: Option<u32>,
+) -> SymbolSelectorMatch<'a> {
+    let mut candidates: Vec<(usize, &SymbolRecord)> = file
+        .symbols
+        .iter()
+        .enumerate()
+        .filter(|(_, symbol)| {
+            symbol.name == name
+                && symbol_kind
+                    .map(|kind| symbol.kind.to_string().eq_ignore_ascii_case(kind))
+                    .unwrap_or(true)
+        })
+        .collect();
+
+    if let Some(symbol_line) = symbol_line {
+        candidates.retain(|(_, symbol)| symbol.line_range.0 == symbol_line);
+    }
+
+    match candidates.len() {
+        0 => SymbolSelectorMatch::NotFound,
+        1 => {
+            let (idx, symbol) = candidates.remove(0);
+            SymbolSelectorMatch::Selected(idx, symbol)
+        }
+        _ => SymbolSelectorMatch::Ambiguous(
+            candidates
+                .into_iter()
+                .map(|(_, symbol)| symbol.line_range.0)
+                .collect(),
+        ),
+    }
+}
+
+fn render_symbol_selector(name: &str, symbol_kind: Option<&str>, symbol_line: Option<u32>) -> String {
+    match (symbol_kind, symbol_line) {
+        (Some(symbol_kind), Some(symbol_line)) => {
+            format!("{symbol_kind} {name} at line {symbol_line}")
+        }
+        (Some(symbol_kind), None) => format!("{symbol_kind} {name}"),
+        (None, Some(symbol_line)) => format!("{name} at line {symbol_line}"),
+        (None, None) => name.to_string(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Built-in type filter lists (per-language)
 // ---------------------------------------------------------------------------
@@ -571,6 +681,11 @@ pub struct ContextBundleFoundView {
 pub enum ContextBundleView {
     FileNotFound {
         path: String,
+    },
+    AmbiguousSymbol {
+        path: String,
+        name: String,
+        candidate_lines: Vec<u32>,
     },
     SymbolNotFound {
         relative_path: String,
@@ -938,19 +1053,104 @@ impl LiveIndex {
         name: &str,
         kind_filter: Option<&str>,
     ) -> FindReferencesView {
-        let kind_enum = match kind_filter {
-            Some("call") => Some(ReferenceKind::Call),
-            Some("import") => Some(ReferenceKind::Import),
-            Some("type_usage") => Some(ReferenceKind::TypeUsage),
-            Some("macro_use") => Some(ReferenceKind::MacroUse),
-            Some("all") | None => None,
-            _ => None,
-        };
+        let kind_enum = parse_reference_kind_filter(kind_filter);
         let refs = self.find_references_for_name(name, kind_enum, false);
+        self.build_find_references_view(&refs)
+    }
+
+    pub fn capture_find_references_view_for_symbol(
+        &self,
+        path: &str,
+        name: &str,
+        symbol_kind: Option<&str>,
+        symbol_line: Option<u32>,
+        kind_filter: Option<&str>,
+    ) -> Result<FindReferencesView, String> {
+        let Some(file) = self.get_file(path) else {
+            return Err(format!("File not found: {path}"));
+        };
+
+        match resolve_symbol_selector(file, name, symbol_kind, symbol_line) {
+            SymbolSelectorMatch::NotFound => {
+                let selector = render_symbol_selector(name, symbol_kind, symbol_line);
+                return Err(format!("Symbol not found in {path}: {selector}"));
+            }
+            SymbolSelectorMatch::Ambiguous(candidate_lines) => {
+                let candidate_lines = candidate_lines
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(format!(
+                    "Ambiguous symbol selector for {name} in {path}; pass `symbol_line` to disambiguate. Candidates: {candidate_lines}"
+                ));
+            }
+            SymbolSelectorMatch::Selected(_, _) => {}
+        }
+
+        let kind_enum = parse_reference_kind_filter(kind_filter);
+        let mut refs = self.collect_exact_symbol_references(path, file, name, kind_enum);
+
+        refs.sort_by(|a, b| {
+            a.0.cmp(b.0)
+                .then(a.1.line_range.0.cmp(&b.1.line_range.0))
+                .then(a.1.byte_range.0.cmp(&b.1.byte_range.0))
+        });
+
+        Ok(self.build_find_references_view(&refs))
+    }
+
+    fn collect_exact_symbol_references<'a>(
+        &'a self,
+        path: &'a str,
+        file: &'a IndexedFile,
+        target_name: &str,
+        kind_filter: Option<ReferenceKind>,
+    ) -> Vec<(&'a str, &'a ReferenceRecord)> {
+        let module_path = resolve_module_path(path, &file.language);
+        let mut refs: Vec<(&str, &ReferenceRecord)> = file
+            .references
+            .iter()
+            .filter(|reference| {
+                matches_exact_symbol_reference(
+                    reference,
+                    target_name,
+                    &file.language,
+                    module_path.as_deref(),
+                    kind_filter,
+                )
+            })
+            .map(|reference| (path, reference))
+            .collect();
+
+        refs.extend(
+            self.find_dependents_for_file(path)
+                .into_iter()
+                .filter(|(_file_path, reference)| {
+                    matches_exact_symbol_reference(
+                        reference,
+                        target_name,
+                        &file.language,
+                        module_path.as_deref(),
+                        kind_filter,
+                    )
+                }),
+        );
+
+        refs.sort_by(|a, b| {
+            a.0.cmp(b.0)
+                .then(a.1.line_range.0.cmp(&b.1.line_range.0))
+                .then(a.1.byte_range.0.cmp(&b.1.byte_range.0))
+        });
+
+        refs
+    }
+
+    fn build_find_references_view(&self, refs: &[(&str, &ReferenceRecord)]) -> FindReferencesView {
         let mut by_file: std::collections::BTreeMap<String, Vec<ReferenceHitView>> =
             std::collections::BTreeMap::new();
 
-        for (file_path, reference) in &refs {
+        for (file_path, reference) in refs {
             let Some(file) = self.get_file(file_path) else {
                 continue;
             };
@@ -1011,6 +1211,7 @@ impl LiveIndex {
         path: &str,
         name: &str,
         kind_filter: Option<&str>,
+        symbol_line: Option<u32>,
     ) -> ContextBundleView {
         use crate::domain::ReferenceKind;
 
@@ -1022,21 +1223,26 @@ impl LiveIndex {
             };
         };
 
-        let Some((sym_idx, sym_rec)) = file.symbols.iter().enumerate().find(|(_, s)| {
-            s.name == name
-                && kind_filter
-                    .map(|k| s.kind.to_string().eq_ignore_ascii_case(k))
-                    .unwrap_or(true)
-        }) else {
-            return ContextBundleView::SymbolNotFound {
-                relative_path: file.relative_path.clone(),
-                symbol_names: file
-                    .symbols
-                    .iter()
-                    .map(|symbol| symbol.name.clone())
-                    .collect(),
-                name: name.to_string(),
-            };
+        let (sym_idx, sym_rec) = match resolve_symbol_selector(file, name, kind_filter, symbol_line) {
+            SymbolSelectorMatch::Selected(sym_idx, sym_rec) => (sym_idx, sym_rec),
+            SymbolSelectorMatch::NotFound => {
+                return ContextBundleView::SymbolNotFound {
+                    relative_path: file.relative_path.clone(),
+                    symbol_names: file
+                        .symbols
+                        .iter()
+                        .map(|symbol| symbol.name.clone())
+                        .collect(),
+                    name: name.to_string(),
+                };
+            }
+            SymbolSelectorMatch::Ambiguous(candidate_lines) => {
+                return ContextBundleView::AmbiguousSymbol {
+                    path: file.relative_path.clone(),
+                    name: name.to_string(),
+                    candidate_lines,
+                };
+            }
         };
 
         let start = sym_rec.byte_range.0 as usize;
@@ -1080,12 +1286,12 @@ impl LiveIndex {
             }
         };
 
-        let callers = self.find_references_for_name(name, Some(ReferenceKind::Call), false);
+        let callers = self.collect_exact_symbol_references(path, file, name, Some(ReferenceKind::Call));
         let callees = self.callees_for_symbol(path, sym_idx);
         let callee_pairs: Vec<(&str, &ReferenceRecord)> =
             callees.iter().map(|reference| (path, *reference)).collect();
         let type_usages =
-            self.find_references_for_name(name, Some(ReferenceKind::TypeUsage), false);
+            self.collect_exact_symbol_references(path, file, name, Some(ReferenceKind::TypeUsage));
 
         ContextBundleView::Found(ContextBundleFoundView {
             body,
@@ -1458,7 +1664,9 @@ impl LiveIndex {
 
 #[cfg(test)]
 mod tests {
-    use super::{ResolvePathView, SearchFilesHit, SearchFilesTier, SearchFilesView};
+    use super::{
+        ContextBundleView, ResolvePathView, SearchFilesHit, SearchFilesTier, SearchFilesView,
+    };
     use crate::domain::{LanguageId, ReferenceKind, ReferenceRecord, SymbolKind, SymbolRecord};
     use crate::live_index::store::{
         CircuitBreakerState, IndexState, IndexedFile, LiveIndex, ParseStatus,
@@ -1594,6 +1802,33 @@ mod tests {
             content_hash: "abc".to_string(),
             references: refs,
             alias_map: HashMap::new(),
+        }
+    }
+
+    fn make_symbol_with_kind_and_line(name: &str, kind: SymbolKind, line: u32) -> SymbolRecord {
+        SymbolRecord {
+            name: name.to_string(),
+            kind,
+            depth: 0,
+            sort_order: 0,
+            byte_range: (0, 10),
+            line_range: (line, line),
+        }
+    }
+
+    fn make_symbol_with_kind_line_and_bytes(
+        name: &str,
+        kind: SymbolKind,
+        line: u32,
+        byte_range: (u32, u32),
+    ) -> SymbolRecord {
+        SymbolRecord {
+            name: name.to_string(),
+            kind,
+            depth: 0,
+            sort_order: 0,
+            byte_range,
+            line_range: (line, line),
         }
     }
 
@@ -2076,7 +2311,7 @@ mod tests {
     #[test]
     fn test_capture_context_bundle_view_collects_owned_sections() {
         let target = make_file_with_refs_and_content(
-            "src/lib.rs",
+            "src/db.rs",
             LanguageId::Rust,
             "fn process() {\n    helper();\n}\nfn helper() {}\n",
             vec![make_ref("helper", None, ReferenceKind::Call, Some(0), 100)],
@@ -2102,10 +2337,23 @@ mod tests {
         let caller = make_file_with_refs_and_content(
             "src/app.rs",
             LanguageId::Rust,
-            "fn run() {\n    process();\n    let value: process;\n}\n",
+            "use crate::db::process;\nfn run() {\n    process();\n    let value: process;\n}\n",
             vec![
-                make_ref("process", None, ReferenceKind::Call, Some(0), 100),
-                make_ref("process", None, ReferenceKind::TypeUsage, Some(0), 200),
+                make_ref("db", Some("crate::db"), ReferenceKind::Import, Some(0), 0),
+                make_ref(
+                    "process",
+                    Some("crate::db::process"),
+                    ReferenceKind::Call,
+                    Some(0),
+                    100,
+                ),
+                make_ref(
+                    "process",
+                    Some("crate::db::process"),
+                    ReferenceKind::TypeUsage,
+                    Some(0),
+                    200,
+                ),
             ],
             vec![SymbolRecord {
                 name: "run".to_string(),
@@ -2116,9 +2364,9 @@ mod tests {
                 line_range: (0, 3),
             }],
         );
-        let index = make_index(vec![("src/lib.rs", target), ("src/app.rs", caller)], false);
+        let index = make_index(vec![("src/db.rs", target), ("src/app.rs", caller)], false);
 
-        let view = index.capture_context_bundle_view("src/lib.rs", "process", None);
+        let view = index.capture_context_bundle_view("src/db.rs", "process", None, None);
 
         let super::ContextBundleView::Found(found) = view else {
             panic!("expected found context bundle view");
@@ -2139,6 +2387,178 @@ mod tests {
         assert_eq!(found.callees.total_count, 1);
         assert_eq!(found.callees.entries[0].display_name, "helper");
         assert_eq!(found.type_usages.total_count, 1);
+    }
+
+    #[test]
+    fn test_capture_context_bundle_view_requires_line_for_ambiguous_selector() {
+        let content = "fn connect() { first(); }\nfn connect() { second(); }\n";
+        let first_body = "fn connect() { first(); }";
+        let second_body = "fn connect() { second(); }";
+        let second_start = content.find(second_body).unwrap() as u32;
+        let target = make_file_with_refs_and_content(
+            "src/db.rs",
+            LanguageId::Rust,
+            content,
+            vec![],
+            vec![
+                make_symbol_with_kind_line_and_bytes(
+                    "connect",
+                    SymbolKind::Function,
+                    1,
+                    (0, first_body.len() as u32),
+                ),
+                make_symbol_with_kind_line_and_bytes(
+                    "connect",
+                    SymbolKind::Function,
+                    2,
+                    (second_start, second_start + second_body.len() as u32),
+                ),
+            ],
+        );
+        let index = make_index(vec![("src/db.rs", target)], false);
+
+        let view = index.capture_context_bundle_view("src/db.rs", "connect", Some("fn"), None);
+
+        match view {
+            ContextBundleView::AmbiguousSymbol {
+                path,
+                name,
+                candidate_lines,
+            } => {
+                assert_eq!(path, "src/db.rs");
+                assert_eq!(name, "connect");
+                assert_eq!(candidate_lines, vec![1, 2]);
+            }
+            _ => panic!("expected ambiguous selector"),
+        }
+    }
+
+    #[test]
+    fn test_capture_context_bundle_view_uses_symbol_line_and_exact_callers() {
+        let content = "fn connect() { first(); }\nfn connect() { second(); }\n";
+        let first_body = "fn connect() { first(); }";
+        let second_body = "fn connect() { second(); }";
+        let second_start = content.find(second_body).unwrap() as u32;
+        let target = make_file_with_refs_and_content(
+            "src/db.rs",
+            LanguageId::Rust,
+            content,
+            vec![],
+            vec![
+                make_symbol_with_kind_line_and_bytes(
+                    "connect",
+                    SymbolKind::Function,
+                    1,
+                    (0, first_body.len() as u32),
+                ),
+                make_symbol_with_kind_line_and_bytes(
+                    "connect",
+                    SymbolKind::Function,
+                    2,
+                    (second_start, second_start + second_body.len() as u32),
+                ),
+            ],
+        );
+        let dependent = make_file_with_refs_and_content(
+            "src/service.rs",
+            LanguageId::Rust,
+            "use crate::db::connect;\nfn run() { connect(); }\n",
+            vec![
+                make_ref("db", Some("crate::db"), ReferenceKind::Import, Some(0), 0),
+                make_ref(
+                    "connect",
+                    Some("crate::db::connect"),
+                    ReferenceKind::Call,
+                    Some(0),
+                    100,
+                ),
+            ],
+            vec![make_symbol("run")],
+        );
+        let unrelated = make_file_with_refs_and_content(
+            "src/other.rs",
+            LanguageId::Rust,
+            "fn run() { connect(); }\n",
+            vec![make_ref("connect", None, ReferenceKind::Call, Some(0), 0)],
+            vec![make_symbol("run")],
+        );
+        let index = make_index(
+            vec![
+                ("src/db.rs", target),
+                ("src/service.rs", dependent),
+                ("src/other.rs", unrelated),
+            ],
+            false,
+        );
+
+        let view =
+            index.capture_context_bundle_view("src/db.rs", "connect", Some("fn"), Some(2));
+
+        let ContextBundleView::Found(found) = view else {
+            panic!("expected found view");
+        };
+
+        assert!(found.body.contains("second();"), "got: {}", found.body);
+        assert!(!found.body.contains("first();"), "got: {}", found.body);
+        assert_eq!(found.callers.total_count, 1);
+        assert_eq!(found.callers.entries.len(), 1);
+        assert_eq!(found.callers.entries[0].file_path, "src/service.rs");
+    }
+
+    #[test]
+    fn test_capture_context_bundle_view_exact_type_usages_exclude_unrelated_same_name_hits() {
+        let target = make_file_with_refs_and_content(
+            "src/db.rs",
+            LanguageId::Rust,
+            "pub struct Client;\npub struct Client;\n",
+            vec![],
+            vec![
+                make_symbol_with_kind_line_and_bytes("Client", SymbolKind::Struct, 1, (0, 18)),
+                make_symbol_with_kind_line_and_bytes("Client", SymbolKind::Struct, 2, (19, 37)),
+            ],
+        );
+        let dependent = make_file_with_refs_and_content(
+            "src/service.rs",
+            LanguageId::Rust,
+            "use crate::db::Client;\nstruct Holder { client: Client }\n",
+            vec![
+                make_ref("db", Some("crate::db"), ReferenceKind::Import, Some(0), 0),
+                make_ref(
+                    "Client",
+                    Some("crate::db::Client"),
+                    ReferenceKind::TypeUsage,
+                    Some(0),
+                    100,
+                ),
+            ],
+            vec![make_symbol_with_kind_and_line("Holder", SymbolKind::Struct, 2)],
+        );
+        let unrelated = make_file_with_refs_and_content(
+            "src/other.rs",
+            LanguageId::Rust,
+            "struct Holder { client: Client }\n",
+            vec![make_ref("Client", None, ReferenceKind::TypeUsage, Some(0), 0)],
+            vec![make_symbol_with_kind_and_line("Holder", SymbolKind::Struct, 1)],
+        );
+        let index = make_index(
+            vec![
+                ("src/db.rs", target),
+                ("src/service.rs", dependent),
+                ("src/other.rs", unrelated),
+            ],
+            false,
+        );
+
+        let view =
+            index.capture_context_bundle_view("src/db.rs", "Client", Some("struct"), Some(2));
+
+        let ContextBundleView::Found(found) = view else {
+            panic!("expected found view");
+        };
+
+        assert_eq!(found.type_usages.total_count, 1);
+        assert_eq!(found.type_usages.entries.len(), 1);
+        assert_eq!(found.type_usages.entries[0].file_path, "src/service.rs");
     }
 
     #[test]
@@ -2572,6 +2992,95 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "src/loader.rs", "file_path should match");
         assert_eq!(results[0].1.name, "load");
+    }
+
+    #[test]
+    fn test_capture_find_references_view_for_symbol_scopes_to_dependent_files() {
+        let target = make_file_with_refs_and_content(
+            "src/db.rs",
+            LanguageId::Rust,
+            "pub fn connect() {}\n",
+            vec![],
+            vec![make_symbol_with_kind_and_line(
+                "connect",
+                SymbolKind::Function,
+                1,
+            )],
+        );
+        let dependent = make_file_with_refs_and_content(
+            "src/service.rs",
+            LanguageId::Rust,
+            "use crate::db::connect;\nfn run() { connect(); }\n",
+            vec![
+                make_ref("db", Some("crate::db"), ReferenceKind::Import, None, 0),
+                make_ref(
+                    "connect",
+                    Some("crate::db::connect"),
+                    ReferenceKind::Call,
+                    None,
+                    100,
+                ),
+            ],
+            vec![make_symbol("run")],
+        );
+        let unrelated = make_file_with_refs_and_content(
+            "src/other.rs",
+            LanguageId::Rust,
+            "fn run() { connect(); }\n",
+            vec![make_ref("connect", None, ReferenceKind::Call, None, 0)],
+            vec![make_symbol("run")],
+        );
+        let index = make_index(
+            vec![
+                ("src/db.rs", target),
+                ("src/service.rs", dependent),
+                ("src/other.rs", unrelated),
+            ],
+            false,
+        );
+
+        let view = index
+            .capture_find_references_view_for_symbol(
+                "src/db.rs",
+                "connect",
+                Some("fn"),
+                Some(1),
+                Some("call"),
+            )
+            .expect("exact selector should resolve");
+
+        assert_eq!(view.total_refs, 1);
+        assert_eq!(view.files.len(), 1);
+        assert_eq!(view.files[0].file_path, "src/service.rs");
+    }
+
+    #[test]
+    fn test_capture_find_references_view_for_symbol_requires_line_for_ambiguous_selector() {
+        let target = make_file_with_refs_and_content(
+            "src/db.rs",
+            LanguageId::Rust,
+            "fn connect() {}\nfn connect() {}\n",
+            vec![],
+            vec![
+                make_symbol_with_kind_and_line("connect", SymbolKind::Function, 1),
+                make_symbol_with_kind_and_line("connect", SymbolKind::Function, 10),
+            ],
+        );
+        let index = make_index(vec![("src/db.rs", target)], false);
+
+        let error = index
+            .capture_find_references_view_for_symbol(
+                "src/db.rs",
+                "connect",
+                Some("fn"),
+                None,
+                Some("call"),
+            )
+            .expect_err("selector without line should be ambiguous");
+
+        assert!(error.contains("Ambiguous symbol selector"), "got: {error}");
+        assert!(error.contains("1"), "got: {error}");
+        assert!(error.contains("10"), "got: {error}");
     }
 
     // --- find_dependents_for_file ---

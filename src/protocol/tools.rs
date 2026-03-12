@@ -182,6 +182,12 @@ pub struct FindReferencesInput {
     pub name: String,
     /// Filter by reference kind: "call", "import", "type_usage", or "all" (default: "all").
     pub kind: Option<String>,
+    /// Optional exact-selector path from `search_symbols`, for example `src/db.rs`.
+    pub path: Option<String>,
+    /// Optional selected symbol kind such as `fn`, `class`, or `struct`.
+    pub symbol_kind: Option<String>,
+    /// Optional selected symbol line from `search_symbols`.
+    pub symbol_line: Option<u32>,
 }
 
 /// Input for `find_dependents`.
@@ -209,6 +215,8 @@ pub struct GetContextBundleInput {
     pub name: String,
     /// Optional kind filter for the symbol lookup (e.g., "fn", "struct").
     pub kind: Option<String>,
+    /// Optional selected symbol line from `search_symbols`.
+    pub symbol_line: Option<u32>,
 }
 
 /// Input for `get_file_context`.
@@ -956,12 +964,25 @@ impl TokenizorServer {
             return result;
         }
         let input = &params.0;
-        let view = {
+        let result = {
             let guard = self.index.read().expect("lock poisoned");
             loading_guard!(guard);
-            guard.capture_find_references_view(&input.name, input.kind.as_deref())
+            if let Some(path) = input.path.as_deref() {
+                guard.capture_find_references_view_for_symbol(
+                    path,
+                    &input.name,
+                    input.symbol_kind.as_deref(),
+                    input.symbol_line,
+                    input.kind.as_deref(),
+                )
+            } else {
+                Ok(guard.capture_find_references_view(&input.name, input.kind.as_deref()))
+            }
         };
-        format::find_references_result_view(&view, &input.name)
+        match result {
+            Ok(view) => format::find_references_result_view(&view, &input.name),
+            Err(error) => error,
+        }
     }
 
     /// Find all files that import or depend on the given file.
@@ -1010,7 +1031,12 @@ impl TokenizorServer {
         let view = {
             let guard = self.index.read().expect("lock poisoned");
             loading_guard!(guard);
-            guard.capture_context_bundle_view(&input.path, &input.name, input.kind.as_deref())
+            guard.capture_context_bundle_view(
+                &input.path,
+                &input.name,
+                input.kind.as_deref(),
+                input.symbol_line,
+            )
         };
         format::context_bundle_result_view(&view)
     }
@@ -1074,6 +1100,23 @@ mod tests {
         let (key, mut file) = make_file(path, content, symbols);
         file.references = references;
         (key, file)
+    }
+
+    fn make_ref(
+        name: &str,
+        qualified_name: Option<&str>,
+        kind: ReferenceKind,
+        line: u32,
+        enclosing_symbol_index: Option<u32>,
+    ) -> ReferenceRecord {
+        ReferenceRecord {
+            name: name.to_string(),
+            qualified_name: qualified_name.map(str::to_string),
+            kind,
+            byte_range: (line * 10, line * 10 + 6),
+            line_range: (line, line),
+            enclosing_symbol_index,
+        }
     }
 
     fn make_live_index_ready(files: Vec<(String, IndexedFile)>) -> LiveIndex {
@@ -2414,6 +2457,9 @@ mod tests {
             .find_references(Parameters(super::FindReferencesInput {
                 name: "process".to_string(),
                 kind: None,
+                path: None,
+                symbol_kind: None,
+                symbol_line: None,
             }))
             .await;
         assert_eq!(result, crate::protocol::format::empty_guard_message());
@@ -2438,6 +2484,7 @@ mod tests {
                 path: "src/lib.rs".to_string(),
                 name: "process".to_string(),
                 kind: None,
+                symbol_line: None,
             }))
             .await;
         assert_eq!(result, crate::protocol::format::empty_guard_message());
@@ -2451,9 +2498,85 @@ mod tests {
                 path: "src/nonexistent.rs".to_string(),
                 name: "process".to_string(),
                 kind: None,
+                symbol_line: None,
             }))
             .await;
         assert!(result.contains("File not found"), "got: {result}");
+    }
+
+    #[tokio::test]
+    async fn test_get_context_bundle_exact_selector_uses_line_and_exact_callers() {
+        let target = make_file(
+            "src/db.rs",
+            b"fn connect() { first(); }\nfn connect() { second(); }\n",
+            vec![
+                make_symbol("connect", SymbolKind::Function, 1, 1),
+                make_symbol("connect", SymbolKind::Function, 2, 2),
+            ],
+        );
+        let dependent = make_file_with_refs(
+            "src/service.rs",
+            b"use crate::db::connect;\nfn run() { connect(); }\n",
+            vec![make_symbol("run", SymbolKind::Function, 2, 2)],
+            vec![
+                make_ref("db", Some("crate::db"), ReferenceKind::Import, 0, None),
+                make_ref(
+                    "connect",
+                    Some("crate::db::connect"),
+                    ReferenceKind::Call,
+                    1,
+                    Some(0),
+                ),
+            ],
+        );
+        let unrelated = make_file_with_refs(
+            "src/other.rs",
+            b"fn run() { connect(); }\n",
+            vec![make_symbol("run", SymbolKind::Function, 1, 1)],
+            vec![make_ref("connect", None, ReferenceKind::Call, 0, Some(0))],
+        );
+        let server = make_server(make_live_index_ready(vec![target, dependent, unrelated]));
+
+        let result = server
+            .get_context_bundle(Parameters(super::GetContextBundleInput {
+                path: "src/db.rs".to_string(),
+                name: "connect".to_string(),
+                kind: Some("fn".to_string()),
+                symbol_line: Some(2),
+            }))
+            .await;
+
+        assert!(result.contains("src/service.rs"), "expected dependent hit: {result}");
+        assert!(
+            !result.contains("src/other.rs"),
+            "unrelated same-name file should be excluded: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_context_bundle_exact_selector_requires_line_for_ambiguous_symbol() {
+        let target = make_file(
+            "src/db.rs",
+            b"fn connect() {}\nfn connect() {}\n",
+            vec![
+                make_symbol("connect", SymbolKind::Function, 1, 1),
+                make_symbol("connect", SymbolKind::Function, 2, 2),
+            ],
+        );
+        let server = make_server(make_live_index_ready(vec![target]));
+
+        let result = server
+            .get_context_bundle(Parameters(super::GetContextBundleInput {
+                path: "src/db.rs".to_string(),
+                name: "connect".to_string(),
+                kind: Some("fn".to_string()),
+                symbol_line: None,
+            }))
+            .await;
+
+        assert!(result.contains("Ambiguous symbol selector"), "got: {result}");
+        assert!(result.contains("1"), "got: {result}");
+        assert!(result.contains("2"), "got: {result}");
     }
 
     #[tokio::test]
@@ -2463,10 +2586,87 @@ mod tests {
             .find_references(Parameters(super::FindReferencesInput {
                 name: "nonexistent_xyz".to_string(),
                 kind: None,
+                path: None,
+                symbol_kind: None,
+                symbol_line: None,
             }))
             .await;
         // Should get "No references found" not a guard message
         assert!(result.contains("No references found"), "got: {result}");
+    }
+
+    #[tokio::test]
+    async fn test_find_references_exact_selector_excludes_unrelated_same_name_hits() {
+        let target = make_file(
+            "src/db.rs",
+            b"pub fn connect() {}\n",
+            vec![make_symbol("connect", SymbolKind::Function, 1, 1)],
+        );
+        let dependent = make_file_with_refs(
+            "src/service.rs",
+            b"use crate::db::connect;\nfn run() { connect(); }\n",
+            vec![make_symbol("run", SymbolKind::Function, 2, 2)],
+            vec![
+                make_ref("db", Some("crate::db"), ReferenceKind::Import, 0, None),
+                make_ref(
+                    "connect",
+                    Some("crate::db::connect"),
+                    ReferenceKind::Call,
+                    1,
+                    Some(0),
+                ),
+            ],
+        );
+        let unrelated = make_file_with_refs(
+            "src/other.rs",
+            b"fn run() { connect(); }\n",
+            vec![make_symbol("run", SymbolKind::Function, 1, 1)],
+            vec![make_ref("connect", None, ReferenceKind::Call, 0, Some(0))],
+        );
+        let server = make_server(make_live_index_ready(vec![target, dependent, unrelated]));
+
+        let result = server
+            .find_references(Parameters(super::FindReferencesInput {
+                name: "connect".to_string(),
+                kind: Some("call".to_string()),
+                path: Some("src/db.rs".to_string()),
+                symbol_kind: Some("fn".to_string()),
+                symbol_line: Some(1),
+            }))
+            .await;
+
+        assert!(result.contains("src/service.rs"), "expected dependent hit: {result}");
+        assert!(
+            !result.contains("src/other.rs"),
+            "unrelated same-name file should be excluded: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_references_exact_selector_requires_line_for_ambiguous_symbol() {
+        let target = make_file(
+            "src/db.rs",
+            b"fn connect() {}\nfn connect() {}\n",
+            vec![
+                make_symbol("connect", SymbolKind::Function, 1, 1),
+                make_symbol("connect", SymbolKind::Function, 10, 10),
+            ],
+        );
+        let server = make_server(make_live_index_ready(vec![target]));
+
+        let result = server
+            .find_references(Parameters(super::FindReferencesInput {
+                name: "connect".to_string(),
+                kind: Some("call".to_string()),
+                path: Some("src/db.rs".to_string()),
+                symbol_kind: Some("fn".to_string()),
+                symbol_line: None,
+            }))
+            .await;
+
+        assert!(result.contains("Ambiguous symbol selector"), "got: {result}");
+        assert!(result.contains("1"), "got: {result}");
+        assert!(result.contains("10"), "got: {result}");
     }
 
     #[tokio::test]

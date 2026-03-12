@@ -2,11 +2,11 @@
 doc_type: task
 task_id: 88
 title: P1 find_references exact selector contract research
-status: pending
+status: done
 sprint: tokenizor-upgrade-foundation
 parent_plan: 05-P-validation-and-backlog.md
 prev_task: 87-T-p1-search-symbols-noise-defaults-shell.md
-next_task: 
+next_task: 89-T-p1-find-references-exact-selector-shell.md
 created: 2026-03-12
 updated: 2026-03-12
 ---
@@ -33,7 +33,8 @@ updated: 2026-03-12
 ## Expected Touch Points
 
 - `docs/execution-plan/88-T-p1-find-references-exact-selector-contract-research.md`
-- likely a follow-on research note and implementation task docs
+- `docs/execution-plan/88-R-p1-find-references-exact-selector-contract-research.md`
+- `docs/execution-plan/89-T-p1-find-references-exact-selector-shell.md`
 
 ## Deliverable
 
@@ -47,13 +48,20 @@ updated: 2026-03-12
 
 ## Completion Notes
 
-- pending
+- added [88-R-p1-find-references-exact-selector-contract-research.md](/E:/project/tokenizor_agentic_mcp/docs/execution-plan/88-R-p1-find-references-exact-selector-contract-research.md)
+- recommendation:
+  - preserve current name-only behavior unless an exact selector is provided
+  - add `path`, `symbol_kind`, and `symbol_line` so `search_symbols` output can chain directly into `find_references`
+  - keep `kind` as the reference-kind filter, not the symbol-kind selector
+  - make the first shell exact about symbol selection but dependency-scoped for cross-file reference matching
+  - keep successful formatter output unchanged and use stable error strings for missing or ambiguous selectors
+- authored the follow-on execution slice as `89-T-p1-find-references-exact-selector-shell.md`
 
 ## Carry Forward To Next Task
 
 Next task:
 
-- `TBD`
+- `89-T-p1-find-references-exact-selector-shell.md`
 
 Carry forward:
 
@@ -61,6 +69,6 @@ Carry forward:
 - preserve current name-only `find_references` behavior unless explicit disambiguation is provided
 - prefer a contract that chains cleanly from current `search_symbols` output
 
-Open points:
+Resolved point:
 
-- OPEN: whether the first exact selector should be `{path,name,kind}` only or include line as a secondary disambiguator
+- include `symbol_line` in the first exact-selector shell as a secondary disambiguator

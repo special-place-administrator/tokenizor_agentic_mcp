@@ -1018,13 +1018,25 @@ pub fn context_bundle_result(
     name: &str,
     kind_filter: Option<&str>,
 ) -> String {
-    let view = index.capture_context_bundle_view(path, name, kind_filter);
+    let view = index.capture_context_bundle_view(path, name, kind_filter, None);
     context_bundle_result_view(&view)
 }
 
 pub fn context_bundle_result_view(view: &ContextBundleView) -> String {
     match view {
         ContextBundleView::FileNotFound { path } => not_found_file(path),
+        ContextBundleView::AmbiguousSymbol {
+            path,
+            name,
+            candidate_lines,
+        } => format!(
+            "Ambiguous symbol selector for {name} in {path}; pass `symbol_line` to disambiguate. Candidates: {}",
+            candidate_lines
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         ContextBundleView::SymbolNotFound {
             relative_path,
             symbol_names,
@@ -2393,9 +2405,23 @@ mod tests {
             "src/lib.rs",
             "process",
             None,
+            None,
         ));
 
         assert_eq!(captured_result, live_result);
+    }
+
+    #[test]
+    fn test_context_bundle_result_view_ambiguous_symbol() {
+        let result = context_bundle_result_view(&ContextBundleView::AmbiguousSymbol {
+            path: "src/lib.rs".to_string(),
+            name: "process".to_string(),
+            candidate_lines: vec![1, 10],
+        });
+
+        assert!(result.contains("Ambiguous symbol selector"), "got: {result}");
+        assert!(result.contains("1"), "got: {result}");
+        assert!(result.contains("10"), "got: {result}");
     }
 
     // --- format_token_savings tests ---
