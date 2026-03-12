@@ -348,7 +348,11 @@ fn resolve_symbol_selector<'a>(
     }
 }
 
-fn render_symbol_selector(name: &str, symbol_kind: Option<&str>, symbol_line: Option<u32>) -> String {
+fn render_symbol_selector(
+    name: &str,
+    symbol_kind: Option<&str>,
+    symbol_line: Option<u32>,
+) -> String {
     match (symbol_kind, symbol_line) {
         (Some(symbol_kind), Some(symbol_line)) => {
             format!("{symbol_kind} {name} at line {symbol_line}")
@@ -563,8 +567,12 @@ pub struct WhatChangedTimestampView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvePathView {
     EmptyHint,
-    Resolved { path: String },
-    NotFound { hint: String },
+    Resolved {
+        path: String,
+    },
+    NotFound {
+        hint: String,
+    },
     Ambiguous {
         hint: String,
         matches: Vec<String>,
@@ -588,7 +596,9 @@ pub struct SearchFilesHit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SearchFilesView {
     EmptyQuery,
-    NotFound { query: String },
+    NotFound {
+        query: String,
+    },
     Found {
         query: String,
         total_matches: usize,
@@ -728,7 +738,10 @@ impl LiveIndex {
     }
 
     /// Capture one shared immutable file entry selected by an internal path scope.
-    pub fn capture_shared_file_for_scope(&self, path_scope: &PathScope) -> Option<Arc<IndexedFile>> {
+    pub fn capture_shared_file_for_scope(
+        &self,
+        path_scope: &PathScope,
+    ) -> Option<Arc<IndexedFile>> {
         match path_scope {
             PathScope::Any => None,
             PathScope::Exact(path) => self.capture_shared_file(path),
@@ -844,8 +857,10 @@ impl LiveIndex {
         }
 
         for component in dir_components {
-            let component_matches: HashSet<&str> =
-                self.find_files_by_dir_component(component).into_iter().collect();
+            let component_matches: HashSet<&str> = self
+                .find_files_by_dir_component(component)
+                .into_iter()
+                .collect();
             candidates.retain(|path| component_matches.contains(path.as_str()));
         }
 
@@ -953,9 +968,8 @@ impl LiveIndex {
             .into_iter()
             .filter(|path| !strong_set.contains(path.as_str()))
             .collect();
-        basename_only_hits.sort_by(|left, right| {
-            left.len().cmp(&right.len()).then(left.cmp(right))
-        });
+        basename_only_hits
+            .sort_by(|left, right| left.len().cmp(&right.len()).then(left.cmp(right)));
         basename_only_hits.dedup();
 
         let strong_or_basename_set: HashSet<&str> = strong_hits
@@ -973,9 +987,7 @@ impl LiveIndex {
             })
             .map(|path| path.to_string())
             .collect();
-        loose_hits.sort_by(|left, right| {
-            left.len().cmp(&right.len()).then(left.cmp(right))
-        });
+        loose_hits.sort_by(|left, right| left.len().cmp(&right.len()).then(left.cmp(right)));
         loose_hits.dedup();
 
         let total_matches = strong_hits.len() + basename_only_hits.len() + loose_hits.len();
@@ -1128,19 +1140,17 @@ impl LiveIndex {
             .map(|reference| (path, reference))
             .collect();
 
-        refs.extend(
-            self.find_dependents_for_file(path)
-                .into_iter()
-                .filter(|(_file_path, reference)| {
-                    matches_exact_symbol_reference(
-                        reference,
-                        target_name,
-                        &file.language,
-                        module_path.as_deref(),
-                        kind_filter,
-                    )
-                }),
-        );
+        refs.extend(self.find_dependents_for_file(path).into_iter().filter(
+            |(_file_path, reference)| {
+                matches_exact_symbol_reference(
+                    reference,
+                    target_name,
+                    &file.language,
+                    module_path.as_deref(),
+                    kind_filter,
+                )
+            },
+        ));
 
         refs.sort_by(|a, b| {
             a.0.cmp(b.0)
@@ -1228,7 +1238,8 @@ impl LiveIndex {
             };
         };
 
-        let (sym_idx, sym_rec) = match resolve_symbol_selector(file, name, kind_filter, symbol_line) {
+        let (sym_idx, sym_rec) = match resolve_symbol_selector(file, name, kind_filter, symbol_line)
+        {
             SymbolSelectorMatch::Selected(sym_idx, sym_rec) => (sym_idx, sym_rec),
             SymbolSelectorMatch::NotFound => {
                 return ContextBundleView::SymbolNotFound {
@@ -1291,7 +1302,8 @@ impl LiveIndex {
             }
         };
 
-        let callers = self.collect_exact_symbol_references(path, file, name, Some(ReferenceKind::Call));
+        let callers =
+            self.collect_exact_symbol_references(path, file, name, Some(ReferenceKind::Call));
         let callees = self.callees_for_symbol(path, sym_idx);
         let callee_pairs: Vec<(&str, &ReferenceRecord)> =
             callees.iter().map(|reference| (path, *reference)).collect();
@@ -2496,8 +2508,7 @@ mod tests {
             false,
         );
 
-        let view =
-            index.capture_context_bundle_view("src/db.rs", "connect", Some("fn"), Some(2));
+        let view = index.capture_context_bundle_view("src/db.rs", "connect", Some("fn"), Some(2));
 
         let ContextBundleView::Found(found) = view else {
             panic!("expected found view");
@@ -2536,14 +2547,28 @@ mod tests {
                     100,
                 ),
             ],
-            vec![make_symbol_with_kind_and_line("Holder", SymbolKind::Struct, 2)],
+            vec![make_symbol_with_kind_and_line(
+                "Holder",
+                SymbolKind::Struct,
+                2,
+            )],
         );
         let unrelated = make_file_with_refs_and_content(
             "src/other.rs",
             LanguageId::Rust,
             "struct Holder { client: Client }\n",
-            vec![make_ref("Client", None, ReferenceKind::TypeUsage, Some(0), 0)],
-            vec![make_symbol_with_kind_and_line("Holder", SymbolKind::Struct, 1)],
+            vec![make_ref(
+                "Client",
+                None,
+                ReferenceKind::TypeUsage,
+                Some(0),
+                0,
+            )],
+            vec![make_symbol_with_kind_and_line(
+                "Holder",
+                SymbolKind::Struct,
+                1,
+            )],
         );
         let index = make_index(
             vec![

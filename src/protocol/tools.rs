@@ -637,7 +637,7 @@ fn sidecar_state_for_server(server: &TokenizorServer) -> SidecarState {
     SidecarState {
         index: Arc::clone(&server.index),
         token_stats: server.token_stats.clone().unwrap_or_else(TokenStats::new),
-        repo_root: server.repo_root.clone(),
+        repo_root: server.capture_repo_root(),
         symbol_cache: Arc::new(RwLock::new(HashMap::new())),
     }
 }
@@ -1041,6 +1041,8 @@ impl TokenizorServer {
                 let file_count = published.file_count;
                 let symbol_count = published.symbol_count;
 
+                self.set_repo_root(Some(root.clone()));
+
                 // Restart the file watcher at the new root so freshness continues.
                 crate::watcher::restart_watcher(
                     root.clone(),
@@ -1063,7 +1065,8 @@ impl TokenizorServer {
         if let Some(result) = self.proxy_tool_call("what_changed", &params.0).await {
             return result;
         }
-        let mode = match determine_what_changed_mode(&params.0, self.repo_root.is_some()) {
+        let repo_root = self.capture_repo_root();
+        let mode = match determine_what_changed_mode(&params.0, repo_root.is_some()) {
             Ok(mode) => mode,
             Err(message) => return message,
         };
@@ -1082,7 +1085,7 @@ impl TokenizorServer {
                 loading_guard!(guard);
                 drop(guard);
 
-                let Some(repo_root) = self.repo_root.as_deref() else {
+                let Some(repo_root) = repo_root.as_deref() else {
                     return "Git change detection unavailable; pass `since` for timestamp mode."
                         .to_string();
                 };
@@ -1102,7 +1105,7 @@ impl TokenizorServer {
                 loading_guard!(guard);
                 drop(guard);
 
-                let Some(repo_root) = self.repo_root.as_deref() else {
+                let Some(repo_root) = repo_root.as_deref() else {
                     return "Git change detection unavailable; pass `since` for timestamp mode."
                         .to_string();
                 };
@@ -1417,6 +1420,26 @@ mod tests {
                 None => unsafe {
                     std::env::remove_var(self.key);
                 },
+            }
+        }
+    }
+
+    struct CwdGuard {
+        previous: PathBuf,
+    }
+
+    impl CwdGuard {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::current_dir().expect("current dir");
+            std::env::set_current_dir(path).expect("set current dir");
+            Self { previous }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            if std::env::set_current_dir(&self.previous).is_err() {
+                std::env::set_current_dir(env!("CARGO_MANIFEST_DIR")).expect("restore current dir");
             }
         }
     }
@@ -1891,6 +1914,94 @@ mod tests {
         assert!(
             result.contains("new_name"),
             "impact tool should re-read the file from repo_root and report new symbols; got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_index_folder_rebinds_repo_root_for_local_impact_analysis() {
+        let repo = TempDir::new().expect("temp repo");
+        fs::create_dir_all(repo.path().join("scratch")).expect("scratch dir");
+        let source_path = repo.path().join("scratch").join("impact_case.rs");
+        fs::write(&source_path, "pub fn old_name() {}\n").expect("write initial source");
+
+        let server = make_server(make_live_index_empty());
+        let index_result = server
+            .index_folder(Parameters(super::IndexFolderInput {
+                path: repo.path().display().to_string(),
+            }))
+            .await;
+
+        assert!(
+            index_result.contains("Indexed 1 files"),
+            "index_folder should load the temp repo, got: {index_result}"
+        );
+
+        fs::write(&source_path, "pub fn new_name() {}\n").expect("write updated source");
+        let outside = TempDir::new().expect("outside cwd");
+        let _cwd_guard = CwdGuard::set(outside.path());
+
+        let impact = server
+            .analyze_file_impact(Parameters(super::AnalyzeFileImpactInput {
+                path: "scratch/impact_case.rs".to_string(),
+                new_file: None,
+            }))
+            .await;
+
+        assert!(
+            impact.contains("new_name"),
+            "impact analysis should keep using the indexed repo root after index_folder, got: {impact}"
+        );
+
+        let outline = server
+            .get_file_outline(Parameters(super::GetFileOutlineInput {
+                path: "scratch/impact_case.rs".to_string(),
+            }))
+            .await;
+
+        assert!(
+            outline.contains("new_name"),
+            "impact analysis must not replace the indexed file with an empty parse, got: {outline}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_index_folder_rebinds_repo_root_for_local_what_changed_git_mode() {
+        let repo = init_git_repo();
+        fs::create_dir_all(repo.path().join("src")).expect("create src dir");
+        fs::write(repo.path().join("src/lib.rs"), "fn foo() {}\n").expect("write initial file");
+        run_git(repo.path(), &["add", "."]);
+        run_git(repo.path(), &["commit", "-m", "init", "-q"]);
+
+        let server = make_server(make_live_index_empty());
+        let index_result = server
+            .index_folder(Parameters(super::IndexFolderInput {
+                path: repo.path().display().to_string(),
+            }))
+            .await;
+        assert!(
+            index_result.contains("Indexed 1 files"),
+            "index_folder should load the temp repo, got: {index_result}"
+        );
+
+        fs::write(
+            repo.path().join("src/lib.rs"),
+            "fn foo() { println!(\"changed\"); }\n",
+        )
+        .expect("modify tracked file");
+        let outside = TempDir::new().expect("outside cwd");
+        let _cwd_guard = CwdGuard::set(outside.path());
+
+        let result = server
+            .what_changed(Parameters(super::WhatChangedInput {
+                since: None,
+                git_ref: None,
+                uncommitted: None,
+            }))
+            .await;
+
+        assert!(
+            result.contains("src/lib.rs"),
+            "what_changed should keep using the indexed repo root after index_folder, got: {result}"
         );
     }
 

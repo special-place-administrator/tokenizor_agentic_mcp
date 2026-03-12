@@ -4,7 +4,7 @@ pub mod resources;
 pub mod tools;
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use rmcp::RoleServer;
 use rmcp::handler::server::router::prompt::PromptRouter;
@@ -36,9 +36,10 @@ pub struct TokenizorServer {
     pub(crate) prompt_router: PromptRouter<Self>,
     pub(crate) project_name: String,
     pub(crate) watcher_info: Arc<Mutex<WatcherInfo>>,
-    /// Root directory the watcher is currently watching. Stored for future
-    /// diagnostics and potential restart-from-last-root logic.
-    pub(crate) repo_root: Option<PathBuf>,
+    /// Root directory the watcher is currently watching. Stored in shared mutable
+    /// state so local stdio tools can keep using the latest project root after
+    /// `index_folder` rebinds the server to a new workspace.
+    pub(crate) repo_root: Arc<RwLock<Option<PathBuf>>>,
     /// Shared token stats from the HTTP sidecar. Present when the sidecar is running.
     /// The health tool reads this to display token savings accumulated during the session.
     pub(crate) token_stats: Option<Arc<TokenStats>>,
@@ -65,7 +66,7 @@ impl TokenizorServer {
             prompt_router: Self::prompt_router(),
             project_name,
             watcher_info,
-            repo_root,
+            repo_root: Arc::new(RwLock::new(repo_root)),
             token_stats,
             daemon_client: None,
         }
@@ -80,7 +81,7 @@ impl TokenizorServer {
             prompt_router: Self::prompt_router(),
             project_name: daemon_client.project_name().to_string(),
             watcher_info: Arc::new(Mutex::new(WatcherInfo::default())),
-            repo_root: None,
+            repo_root: Arc::new(RwLock::new(None)),
             token_stats: None,
             daemon_client: Some(daemon_client),
         }
@@ -89,6 +90,14 @@ impl TokenizorServer {
     /// Accessor for tests.
     pub fn index(&self) -> &SharedIndex {
         &self.index
+    }
+
+    pub(crate) fn capture_repo_root(&self) -> Option<PathBuf> {
+        self.repo_root.read().expect("lock poisoned").clone()
+    }
+
+    pub(crate) fn set_repo_root(&self, repo_root: Option<PathBuf>) {
+        *self.repo_root.write().expect("lock poisoned") = repo_root;
     }
 
     pub(crate) async fn proxy_tool_call<T>(&self, tool_name: &str, params: &T) -> Option<String>

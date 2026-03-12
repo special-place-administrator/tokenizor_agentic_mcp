@@ -638,12 +638,7 @@ async fn test_prompt_context_endpoint_extensionless_path_line_hint_disambiguates
         }],
         alias_map: HashMap::new(),
     };
-    let index = build_shared_index(vec![
-        src_target,
-        test_target,
-        src_dependent,
-        unrelated,
-    ]);
+    let index = build_shared_index(vec![src_target, test_target, src_dependent, unrelated]);
     let handle = spawn_sidecar(Arc::clone(&index), "127.0.0.1")
         .await
         .expect("spawn_sidecar should succeed");
@@ -799,12 +794,7 @@ async fn test_prompt_context_endpoint_module_alias_line_hint_disambiguates_exact
         }],
         alias_map: HashMap::new(),
     };
-    let index = build_shared_index(vec![
-        src_target,
-        test_target,
-        src_dependent,
-        unrelated,
-    ]);
+    let index = build_shared_index(vec![src_target, test_target, src_dependent, unrelated]);
     let handle = spawn_sidecar(Arc::clone(&index), "127.0.0.1")
         .await
         .expect("spawn_sidecar should succeed");
@@ -950,12 +940,7 @@ async fn test_prompt_context_endpoint_module_alias_without_line_prefers_exact_fi
         }],
         alias_map: HashMap::new(),
     };
-    let index = build_shared_index(vec![
-        src_target,
-        test_target,
-        src_dependent,
-        unrelated,
-    ]);
+    let index = build_shared_index(vec![src_target, test_target, src_dependent, unrelated]);
     let handle = spawn_sidecar(Arc::clone(&index), "127.0.0.1")
         .await
         .expect("spawn_sidecar should succeed");
@@ -1112,8 +1097,7 @@ async fn test_prompt_context_endpoint_slash_module_alias_without_line_prefers_ex
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_prompt_context_endpoint_slash_module_alias_line_hint_disambiguates_exact_selector()
-{
+async fn test_prompt_context_endpoint_slash_module_alias_line_hint_disambiguates_exact_selector() {
     let tmp = TempDir::new().unwrap();
     let _guard = CWD_LOCK.lock().await;
     let original = stable_cwd();
@@ -1591,8 +1575,8 @@ async fn test_prompt_context_endpoint_slash_qualified_symbol_alias_prefers_exact
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_prompt_context_endpoint_slash_qualified_symbol_alias_line_hint_disambiguates_exact_selector(
-) {
+async fn test_prompt_context_endpoint_slash_qualified_symbol_alias_line_hint_disambiguates_exact_selector()
+ {
     let tmp = TempDir::new().unwrap();
     let _guard = CWD_LOCK.lock().await;
     let original = stable_cwd();
@@ -1727,8 +1711,8 @@ async fn test_prompt_context_endpoint_slash_qualified_symbol_alias_line_hint_dis
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_prompt_context_endpoint_dotted_qualified_symbol_alias_line_hint_disambiguates_exact_selector(
-) {
+async fn test_prompt_context_endpoint_dotted_qualified_symbol_alias_line_hint_disambiguates_exact_selector()
+ {
     let tmp = TempDir::new().unwrap();
     let _guard = CWD_LOCK.lock().await;
     let original = stable_cwd();

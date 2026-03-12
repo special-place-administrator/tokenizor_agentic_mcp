@@ -19,7 +19,7 @@ pub(crate) const REPO_CHANGES_URI: &str = "tokenizor://repo/changes/uncommitted"
 
 pub(crate) const FILE_CONTEXT_TEMPLATE: &str =
     "tokenizor://file/context?path={path}&max_tokens={max_tokens}";
-pub(crate) const FILE_CONTENT_TEMPLATE: &str = "tokenizor://file/content?path={path}&start_line={start_line}&end_line={end_line}&show_line_numbers={show_line_numbers}&header={header}";
+pub(crate) const FILE_CONTENT_TEMPLATE: &str = "tokenizor://file/content?path={path}&start_line={start_line}&end_line={end_line}&around_line={around_line}&around_match={around_match}&context_lines={context_lines}&show_line_numbers={show_line_numbers}&header={header}";
 pub(crate) const SYMBOL_DETAIL_TEMPLATE: &str =
     "tokenizor://symbol/detail?path={path}&name={name}&kind={kind}";
 pub(crate) const SYMBOL_CONTEXT_TEMPLATE: &str =
@@ -38,6 +38,9 @@ enum ResourceRequest {
         path: String,
         start_line: Option<u32>,
         end_line: Option<u32>,
+        around_line: Option<u32>,
+        around_match: Option<String>,
+        context_lines: Option<u32>,
         show_line_numbers: Option<bool>,
         header: Option<bool>,
     },
@@ -94,7 +97,7 @@ impl TokenizorServer {
                 FILE_CONTENT_TEMPLATE,
                 "file-content",
                 "File content",
-                "Cached file content with optional line range.",
+                "Cached file content with optional line range or contextual excerpt.",
             ),
             make_resource_template(
                 SYMBOL_DETAIL_TEMPLATE,
@@ -148,6 +151,9 @@ impl TokenizorServer {
                 path,
                 start_line,
                 end_line,
+                around_line,
+                around_match,
+                context_lines,
                 show_line_numbers,
                 header,
             } => {
@@ -157,11 +163,11 @@ impl TokenizorServer {
                     end_line,
                     chunk_index: None,
                     max_lines: None,
-                    around_line: None,
-                    around_match: None,
+                    around_line,
+                    around_match,
                     around_symbol: None,
                     symbol_line: None,
-                    context_lines: None,
+                    context_lines,
                     show_line_numbers,
                     header,
                 }))
@@ -294,6 +300,9 @@ fn parse_resource_uri(uri: &str) -> Result<ResourceRequest, String> {
             path: required_query(&query, "path")?,
             start_line: optional_query(&query, "start_line").transpose()?,
             end_line: optional_query(&query, "end_line").transpose()?,
+            around_line: optional_query(&query, "around_line").transpose()?,
+            around_match: optional_text(&query, "around_match"),
+            context_lines: optional_query(&query, "context_lines").transpose()?,
             show_line_numbers: optional_query(&query, "show_line_numbers").transpose()?,
             header: optional_query(&query, "header").transpose()?,
         }),
@@ -358,29 +367,32 @@ mod tests {
     use crate::protocol::TokenizorServer;
     use crate::watcher::WatcherInfo;
 
-    fn make_server() -> TokenizorServer {
+    fn make_server_with_file(path: &str, content: &[u8]) -> TokenizorServer {
         let symbol = SymbolRecord {
             name: "main".to_string(),
             kind: SymbolKind::Function,
             depth: 0,
             sort_order: 0,
             byte_range: (0, 10),
-            line_range: (1, 3),
+            line_range: (
+                1,
+                content.iter().filter(|&&byte| byte == b'\n').count() as u32 + 1,
+            ),
         };
         let file = IndexedFile {
-            relative_path: "src/main.rs".to_string(),
+            relative_path: path.to_string(),
             language: LanguageId::Rust,
-            classification: crate::domain::FileClassification::for_code_path("src/main.rs"),
-            content: b"fn main() {}".to_vec(),
+            classification: crate::domain::FileClassification::for_code_path(path),
+            content: content.to_vec(),
             symbols: vec![symbol],
             parse_status: ParseStatus::Parsed,
-            byte_len: 12,
+            byte_len: content.len() as u64,
             content_hash: "test".to_string(),
             references: vec![],
             alias_map: HashMap::new(),
         };
         let mut files = HashMap::new();
-        files.insert("src/main.rs".to_string(), std::sync::Arc::new(file));
+        files.insert(path.to_string(), std::sync::Arc::new(file));
         let mut index = LiveIndex {
             files,
             loaded_at: Instant::now(),
@@ -404,6 +416,10 @@ mod tests {
             None,
             None,
         )
+    }
+
+    fn make_server() -> TokenizorServer {
+        make_server_with_file("src/main.rs", b"fn main() {}")
     }
 
     #[test]
@@ -477,5 +493,47 @@ mod tests {
             other => panic!("expected text resource, got {other:?}"),
         };
         assert_eq!(text, "src/main.rs\n1: fn main() {}");
+    }
+
+    #[tokio::test]
+    async fn test_read_templated_file_content_resource_with_around_line_context() {
+        let server =
+            make_server_with_file("src/main.rs", b"line 1\nline 2\nline 3\nline 4\nline 5");
+        let uri = build_uri(
+            "tokenizor://file/content",
+            &[
+                ("path", Some("src/main.rs".to_string())),
+                ("around_line", Some("3".to_string())),
+                ("context_lines", Some("1".to_string())),
+            ],
+        );
+        let result = server.read_resource_uri(&uri).await.expect("read resource");
+        let text = match &result.contents[0] {
+            ResourceContents::TextResourceContents { text, .. } => text,
+            other => panic!("expected text resource, got {other:?}"),
+        };
+        assert_eq!(text, "2: line 2\n3: line 3\n4: line 4");
+    }
+
+    #[tokio::test]
+    async fn test_read_templated_file_content_resource_with_around_match_context() {
+        let server = make_server_with_file(
+            "src/main.rs",
+            b"line 1\nTODO first\nline 3\nTODO second\nline 5",
+        );
+        let uri = build_uri(
+            "tokenizor://file/content",
+            &[
+                ("path", Some("src/main.rs".to_string())),
+                ("around_match", Some("todo".to_string())),
+                ("context_lines", Some("1".to_string())),
+            ],
+        );
+        let result = server.read_resource_uri(&uri).await.expect("read resource");
+        let text = match &result.contents[0] {
+            ResourceContents::TextResourceContents { text, .. } => text,
+            other => panic!("expected text resource, got {other:?}"),
+        };
+        assert_eq!(text, "1: line 1\n2: TODO first\n3: line 3");
     }
 }

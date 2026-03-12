@@ -122,15 +122,28 @@ mod tests {
     /// cwd is process-global — parallel manipulation causes flaky failures.
     static CWD_LOCK: Mutex<()> = Mutex::new(());
 
+    fn stable_cwd() -> PathBuf {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+    }
+
+    fn restore_cwd(path: &std::path::Path) {
+        if std::env::set_current_dir(path).is_err() {
+            std::env::set_current_dir(env!("CARGO_MANIFEST_DIR"))
+                .expect("manifest dir must be a valid cwd fallback");
+        }
+    }
+
     /// Run a test with cwd set to a temp directory so file operations are isolated.
     /// Holds `CWD_LOCK` for the duration, restores cwd on exit (even on panic).
     fn with_temp_dir<F: FnOnce() + std::panic::UnwindSafe>(f: F) {
-        let _guard = CWD_LOCK.lock().unwrap();
+        let _guard = CWD_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let tmp = TempDir::new().unwrap();
-        let original = std::env::current_dir().unwrap();
+        let original = stable_cwd();
         std::env::set_current_dir(tmp.path()).unwrap();
         let result = std::panic::catch_unwind(f);
-        std::env::set_current_dir(&original).unwrap();
+        restore_cwd(&original);
         drop(tmp);
         if let Err(e) = result {
             std::panic::resume_unwind(e);

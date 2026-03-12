@@ -4,6 +4,20 @@ Rust-native MCP server for same-machine code indexing, retrieval, prompts, and r
 
 The executable shipped by npm is `tokenizor-mcp`. In this repository, the same CLI can be run with `cargo run -- ...`.
 
+## What This Is Supposed To Be
+
+Tokenizor is being built first as an agent-acceleration layer for coding work.
+
+The main goal is to let an MCP client stay inside a fast, trustworthy, code-aware working loop for as much of a session as possible:
+
+- less raw file scanning
+- faster path and symbol resolution
+- better impact analysis after edits
+- stronger session continuity and context recovery
+- lower token waste on repeated codebase exploration
+
+The direct user benefit is faster turnaround and lower token cost. The direct agent benefit is broader, faster, and more reliable use of the codebase while working. The current implementation is not at the final target yet, but that is the direction the project is intentionally optimizing toward.
+
 ## Current Reality
 
 Tokenizor is already useful today as a local, code-first MCP. The current implementation provides:
@@ -81,13 +95,13 @@ Current static resources:
 Current resource templates:
 
 - `tokenizor://file/context?path={path}&max_tokens={max_tokens}`
-- `tokenizor://file/content?path={path}&start_line={start_line}&end_line={end_line}&show_line_numbers={show_line_numbers}&header={header}`
+- `tokenizor://file/content?path={path}&start_line={start_line}&end_line={end_line}&around_line={around_line}&around_match={around_match}&context_lines={context_lines}&show_line_numbers={show_line_numbers}&header={header}`
 - `tokenizor://symbol/detail?path={path}&name={name}&kind={kind}`
 - `tokenizor://symbol/context?name={name}&file={file}`
 
 Important current caveat:
 
-- the tools have moved ahead of the resources in a few areas; for example, the file-content resource template now matches ordinary full-file and explicit-range reads, including `show_line_numbers` and `header`, but it still does not expose contextual, symbolic, or chunked file-content modes
+- the tools have moved ahead of the resources in a few areas; for example, the file-content resource template now matches ordinary full-file, explicit-range, and contextual reads, including `show_line_numbers`, `header`, `around_line`, `around_match`, and `context_lines`, but it still does not expose symbolic or chunked file-content modes
 - exact-selector symbol inputs are implemented on tools, but the symbol-context resource template still exposes only `name` and optional `file`
 
 ### Supported languages
@@ -127,7 +141,7 @@ These items are part of the direction for the project, but they are not in the c
 ## Current Rough Edges and Open Work
 
 - resource and prompt surfaces still lag some of the newer tool capabilities
-- the file-content resource template still trails the tool on contextual modes, `around_symbol`, and chunked reads
+- the file-content resource template still trails the tool on `around_symbol` and chunked reads
 - `get_file_content` still lacks `chunk_count_hint` and the broader lightweight non-code text lane from the source plan
 - current indexing is intentionally code-first; non-code text retrieval remains limited
 - long-running run management, checkpointing, repair workflows, and idempotent mutation semantics are still architecture goals rather than shipped features

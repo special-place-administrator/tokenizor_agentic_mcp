@@ -1172,7 +1172,10 @@ fn prompt_module_alias(path: &str, language: &LanguageId) -> Option<String> {
                 *last = stem.to_string();
             }
 
-            if matches!(components.last().map(|value| value.as_str()), Some("__init__")) {
+            if matches!(
+                components.last().map(|value| value.as_str()),
+                Some("__init__")
+            ) {
                 components.pop();
             }
 
@@ -1261,8 +1264,8 @@ fn prompt_contains_exact_alias(prompt: &str, alias: &str) -> bool {
         let start = search_start + offset;
         let end = start + alias_bytes.len();
 
-        let prev_ok = start == 0
-            || !matches!(prompt_bytes[start - 1], b'a'..=b'z' | b'0'..=b'9' | b'_');
+        let prev_ok =
+            start == 0 || !matches!(prompt_bytes[start - 1], b'a'..=b'z' | b'0'..=b'9' | b'_');
 
         let next_ok = if end >= prompt_bytes.len() {
             true
@@ -1798,7 +1801,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.contains("Ambiguous symbol selector"), "got: {result}");
+        assert!(
+            result.contains("Ambiguous symbol selector"),
+            "got: {result}"
+        );
         assert!(result.contains("1"), "got: {result}");
         assert!(result.contains("2"), "got: {result}");
     }
@@ -2769,7 +2775,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prompt_context_handler_partial_slash_module_alias_without_line_does_not_activate() {
+    async fn test_prompt_context_handler_partial_slash_module_alias_without_line_does_not_activate()
+    {
         let target = IndexedFile {
             relative_path: "src/utils/index.ts".to_string(),
             language: LanguageId::TypeScript,
@@ -2906,7 +2913,10 @@ mod tests {
             ],
             alias_map: HashMap::new(),
         };
-        let state = make_state(vec![("src/utils/index.ts", target), ("src/app.ts", dependent)]);
+        let state = make_state(vec![
+            ("src/utils/index.ts", target),
+            ("src/app.ts", dependent),
+        ]);
 
         let result = prompt_context_handler(
             State(state),
@@ -3241,9 +3251,7 @@ mod tests {
         let target = IndexedFile {
             relative_path: "src/utils/index.ts".to_string(),
             language: LanguageId::TypeScript,
-            classification: crate::domain::FileClassification::for_code_path(
-                "src/utils/index.ts",
-            ),
+            classification: crate::domain::FileClassification::for_code_path("src/utils/index.ts"),
             content: b"export function connect() {}\n".to_vec(),
             symbols: vec![make_symbol("connect", SymbolKind::Function, 1, 1)],
             parse_status: ParseStatus::Parsed,
@@ -3319,14 +3327,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prompt_context_handler_slash_qualified_symbol_alias_line_hint_disambiguates_selector(
-    ) {
+    async fn test_prompt_context_handler_slash_qualified_symbol_alias_line_hint_disambiguates_selector()
+     {
         let target = IndexedFile {
             relative_path: "src/utils/index.ts".to_string(),
             language: LanguageId::TypeScript,
-            classification: crate::domain::FileClassification::for_code_path(
-                "src/utils/index.ts",
-            ),
+            classification: crate::domain::FileClassification::for_code_path("src/utils/index.ts"),
             content: b"export function connect() {}\n\nexport function connect() {}\n".to_vec(),
             symbols: vec![
                 make_symbol("connect", SymbolKind::Function, 1, 1),
@@ -3495,9 +3501,7 @@ mod tests {
         let target = IndexedFile {
             relative_path: "src/utils/index.ts".to_string(),
             language: LanguageId::TypeScript,
-            classification: crate::domain::FileClassification::for_code_path(
-                "src/utils/index.ts",
-            ),
+            classification: crate::domain::FileClassification::for_code_path("src/utils/index.ts"),
             content: b"export function connect() {}\n".to_vec(),
             symbols: vec![make_symbol("connect", SymbolKind::Function, 1, 1)],
             parse_status: ParseStatus::Parsed,
@@ -3573,8 +3577,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prompt_context_handler_dotted_qualified_symbol_alias_line_hint_disambiguates_selector(
-    ) {
+    async fn test_prompt_context_handler_dotted_qualified_symbol_alias_line_hint_disambiguates_selector()
+     {
         let target = IndexedFile {
             relative_path: "pkg/db.py".to_string(),
             language: LanguageId::Python,
@@ -3661,8 +3665,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prompt_context_handler_dotted_qualified_symbol_alias_ignores_unrelated_colon_numbers(
-    ) {
+    async fn test_prompt_context_handler_dotted_qualified_symbol_alias_ignores_unrelated_colon_numbers()
+     {
         let target = IndexedFile {
             relative_path: "pkg/db.py".to_string(),
             language: LanguageId::Python,
@@ -3725,14 +3729,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prompt_context_handler_slash_qualified_symbol_alias_ignores_unrelated_colon_numbers(
-    ) {
+    async fn test_prompt_context_handler_slash_qualified_symbol_alias_ignores_unrelated_colon_numbers()
+     {
         let target = IndexedFile {
             relative_path: "src/utils/index.ts".to_string(),
             language: LanguageId::TypeScript,
-            classification: crate::domain::FileClassification::for_code_path(
-                "src/utils/index.ts",
-            ),
+            classification: crate::domain::FileClassification::for_code_path("src/utils/index.ts"),
             content: b"export function connect() {}\n\nexport function connect() {}\n".to_vec(),
             symbols: vec![
                 make_symbol("connect", SymbolKind::Function, 1, 1),
@@ -3773,7 +3775,10 @@ mod tests {
             ],
             alias_map: HashMap::new(),
         };
-        let state = make_state(vec![("src/utils/index.ts", target), ("src/app.ts", dependent)]);
+        let state = make_state(vec![
+            ("src/utils/index.ts", target),
+            ("src/app.ts", dependent),
+        ]);
 
         let result = prompt_context_handler(
             State(state),
