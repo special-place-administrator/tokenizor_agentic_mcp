@@ -23,6 +23,7 @@ use rmcp::{tool, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::domain::LanguageId;
 use crate::live_index::{IndexedFile, search, store::IndexState};
 use crate::protocol::format;
 use crate::sidecar::handlers::{
@@ -95,6 +96,28 @@ pub struct SearchTextInput {
     pub terms: Option<Vec<String>>,
     /// Interpret `query` as a regex pattern instead of a literal substring.
     pub regex: Option<bool>,
+    /// Optional relative path prefix scope, for example `src/` or `src/protocol`.
+    pub path_prefix: Option<String>,
+    /// Optional canonical language name such as `Rust`, `TypeScript`, `C#`, or `C++`.
+    pub language: Option<String>,
+    /// Optional maximum number of matches to return across all files (default 50).
+    pub limit: Option<u32>,
+    /// Optional maximum number of matches to return per file (default 5).
+    pub max_per_file: Option<u32>,
+    /// When true, include generated files in the result set.
+    pub include_generated: Option<bool>,
+    /// When true, include test files in the result set.
+    pub include_tests: Option<bool>,
+    /// Optional repo-relative include glob, for example `src/**/*.ts`.
+    pub glob: Option<String>,
+    /// Optional repo-relative exclude glob, for example `**/*.spec.ts`.
+    pub exclude_glob: Option<String>,
+    /// Optional symmetric number of surrounding lines to render around each match.
+    pub context: Option<u32>,
+    /// Optional case-sensitivity override. Literal mode defaults to false; regex mode defaults to true.
+    pub case_sensitive: Option<bool>,
+    /// When true, require whole-word matches for literal searches. Not supported with `regex=true`.
+    pub whole_word: Option<bool>,
 }
 
 /// Input for `search_files`.
@@ -302,6 +325,92 @@ fn parse_git_name_only_paths(output: &str) -> Vec<String> {
         .filter(|line| !line.is_empty())
         .map(|line| line.trim_matches('"').replace('\\', "/"))
         .collect()
+}
+
+fn parse_search_text_language_filter(input: Option<&str>) -> Result<Option<LanguageId>, String> {
+    let Some(language) = input.map(str::trim).filter(|language| !language.is_empty()) else {
+        return Ok(None);
+    };
+
+    let normalized = language.to_ascii_lowercase();
+    let parsed = match normalized.as_str() {
+        "rust" => Some(LanguageId::Rust),
+        "python" => Some(LanguageId::Python),
+        "javascript" => Some(LanguageId::JavaScript),
+        "typescript" => Some(LanguageId::TypeScript),
+        "go" => Some(LanguageId::Go),
+        "java" => Some(LanguageId::Java),
+        "c" => Some(LanguageId::C),
+        "c++" => Some(LanguageId::Cpp),
+        "c#" => Some(LanguageId::CSharp),
+        "ruby" => Some(LanguageId::Ruby),
+        "php" => Some(LanguageId::Php),
+        "swift" => Some(LanguageId::Swift),
+        "kotlin" => Some(LanguageId::Kotlin),
+        "dart" => Some(LanguageId::Dart),
+        "perl" => Some(LanguageId::Perl),
+        "elixir" => Some(LanguageId::Elixir),
+        _ => None,
+    };
+
+    parsed.map(Some).ok_or_else(|| {
+        "Unsupported language filter. Use one of: Rust, Python, JavaScript, TypeScript, Go, Java, C, C++, C#, Ruby, PHP, Swift, Kotlin, Dart, Perl, Elixir.".to_string()
+    })
+}
+
+fn normalize_search_text_path_prefix(input: Option<&str>) -> search::PathScope {
+    let Some(prefix) = input.map(str::trim).filter(|prefix| !prefix.is_empty()) else {
+        return search::PathScope::any();
+    };
+
+    let normalized = prefix
+        .replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .trim_end_matches('/')
+        .to_string();
+
+    if normalized.is_empty() {
+        search::PathScope::any()
+    } else {
+        search::PathScope::prefix(normalized)
+    }
+}
+
+fn normalize_search_text_glob(input: Option<&str>) -> Option<String> {
+    input
+        .map(str::trim)
+        .filter(|pattern| !pattern.is_empty())
+        .map(|pattern| {
+            pattern
+                .replace('\\', "/")
+                .trim_start_matches("./")
+                .trim_start_matches('/')
+                .to_string()
+        })
+        .filter(|pattern| !pattern.is_empty())
+}
+
+fn search_text_options_from_input(
+    input: &SearchTextInput,
+) -> Result<search::TextSearchOptions, String> {
+    Ok(search::TextSearchOptions {
+        path_scope: normalize_search_text_path_prefix(input.path_prefix.as_deref()),
+        search_scope: search::SearchScope::Code,
+        noise_policy: search::NoisePolicy {
+            include_generated: input.include_generated.unwrap_or(false),
+            include_tests: input.include_tests.unwrap_or(false),
+            include_vendor: true,
+        },
+        language_filter: parse_search_text_language_filter(input.language.as_deref())?,
+        total_limit: input.limit.unwrap_or(50) as usize,
+        max_per_file: input.max_per_file.unwrap_or(5) as usize,
+        glob: normalize_search_text_glob(input.glob.as_deref()),
+        exclude_glob: normalize_search_text_glob(input.exclude_glob.as_deref()),
+        context: input.context.map(|context| context as usize),
+        case_sensitive: input.case_sensitive,
+        whole_word: input.whole_word.unwrap_or(false),
+    })
 }
 
 fn sidecar_state_for_server(server: &TokenizorServer) -> SidecarState {
@@ -608,14 +717,19 @@ impl TokenizorServer {
         if let Some(result) = self.proxy_tool_call("search_text", &params.0).await {
             return result;
         }
+        let options = match search_text_options_from_input(&params.0) {
+            Ok(options) => options,
+            Err(message) => return message,
+        };
         let result = {
             let guard = self.index.read().expect("lock poisoned");
             loading_guard!(guard);
-            search::search_text(
+            search::search_text_with_options(
                 &guard,
                 params.0.query.as_deref(),
                 params.0.terms.as_deref(),
                 params.0.regex.unwrap_or(false),
+                &options,
             )
         };
         format::search_text_result_view(result)
@@ -1432,6 +1546,17 @@ mod tests {
                 query: Some("find".to_string()),
                 terms: None,
                 regex: None,
+                path_prefix: None,
+                language: None,
+                limit: None,
+                max_per_file: None,
+                include_generated: None,
+                include_tests: None,
+                glob: None,
+                exclude_glob: None,
+                context: None,
+                case_sensitive: None,
+                whole_word: None,
             }))
             .await;
         assert!(
@@ -1453,6 +1578,17 @@ mod tests {
                 query: None,
                 terms: Some(vec!["TODO".to_string(), "FIXME".to_string()]),
                 regex: None,
+                path_prefix: None,
+                language: None,
+                limit: None,
+                max_per_file: None,
+                include_generated: None,
+                include_tests: None,
+                glob: None,
+                exclude_glob: None,
+                context: None,
+                case_sensitive: None,
+                whole_word: None,
             }))
             .await;
         assert!(
@@ -1466,6 +1602,261 @@ mod tests {
         assert!(
             !result.contains("NOTE: ignored"),
             "unmatched line should be absent: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_text_hides_generated_and_test_noise_by_default() {
+        let server = make_server(make_live_index_ready(vec![
+            make_file("src/real.rs", b"needle visible", vec![]),
+            make_file("tests/generated/noise.rs", b"needle hidden", vec![]),
+        ]));
+        let result = server
+            .search_text(Parameters(super::SearchTextInput {
+                query: Some("needle".to_string()),
+                terms: None,
+                regex: None,
+                path_prefix: None,
+                language: None,
+                limit: None,
+                max_per_file: None,
+                include_generated: None,
+                include_tests: None,
+                glob: None,
+                exclude_glob: None,
+                context: None,
+                case_sensitive: None,
+                whole_word: None,
+            }))
+            .await;
+
+        assert!(result.contains("src/real.rs"), "expected visible file: {result}");
+        assert!(
+            !result.contains("tests/generated/noise.rs"),
+            "generated/test noise should be hidden by default: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_text_tool_respects_scope_language_and_caps() {
+        let mut ts_app = make_file("src/app.ts", b"needle one\nneedle two\nneedle three\n", vec![]);
+        ts_app.1.language = LanguageId::TypeScript;
+        let mut ts_lib = make_file("src/lib.ts", b"needle four\nneedle five\n", vec![]);
+        ts_lib.1.language = LanguageId::TypeScript;
+        let noise = make_file("tests/generated/noise.ts", b"needle hidden\nneedle hidden two\n", vec![]);
+        let rust = make_file("src/lib.rs", b"needle rust\nneedle rust two\n", vec![]);
+        let server = make_server(make_live_index_ready(vec![ts_app, ts_lib, noise, rust]));
+
+        let result = server
+            .search_text(Parameters(super::SearchTextInput {
+                query: Some("needle".to_string()),
+                terms: None,
+                regex: None,
+                path_prefix: Some("src".to_string()),
+                language: Some("TypeScript".to_string()),
+                limit: Some(3),
+                max_per_file: Some(2),
+                include_generated: Some(false),
+                include_tests: Some(false),
+                glob: None,
+                exclude_glob: None,
+                context: None,
+                case_sensitive: None,
+                whole_word: None,
+            }))
+            .await;
+
+        assert!(result.contains("src/app.ts"), "expected app.ts: {result}");
+        assert!(result.contains("src/lib.ts"), "expected lib.ts: {result}");
+        assert!(!result.contains("needle three"), "per-file cap should truncate app.ts: {result}");
+        assert!(!result.contains("needle five"), "total cap should truncate final result set: {result}");
+        assert!(
+            !result.contains("tests/generated/noise.ts"),
+            "noise file should be excluded: {result}"
+        );
+        assert!(!result.contains("src/lib.rs"), "language filter should exclude Rust: {result}");
+    }
+
+    #[tokio::test]
+    async fn test_search_text_tool_context_renders_windows() {
+        let server = make_server(make_live_index_ready(vec![make_file(
+            "src/lib.rs",
+            b"line 1\nline 2\nneedle 3\nline 4\nneedle 5\nline 6\nline 7\nline 8\nneedle 9\nline 10\n",
+            vec![],
+        )]));
+
+        let result = server
+            .search_text(Parameters(super::SearchTextInput {
+                query: Some("needle".to_string()),
+                terms: None,
+                regex: None,
+                path_prefix: None,
+                language: None,
+                limit: None,
+                max_per_file: None,
+                include_generated: None,
+                include_tests: None,
+                glob: None,
+                exclude_glob: None,
+                context: Some(1),
+                case_sensitive: None,
+                whole_word: None,
+            }))
+            .await;
+
+        assert!(result.contains("  2: line 2"), "context line missing: {result}");
+        assert!(result.contains("> 3: needle 3"), "match marker missing: {result}");
+        assert!(result.contains("  ..."), "separator missing: {result}");
+    }
+
+    #[tokio::test]
+    async fn test_search_text_tool_respects_glob_and_exclude_glob() {
+        let server = make_server(make_live_index_ready(vec![
+            make_file("src/app.ts", b"needle app\n", vec![]),
+            make_file("src/app.spec.ts", b"needle spec\n", vec![]),
+            make_file("src/nested/feature.ts", b"needle nested\n", vec![]),
+            make_file("src/lib.rs", b"needle rust\n", vec![]),
+        ]));
+
+        let result = server
+            .search_text(Parameters(super::SearchTextInput {
+                query: Some("needle".to_string()),
+                terms: None,
+                regex: None,
+                path_prefix: Some("src".to_string()),
+                language: None,
+                limit: None,
+                max_per_file: None,
+                include_generated: None,
+                include_tests: None,
+                glob: Some("src/**/*.ts".to_string()),
+                exclude_glob: Some("**/*.spec.ts".to_string()),
+                context: None,
+                case_sensitive: None,
+                whole_word: None,
+            }))
+            .await;
+
+        assert!(result.contains("src/app.ts"), "expected app.ts: {result}");
+        assert!(
+            result.contains("src/nested/feature.ts"),
+            "expected nested ts file: {result}"
+        );
+        assert!(
+            !result.contains("src/app.spec.ts"),
+            "exclude_glob should suppress spec file: {result}"
+        );
+        assert!(
+            !result.contains("src/lib.rs"),
+            "include glob should suppress rust file: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_text_tool_reports_invalid_glob() {
+        let server = make_server(make_live_index_ready(vec![make_file(
+            "src/app.ts",
+            b"needle app\n",
+            vec![],
+        )]));
+
+        let result = server
+            .search_text(Parameters(super::SearchTextInput {
+                query: Some("needle".to_string()),
+                terms: None,
+                regex: None,
+                path_prefix: None,
+                language: None,
+                limit: None,
+                max_per_file: None,
+                include_generated: None,
+                include_tests: None,
+                glob: Some("[".to_string()),
+                exclude_glob: None,
+                context: None,
+                case_sensitive: None,
+                whole_word: None,
+            }))
+            .await;
+
+        assert!(
+            result.contains("Invalid glob for `glob`"),
+            "expected invalid glob error, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_text_tool_respects_case_sensitive_and_whole_word() {
+        let server = make_server(make_live_index_ready(vec![make_file(
+            "src/lib.rs",
+            b"Needle\nneedle\nNeedleCase\nNeedle suffix\n",
+            vec![],
+        )]));
+
+        let result = server
+            .search_text(Parameters(super::SearchTextInput {
+                query: Some("Needle".to_string()),
+                terms: None,
+                regex: None,
+                path_prefix: None,
+                language: None,
+                limit: None,
+                max_per_file: None,
+                include_generated: None,
+                include_tests: None,
+                glob: None,
+                exclude_glob: None,
+                context: None,
+                case_sensitive: Some(true),
+                whole_word: Some(true),
+            }))
+            .await;
+
+        assert!(result.contains("  1: Needle"), "exact whole-word match missing: {result}");
+        assert!(
+            result.contains("  4: Needle suffix"),
+            "whole-word prefix match on a line should remain visible: {result}"
+        );
+        assert!(
+            !result.contains("  2: needle"),
+            "case-sensitive search should exclude lowercase line: {result}"
+        );
+        assert!(
+            !result.contains("  3: NeedleCase"),
+            "whole-word search should exclude embedded identifier match: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_text_tool_reports_regex_whole_word_rejection() {
+        let server = make_server(make_live_index_ready(vec![make_file(
+            "src/lib.rs",
+            b"needle\n",
+            vec![],
+        )]));
+
+        let result = server
+            .search_text(Parameters(super::SearchTextInput {
+                query: Some("needle".to_string()),
+                terms: None,
+                regex: Some(true),
+                path_prefix: None,
+                language: None,
+                limit: None,
+                max_per_file: None,
+                include_generated: None,
+                include_tests: None,
+                glob: None,
+                exclude_glob: None,
+                context: None,
+                case_sensitive: None,
+                whole_word: Some(true),
+            }))
+            .await;
+
+        assert!(
+            result.contains("whole_word is not supported when `regex=true`"),
+            "expected regex/whole_word rejection, got: {result}"
         );
     }
 

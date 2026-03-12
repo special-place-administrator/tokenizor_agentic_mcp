@@ -2,7 +2,7 @@
 doc_type: task
 task_id: 77
 title: Phase 3 search_text scope filter shell
-status: in_progress
+status: done
 sprint: tokenizor-upgrade-foundation
 parent_plan: 04-P-phase-plan.md
 prev_task: 76-T-phase3-scoped-search-contract-research.md
@@ -47,7 +47,14 @@ updated: 2026-03-12
 
 ## Completion Notes
 
-- pending
+- added the first public scoped `search_text` shell over the code lane by extending the tool input with `path_prefix`, `language`, `limit`, `max_per_file`, `include_generated`, and `include_tests`
+- wired the tool layer into `TextSearchOptions` so scoped searches stay deterministic with default caps of `limit=50` and `max_per_file=5`
+- made current-code searches exclude generated and test noise by default while still allowing explicit opt-in
+- kept the output shape unchanged and left alias keywords such as `ts` and `js` deferred
+- verification run for this task:
+  - `cargo test search_text -- --nocapture`
+  - `cargo test test_current_code_text_search_options_are_explicit -- --nocapture`
+  - `cargo test`
 
 ## Carry Forward To Next Task
 
@@ -58,6 +65,7 @@ Next task:
 Carry forward:
 
 - keep the first Phase 3 implementation code-lane only and avoid expanding into context-window formatting yet
+- preserve canonical language-name filtering only until a later task explicitly adds alias support
 
 Open points:
 

@@ -765,7 +765,7 @@ fn test_persist_round_trip() {
     let snapshot =
         persist::load_snapshot(dir.path()).expect("snapshot should be loadable after serialize");
 
-    assert_eq!(snapshot.version, 1, "snapshot version should be 1");
+    assert_eq!(snapshot.version, 2, "snapshot version should match current schema");
     assert_eq!(snapshot.files.len(), 2, "snapshot should contain 2 files");
     assert!(
         snapshot.files.contains_key("main.rs"),

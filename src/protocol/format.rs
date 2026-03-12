@@ -252,6 +252,16 @@ pub fn search_text_result_view(
         Err(search::TextSearchError::InvalidRegex { pattern, error }) => {
             return format!("Invalid regex '{pattern}': {error}");
         }
+        Err(search::TextSearchError::InvalidGlob {
+            field,
+            pattern,
+            error,
+        }) => {
+            return format!("Invalid glob for `{field}` ('{pattern}'): {error}");
+        }
+        Err(search::TextSearchError::UnsupportedWholeWordRegex) => {
+            return "whole_word is not supported when `regex=true`.".to_string();
+        }
     };
 
     if result.files.is_empty() {
@@ -265,8 +275,22 @@ pub fn search_text_result_view(
     )];
     for file in &result.files {
         lines.push(file.path.clone());
-        for line_match in &file.matches {
-            lines.push(format!("  {}: {}", line_match.line_number, line_match.line));
+        if let Some(rendered_lines) = &file.rendered_lines {
+            for rendered_line in rendered_lines {
+                match rendered_line {
+                    search::TextDisplayLine::Separator => lines.push("  ...".to_string()),
+                    search::TextDisplayLine::Line(rendered_line) => lines.push(format!(
+                        "{} {}: {}",
+                        if rendered_line.is_match { ">" } else { " " },
+                        rendered_line.line_number,
+                        rendered_line.line
+                    )),
+                }
+            }
+        } else {
+            for line_match in &file.matches {
+                lines.push(format!("  {}: {}", line_match.line_number, line_match.line));
+            }
         }
     }
     lines.join("\n")
@@ -1582,6 +1606,34 @@ mod tests {
             !result.contains("NOTE: ignored"),
             "non-matching line should be absent: {result}"
         );
+    }
+
+    #[test]
+    fn test_search_text_result_view_renders_context_windows_with_separators() {
+        let (key, file) = make_file(
+            "src/lib.rs",
+            b"line 1\nline 2\nneedle 3\nline 4\nneedle 5\nline 6\nline 7\nline 8\nneedle 9\nline 10\n",
+            vec![],
+        );
+        let index = make_index(vec![(key, file)]);
+        let result = search::search_text_with_options(
+            &index,
+            Some("needle"),
+            None,
+            false,
+            &search::TextSearchOptions {
+                context: Some(1),
+                ..search::TextSearchOptions::for_current_code_search()
+            },
+        );
+
+        let rendered = search_text_result_view(result);
+
+        assert!(rendered.contains("src/lib.rs"), "file header missing: {rendered}");
+        assert!(rendered.contains("  2: line 2"), "context line missing: {rendered}");
+        assert!(rendered.contains("> 3: needle 3"), "match marker missing: {rendered}");
+        assert!(rendered.contains("  ..."), "window separator missing: {rendered}");
+        assert!(rendered.contains("> 9: needle 9"), "later match missing: {rendered}");
     }
 
     // --- repo_outline tests ---
