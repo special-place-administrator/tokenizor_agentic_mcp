@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.13.0...v0.13.1) (2026-03-13)
+
+
+### Bug Fixes
+
+* include tool description rewrites in release ([afbad0c](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/afbad0cfeb117ff29a9b77d2673531ceff0941cb))
+
 ## [0.13.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.12.0...v0.13.0) (2026-03-13)
 
 
