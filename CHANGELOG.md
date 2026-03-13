@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.17.0...v0.17.1) (2026-03-13)
+
+
+### Bug Fixes
+
+* resolve all actionable issues from external review ([3e11288](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/3e112880a6802182bf59c5159373fc3ab636a240))
+
 ## [0.17.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.16.2...v0.17.0) (2026-03-13)
 
 
