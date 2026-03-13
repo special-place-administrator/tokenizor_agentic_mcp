@@ -144,7 +144,7 @@ impl TokenizorServer {
                 .await
             }
             ResourceRequest::FileContext { path, max_tokens } => {
-                self.get_file_context(Parameters(GetFileContextInput { path, max_tokens }))
+                self.get_file_context(Parameters(GetFileContextInput { path, max_tokens, sections: None }))
                     .await
             }
             ResourceRequest::FileContent {
@@ -184,6 +184,7 @@ impl TokenizorServer {
                     path: None,
                     symbol_kind: None,
                     symbol_line: None,
+                    verbosity: None,
                 }))
                 .await
             }

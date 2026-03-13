@@ -26,6 +26,10 @@ pub struct OutlineParams {
     pub path: String,
     /// Optional token budget override. Default: 200 tokens (800 bytes).
     pub max_tokens: Option<u64>,
+    /// Optional list of sections to include: "outline", "imports", "consumers", "references", "git".
+    /// When `None`, all sections are included.
+    #[serde(default)]
+    pub sections: Option<Vec<String>>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -160,6 +164,13 @@ fn outline_text(
     let file_bytes = file.byte_len;
     let language = format!("{:?}", file.language);
 
+    let include_section = |name: &str| -> bool {
+        match &params.sections {
+            None => true,
+            Some(list) => list.iter().any(|s| s.eq_ignore_ascii_case(name)),
+        }
+    };
+
     // Build symbol outline lines.
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!(
@@ -169,21 +180,23 @@ fn outline_text(
         language
     ));
 
-    for sym in &file.symbols {
-        let indent = "  ".repeat(sym.depth as usize);
-        lines.push(format!(
-            "{}  {:<10} {}  L{}-{}",
-            indent,
-            sym.kind.to_string(),
-            sym.name,
-            sym.line_range.0,
-            sym.line_range.1,
-        ));
+    if include_section("outline") {
+        for sym in &file.symbols {
+            let indent = "  ".repeat(sym.depth as usize);
+            lines.push(format!(
+                "{}  {:<10} {}  L{}-{}",
+                indent,
+                sym.kind.to_string(),
+                sym.name,
+                sym.line_range.0,
+                sym.line_range.1,
+            ));
+        }
     }
 
     // Build "Imports from" section.
     // Group import references by source (qualified_name or name), count per source.
-    {
+    if include_section("imports") {
         let mut import_sources: std::collections::HashMap<&str, usize> =
             std::collections::HashMap::new();
         for reference in &file.references {
@@ -212,7 +225,7 @@ fn outline_text(
     // Build "Used by" section.
     // Group dependents by consuming file, count references per consumer.
     let attributed_dependents = guard.find_dependents_for_file(&params.path);
-    {
+    if include_section("consumers") {
         let mut consumers: std::collections::HashMap<&str, usize> =
             std::collections::HashMap::new();
         for (file_path, _) in &attributed_dependents {
@@ -234,34 +247,36 @@ fn outline_text(
 
     // Build "Key references" section.
     // Rank symbols by caller count descending, take top 5, show up to 3 callers each.
-    let mut symbol_callers: Vec<(String, Vec<(String, u32)>)> = Vec::new();
+    if include_section("references") {
+        let mut symbol_callers: Vec<(String, Vec<(String, u32)>)> = Vec::new();
 
-    for sym in &file.symbols {
-        let external_callers: Vec<(String, u32)> = attributed_dependents
-            .iter()
-            .filter(|(_, reference)| {
-                reference.kind != ReferenceKind::Import && reference.name == sym.name
-            })
-            .map(|(fp, r)| (fp.to_string(), r.line_range.0))
-            .take(3)
-            .collect();
+        for sym in &file.symbols {
+            let external_callers: Vec<(String, u32)> = attributed_dependents
+                .iter()
+                .filter(|(_, reference)| {
+                    reference.kind != ReferenceKind::Import && reference.name == sym.name
+                })
+                .map(|(fp, r)| (fp.to_string(), r.line_range.0))
+                .take(3)
+                .collect();
 
-        if !external_callers.is_empty() {
-            symbol_callers.push((sym.name.clone(), external_callers));
+            if !external_callers.is_empty() {
+                symbol_callers.push((sym.name.clone(), external_callers));
+            }
         }
-    }
 
-    // Sort by caller count descending, take top 5.
-    symbol_callers.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
-    symbol_callers.truncate(5);
+        // Sort by caller count descending, take top 5.
+        symbol_callers.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        symbol_callers.truncate(5);
 
-    if !symbol_callers.is_empty() {
-        lines.push(String::new());
-        lines.push("Key references:".to_string());
-        for (sym_name, callers) in &symbol_callers {
-            lines.push(format!("  {}()", sym_name));
-            for (caller_file, caller_line) in callers {
-                lines.push(format!("    {}  line {}", caller_file, caller_line));
+        if !symbol_callers.is_empty() {
+            lines.push(String::new());
+            lines.push("Key references:".to_string());
+            for (sym_name, callers) in &symbol_callers {
+                lines.push(format!("  {}()", sym_name));
+                for (caller_file, caller_line) in callers {
+                    lines.push(format!("    {}  line {}", caller_file, caller_line));
+                }
             }
         }
     }
@@ -269,7 +284,7 @@ fn outline_text(
     drop(guard);
 
     // Build "Git activity" section from temporal intelligence.
-    {
+    if include_section("git") {
         use crate::live_index::git_temporal::{
             GitTemporalState, churn_bar, churn_label, relative_time,
         };
@@ -931,6 +946,7 @@ async fn prompt_context_text(
                 &OutlineParams {
                     path: file_hint.path,
                     max_tokens: Some(160),
+                    sections: None,
                 },
                 options,
             );
@@ -1583,6 +1599,7 @@ mod tests {
         let params = OutlineParams {
             path: "src/foo.rs".to_string(),
             max_tokens: None,
+            sections: None,
         };
         let result = outline_handler(State(state), Query(params)).await.unwrap();
         assert!(
@@ -1609,6 +1626,7 @@ mod tests {
         let params = OutlineParams {
             path: "nonexistent.rs".to_string(),
             max_tokens: None,
+            sections: None,
         };
         let err = outline_handler(State(state), Query(params))
             .await
@@ -1635,6 +1653,7 @@ mod tests {
         let params = OutlineParams {
             path: "src/big.rs".to_string(),
             max_tokens: Some(10), // tiny budget to force truncation
+            sections: None,
         };
         let result = outline_handler(State(state), Query(params)).await.unwrap();
         // With 10-token (40 byte) budget, only the header fits. Truncation suffix should appear.
@@ -1659,6 +1678,7 @@ mod tests {
         let params = OutlineParams {
             path: "src/foo.rs".to_string(),
             max_tokens: None,
+            sections: None,
         };
         let _ = outline_handler(State(state), Query(params)).await.unwrap();
         assert_eq!(

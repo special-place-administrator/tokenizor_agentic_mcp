@@ -237,6 +237,9 @@ pub struct SearchTextInput {
     /// When true, for each match include a compact list of callers of the enclosing symbol.
     #[serde(default, deserialize_with = "lenient_bool")]
     pub follow_refs: Option<bool>,
+    /// Max number of file matches to enrich with callers when follow_refs=true (default 3).
+    #[serde(default, deserialize_with = "lenient_u32")]
+    pub follow_refs_limit: Option<u32>,
 }
 
 /// Input for `search_files`.
@@ -340,6 +343,9 @@ pub struct FindReferencesInput {
     /// Maximum number of reference hits per file (default 10, capped at 50).
     #[serde(default, deserialize_with = "lenient_u32")]
     pub max_per_file: Option<u32>,
+    /// When true, show compact output: file:line [kind] in symbol — no source text (60-75% smaller).
+    #[serde(default, deserialize_with = "lenient_bool")]
+    pub compact: Option<bool>,
 }
 
 /// Input for `find_dependents`.
@@ -355,6 +361,9 @@ pub struct FindDependentsInput {
     pub max_per_file: Option<u32>,
     /// Output format: "text" (default), "mermaid", or "dot".
     pub format: Option<String>,
+    /// When true, show compact output: file:line [kind] without source text (60-75% smaller).
+    #[serde(default, deserialize_with = "lenient_bool")]
+    pub compact: Option<bool>,
 }
 
 /// Input for `find_implementations`.
@@ -391,6 +400,8 @@ pub struct GetContextBundleInput {
     /// Optional selected symbol line from `search_symbols`.
     #[serde(default, deserialize_with = "lenient_u32")]
     pub symbol_line: Option<u32>,
+    /// Output verbosity: "signature" (name+params+return only, ~80% smaller), "compact" (signature + first doc line), "full" (default — complete body).
+    pub verbosity: Option<String>,
 }
 
 /// Input for `get_file_context`.
@@ -401,6 +412,9 @@ pub struct GetFileContextInput {
     /// Optional max token budget, matching hook behavior.
     #[serde(default, deserialize_with = "lenient_u64")]
     pub max_tokens: Option<u64>,
+    /// Optional list of sections to include. Allowed values: "outline", "imports", "consumers", "references", "git". Omit to include all sections.
+    #[serde(default)]
+    pub sections: Option<Vec<String>>,
 }
 
 /// Input for `get_symbol_context`.
@@ -417,6 +431,8 @@ pub struct GetSymbolContextInput {
     /// Optional selected symbol line from `search_symbols`.
     #[serde(default, deserialize_with = "lenient_u32")]
     pub symbol_line: Option<u32>,
+    /// Output verbosity: "signature" (name+params+return only, ~80% smaller), "compact" (signature + first doc line), "full" (default — complete body).
+    pub verbosity: Option<String>,
 }
 
 /// Input for `analyze_file_impact`.
@@ -444,6 +460,8 @@ pub struct TraceSymbolInput {
     /// Optional list of output sections to include. When omitted, all sections are included.
     /// Valid values: "dependents", "siblings", "implementations", "git".
     pub sections: Option<Vec<String>>,
+    /// Output verbosity: "signature" (name+params+return only, ~80% smaller), "compact" (signature + first doc line), "full" (default — complete body).
+    pub verbosity: Option<String>,
 }
 
 /// Input for `inspect_match`.
@@ -694,10 +712,11 @@ fn search_text_options_from_input(
 fn enrich_with_callers(
     index: &crate::live_index::LiveIndex,
     result: &mut search::TextSearchResult,
+    file_limit: usize,
 ) {
     use std::collections::HashSet;
 
-    for file_matches in &mut result.files {
+    for file_matches in result.files.iter_mut().take(file_limit) {
         // Collect unique enclosing symbol names from this file's matches
         let mut symbol_names: HashSet<String> = HashSet::new();
         for m in &file_matches.matches {
@@ -1135,7 +1154,7 @@ impl TokenizorServer {
     /// that import this one), key references, and git activity (churn score, ownership, co-change coupling,
     /// last commit). Use this to understand a file's role and relationships before editing it.
     #[tool(
-        description = "Rich file summary: symbol outline, imports, consumers, references, and git activity (churn, ownership, co-changes). Use to understand a file's role before editing. Much smaller than reading the raw file."
+        description = "Rich file summary: symbol outline, imports, consumers, references, and git activity (churn, ownership, co-changes). Use sections=['outline','imports'] to request only specific parts (allowed: outline, imports, consumers, references, git). Omit sections for all. Use to understand a file's role before editing. Much smaller than reading the raw file."
     )]
     pub(crate) async fn get_file_context(&self, params: Parameters<GetFileContextInput>) -> String {
         if let Some(result) = self.proxy_tool_call("get_file_context", &params.0).await {
@@ -1156,6 +1175,7 @@ impl TokenizorServer {
         let outline = OutlineParams {
             path: params.0.path.clone(),
             max_tokens: params.0.max_tokens,
+            sections: params.0.sections.clone(),
         };
         match outline_tool_text(&state, &outline) {
             Ok(result) => {
@@ -1174,7 +1194,7 @@ impl TokenizorServer {
     /// callees, and type usages. Heavier than get_symbol (which only returns the source body) — use this when
     /// you need to understand how a symbol is used across the codebase, not just what it contains.
     #[tool(
-        description = "Deep context for a symbol: definition, callers (grouped by file with enclosing symbols), callees, type usages. Heavier than get_symbol (source body only) — use when you need to understand usage across the codebase."
+        description = "Deep context for a symbol: definition, callers (grouped by file with enclosing symbols), callees, type usages. Set verbosity='signature' for name+params+return only (~80% smaller) or 'compact' for signature + first doc line. Default 'full' returns complete body. Heavier than get_symbol (source body only) — use when you need to understand usage across the codebase."
     )]
     pub(crate) async fn get_symbol_context(
         &self,
@@ -1283,7 +1303,7 @@ impl TokenizorServer {
     /// (filter out imports/comments); follow_refs=true (inline callers of each matched symbol). For finding
     /// symbols by name, use search_symbols instead. For finding files by path, use search_files.
     #[tool(
-        description = "Full-text search across file contents (literal, OR-terms, or regex). Shows matches with enclosing symbol context. group_by='symbol'|'usage' to deduplicate; follow_refs=true for callers. For symbol name search use search_symbols; for file path search use search_files."
+        description = "Full-text search across file contents (literal, OR-terms, or regex). Shows matches with enclosing symbol context. group_by='symbol'|'usage' to deduplicate; follow_refs=true to inline callers (default: first 3 files only — set follow_refs_limit to adjust). For symbol name search use search_symbols; for file path search use search_files."
     )]
     pub(crate) async fn search_text(&self, params: Parameters<SearchTextInput>) -> String {
         if let Some(result) = self.proxy_tool_call("search_text", &params.0).await {
@@ -1306,7 +1326,8 @@ impl TokenizorServer {
             // Enrich with callers if follow_refs is set
             if params.0.follow_refs.unwrap_or(false) {
                 if let Ok(ref mut text_result) = r {
-                    enrich_with_callers(&guard, text_result);
+                    let limit = params.0.follow_refs_limit.unwrap_or(3) as usize;
+                    enrich_with_callers(&guard, text_result, limit);
                 }
             }
             r
@@ -1319,7 +1340,7 @@ impl TokenizorServer {
     /// Heavier than get_symbol_context (which shows callers only) or get_symbol (source body only).
     /// Use when you need the complete picture of a symbol before refactoring or understanding control flow.
     #[tool(
-        description = "Most comprehensive symbol analysis: definition, callers, callees, trait implementations, type dependencies, git activity — all in one call. Requires exact path + name. Heavier than get_symbol_context (callers only) or get_symbol (body only). Use for complete picture before refactoring."
+        description = "Most comprehensive symbol analysis: definition, callers, callees, trait implementations, type dependencies, git activity — all in one call. Requires exact path + name. Set verbosity='signature' (~80% smaller) or 'compact' (signature + doc). Use sections=['dependents','git'] to limit output. Heavier than get_symbol_context (callers only) or get_symbol (body only). Use for complete picture before refactoring."
     )]
     pub(crate) async fn trace_symbol(&self, params: Parameters<TraceSymbolInput>) -> String {
         if let Some(result) = self.proxy_tool_call("trace_symbol", &params.0).await {
@@ -1381,7 +1402,8 @@ impl TokenizorServer {
             }
         }
 
-        format::trace_symbol_result_view(&trace_view, &params.0.name)
+        let verbosity = params.0.verbosity.as_deref().unwrap_or("full");
+        format::trace_symbol_result_view(&trace_view, &params.0.name, verbosity)
     }
 
     /// Deep-dive into a specific line from search_text results. Given a file path and line number, shows
@@ -1658,7 +1680,7 @@ impl TokenizorServer {
 
     /// Find all references (call sites, imports, type usages) for a symbol across the codebase.
     #[tool(
-        description = "Find all references (call sites, imports, type usages) for a symbol, grouped by file with enclosing-symbol annotations. Lighter than get_symbol_context (no callee/type resolution) or trace_symbol (no git/implementations). Use when you just need 'who calls this?'."
+        description = "Find all references (call sites, imports, type usages) for a symbol, grouped by file with enclosing-symbol annotations and source text. Set compact=true for location-only output without source text (60-75% smaller). Lighter than get_symbol_context (no callee/type resolution) or trace_symbol (no git/implementations). Use when you just need 'who calls this?'."
     )]
     pub(crate) async fn find_references(&self, params: Parameters<FindReferencesInput>) -> String {
         if let Some(result) = self.proxy_tool_call("find_references", &params.0).await {
@@ -1683,6 +1705,9 @@ impl TokenizorServer {
         let limits =
             format::OutputLimits::new(input.limit.unwrap_or(20), input.max_per_file.unwrap_or(10));
         match result {
+            Ok(view) if input.compact.unwrap_or(false) => {
+                format::find_references_compact_view(&view, &input.name, &limits)
+            }
             Ok(view) => format::find_references_result_view(&view, &input.name, &limits),
             Err(error) => error,
         }
@@ -1692,7 +1717,7 @@ impl TokenizorServer {
     /// with context. Supports text, Mermaid flowchart, or Graphviz DOT output via format parameter.
     /// Unlike find_references (symbol-level), this works at file-module granularity.
     #[tool(
-        description = "File-level dependency graph: which files import the given file. Shows import lines with context. Supports text/Mermaid/Graphviz output. Unlike find_references (symbol-level), this is file-module granularity."
+        description = "File-level dependency graph: which files import the given file. Shows import lines with source context. Supports text/Mermaid/Graphviz output. Set compact=true for location-only output without source text (60-75% smaller). Unlike find_references (symbol-level), this is file-module granularity."
     )]
     pub(crate) async fn find_dependents(&self, params: Parameters<FindDependentsInput>) -> String {
         if let Some(result) = self.proxy_tool_call("find_dependents", &params.0).await {
@@ -1710,6 +1735,9 @@ impl TokenizorServer {
         match fmt {
             "mermaid" => format::find_dependents_mermaid(&view, &input.path, &limits),
             "dot" => format::find_dependents_dot(&view, &input.path, &limits),
+            _ if input.compact.unwrap_or(false) => {
+                format::find_dependents_compact_view(&view, &input.path, &limits)
+            }
             _ => format::find_dependents_result_view(&view, &input.path, &limits),
         }
     }
@@ -1761,7 +1789,7 @@ impl TokenizorServer {
 
     /// Get full context for a symbol: definition body, callers, callees, and type usages in one call.
     #[tool(
-        description = "One-call context package: symbol body + full definitions of all referenced custom types, resolved recursively to depth 2. Use before editing a function to see its signature types. Heavier than get_symbol (body only), lighter than trace_symbol (no callers/git)."
+        description = "One-call context package: symbol body + full definitions of all referenced custom types, resolved recursively to depth 2. Set verbosity='signature' (~80% smaller) or 'compact' (signature + doc) to reduce body output. Use before editing a function to see its signature types. Heavier than get_symbol (body only), lighter than trace_symbol (no callers/git)."
     )]
     pub(crate) async fn get_context_bundle(
         &self,
@@ -1786,7 +1814,8 @@ impl TokenizorServer {
             );
             (v, raw)
         };
-        let result = format::context_bundle_result_view(&view);
+        let verbosity = input.verbosity.as_deref().unwrap_or("full");
+        let result = format::context_bundle_result_view(&view, verbosity);
         let footer = format::compact_savings_footer(result.len(), raw_chars);
         format!("{result}{footer}")
     }
@@ -2403,6 +2432,7 @@ mod tests {
             .get_file_context(Parameters(super::GetFileContextInput {
                 path: "src/target.rs".to_string(),
                 max_tokens: None,
+                sections: None,
             }))
             .await;
 
@@ -2456,6 +2486,7 @@ mod tests {
             .get_file_context(Parameters(super::GetFileContextInput {
                 path: "src/caller.rs".to_string(),
                 max_tokens: Some(2000),
+                sections: None,
             }))
             .await;
         assert!(
@@ -2472,6 +2503,7 @@ mod tests {
             .get_file_context(Parameters(super::GetFileContextInput {
                 path: "src/target.rs".to_string(),
                 max_tokens: Some(2000),
+                sections: None,
             }))
             .await;
         assert!(
@@ -2509,6 +2541,7 @@ mod tests {
             .get_file_context(Parameters(super::GetFileContextInput {
                 path: "src/target.py".to_string(),
                 max_tokens: None,
+                sections: None,
             }))
             .await;
 
@@ -2543,6 +2576,7 @@ mod tests {
                 path: None,
                 symbol_kind: None,
                 symbol_line: None,
+                verbosity: None,
             }))
             .await;
 
@@ -2593,6 +2627,7 @@ mod tests {
                 path: Some("src/db.rs".to_string()),
                 symbol_kind: Some("fn".to_string()),
                 symbol_line: Some(1),
+                verbosity: None,
             }))
             .await;
 
@@ -2625,6 +2660,7 @@ mod tests {
                 path: Some("src/db.rs".to_string()),
                 symbol_kind: Some("fn".to_string()),
                 symbol_line: None,
+                verbosity: None,
             }))
             .await;
 
@@ -2682,6 +2718,7 @@ mod tests {
                 path: Some("src/db.rs".to_string()),
                 symbol_kind: Some("fn".to_string()),
                 symbol_line: Some(1),
+                verbosity: None,
             }))
             .await;
 
@@ -3072,6 +3109,7 @@ mod tests {
                 whole_word: None,
                 group_by: None,
                 follow_refs: None,
+                follow_refs_limit: None,
             }))
             .await;
         assert!(
@@ -3106,6 +3144,7 @@ mod tests {
                 whole_word: None,
                 group_by: None,
                 follow_refs: None,
+                follow_refs_limit: None,
             }))
             .await;
         assert!(
@@ -3146,6 +3185,7 @@ mod tests {
                 whole_word: None,
                 group_by: None,
                 follow_refs: None,
+                follow_refs_limit: None,
             }))
             .await;
 
@@ -3195,6 +3235,7 @@ mod tests {
                 whole_word: None,
                 group_by: None,
                 follow_refs: None,
+                follow_refs_limit: None,
             }))
             .await;
 
@@ -3244,6 +3285,7 @@ mod tests {
                 whole_word: None,
                 group_by: None,
                 follow_refs: None,
+                follow_refs_limit: None,
             }))
             .await;
 
@@ -3285,6 +3327,7 @@ mod tests {
                 whole_word: None,
                 group_by: None,
                 follow_refs: None,
+                follow_refs_limit: None,
             }))
             .await;
 
@@ -3329,6 +3372,7 @@ mod tests {
                 whole_word: None,
                 group_by: None,
                 follow_refs: None,
+                follow_refs_limit: None,
             }))
             .await;
 
@@ -3364,6 +3408,7 @@ mod tests {
                 whole_word: Some(true),
                 group_by: None,
                 follow_refs: None,
+                follow_refs_limit: None,
             }))
             .await;
 
@@ -3411,6 +3456,7 @@ mod tests {
                 whole_word: Some(true),
                 group_by: None,
                 follow_refs: None,
+                follow_refs_limit: None,
             }))
             .await;
 
@@ -4334,6 +4380,7 @@ mod tests {
                 kind: None,
                 symbol_line: None,
                 sections: None,
+                verbosity: None,
             }))
             .await;
 
@@ -4412,6 +4459,7 @@ mod tests {
                 symbol_line: None,
                 limit: None,
                 max_per_file: None,
+                compact: None,
             }))
             .await;
         assert_eq!(result, crate::protocol::format::empty_guard_message());
@@ -4426,6 +4474,7 @@ mod tests {
                 limit: None,
                 max_per_file: None,
                 format: None,
+                compact: None,
             }))
             .await;
         assert_eq!(result, crate::protocol::format::empty_guard_message());
@@ -4440,6 +4489,7 @@ mod tests {
                 name: "process".to_string(),
                 kind: None,
                 symbol_line: None,
+                verbosity: None,
             }))
             .await;
         assert_eq!(result, crate::protocol::format::empty_guard_message());
@@ -4454,6 +4504,7 @@ mod tests {
                 name: "process".to_string(),
                 kind: None,
                 symbol_line: None,
+                verbosity: None,
             }))
             .await;
         assert!(result.contains("File not found"), "got: {result}");
@@ -4498,6 +4549,7 @@ mod tests {
                 name: "connect".to_string(),
                 kind: Some("fn".to_string()),
                 symbol_line: Some(2),
+                verbosity: None,
             }))
             .await;
 
@@ -4529,6 +4581,7 @@ mod tests {
                 name: "connect".to_string(),
                 kind: Some("fn".to_string()),
                 symbol_line: None,
+                verbosity: None,
             }))
             .await;
 
@@ -4552,6 +4605,7 @@ mod tests {
                 symbol_line: None,
                 limit: None,
                 max_per_file: None,
+                compact: None,
             }))
             .await;
         // Should get "No references found" not a guard message
@@ -4597,6 +4651,7 @@ mod tests {
                 symbol_line: Some(1),
                 limit: None,
                 max_per_file: None,
+                compact: None,
             }))
             .await;
 
@@ -4631,6 +4686,7 @@ mod tests {
                 symbol_line: None,
                 limit: None,
                 max_per_file: None,
+                compact: None,
             }))
             .await;
 
@@ -4651,6 +4707,7 @@ mod tests {
                 limit: None,
                 max_per_file: None,
                 format: None,
+                compact: None,
             }))
             .await;
         assert!(result.contains("No dependents found"), "got: {result}");
@@ -4724,6 +4781,7 @@ mod tests {
                 whole_word: None,
                 group_by: None,
                 follow_refs: None,
+                follow_refs_limit: None,
             }))
             .await;
         assert!(
@@ -4760,6 +4818,7 @@ mod tests {
                 whole_word: None,
                 group_by: Some("symbol".to_string()),
                 follow_refs: None,
+                follow_refs_limit: None,
             }))
             .await;
         // With group_by: "symbol", should show symbol name and match count
@@ -4797,6 +4856,7 @@ mod tests {
                 whole_word: None,
                 group_by: Some("usage".to_string()),
                 follow_refs: None,
+                follow_refs_limit: None,
             }))
             .await;
         // Should exclude the "use" import line
@@ -4867,6 +4927,7 @@ mod tests {
                 whole_word: None,
                 group_by: None,
                 follow_refs: Some(true),
+                follow_refs_limit: None,
             }))
             .await;
         // Should show that connect() is called by handler() in src/api.rs

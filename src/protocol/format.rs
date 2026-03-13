@@ -1519,6 +1519,56 @@ pub fn find_references_result_view(
     lines.join("\n")
 }
 
+/// Render a compact find_references result: file:line [kind] in symbol — no source text.
+pub fn find_references_compact_view(
+    view: &FindReferencesView,
+    name: &str,
+    limits: &OutputLimits,
+) -> String {
+    if view.total_refs == 0 {
+        return format!("No references found for \"{name}\"");
+    }
+
+    let total_files = view.files.len();
+    let shown_files = total_files.min(limits.max_files);
+    let mut lines = vec![format!(
+        "{} references to \"{}\" in {} files",
+        view.total_refs, name, total_files
+    )];
+
+    for file in view.files.iter().take(limits.max_files) {
+        lines.push(file.file_path.clone());
+        let mut hit_count = 0usize;
+        let mut truncated_hits = 0usize;
+        for hit in &file.hits {
+            if hit_count >= limits.max_per_file {
+                truncated_hits += 1;
+                continue;
+            }
+            for line in &hit.context_lines {
+                if line.is_reference_line {
+                    let annotation = line
+                        .enclosing_annotation
+                        .as_deref()
+                        .unwrap_or("");
+                    lines.push(format!("  :{} {}", line.line_number, annotation));
+                }
+            }
+            hit_count += 1;
+        }
+        if truncated_hits > 0 {
+            lines.push(format!("  ... and {truncated_hits} more"));
+        }
+    }
+
+    let remaining_files = total_files.saturating_sub(shown_files);
+    if remaining_files > 0 {
+        lines.push(format!("... and {remaining_files} more files"));
+    }
+
+    lines.join("\n")
+}
+
 /// Format results of `find_implementations`.
 pub fn find_implementations_result_view(
     view: &FindImplementationsView,
@@ -1616,6 +1666,60 @@ pub fn find_dependents_result_view(
     lines.join("\n")
 }
 
+/// Render a compact find_dependents result: file:line [kind] without source text.
+pub fn find_dependents_compact_view(
+    view: &FindDependentsView,
+    path: &str,
+    limits: &OutputLimits,
+) -> String {
+    if view.files.is_empty() {
+        return format!("No dependents found for \"{path}\"");
+    }
+
+    let total_files = view.files.len();
+    let shown_files = total_files.min(limits.max_files);
+    let mut lines = vec![format!("{total_files} files depend on {path}")];
+
+    for file in view.files.iter().take(limits.max_files) {
+        let total_refs = file.lines.len();
+        let shown_refs = total_refs.min(limits.max_per_file);
+        let kinds: Vec<&str> = file
+            .lines
+            .iter()
+            .take(limits.max_per_file)
+            .map(|l| l.kind.as_str())
+            .collect();
+        let summary = if kinds.is_empty() {
+            file.file_path.clone()
+        } else {
+            let unique_kinds: Vec<&str> = {
+                let mut k = kinds.clone();
+                k.sort_unstable();
+                k.dedup();
+                k
+            };
+            format!(
+                "  {}  ({} refs: {})",
+                file.file_path,
+                total_refs,
+                unique_kinds.join(", ")
+            )
+        };
+        lines.push(summary);
+        let remaining = total_refs.saturating_sub(shown_refs);
+        if remaining > 0 {
+            // still count but don't show individual lines
+        }
+    }
+
+    let remaining_files = total_files.saturating_sub(shown_files);
+    if remaining_files > 0 {
+        lines.push(format!("... and {remaining_files} more files"));
+    }
+
+    lines.join("\n")
+}
+
 /// Render a find_dependents result as a Mermaid flowchart.
 pub fn find_dependents_mermaid(
     view: &FindDependentsView,
@@ -1707,10 +1811,10 @@ pub fn context_bundle_result(
     kind_filter: Option<&str>,
 ) -> String {
     let view = index.capture_context_bundle_view(path, name, kind_filter, None);
-    context_bundle_result_view(&view)
+    context_bundle_result_view(&view, "full")
 }
 
-pub fn context_bundle_result_view(view: &ContextBundleView) -> String {
+pub fn context_bundle_result_view(view: &ContextBundleView, verbosity: &str) -> String {
     match view {
         ContextBundleView::FileNotFound { path } => not_found_file(path),
         ContextBundleView::AmbiguousSymbol {
@@ -1730,14 +1834,15 @@ pub fn context_bundle_result_view(view: &ContextBundleView) -> String {
             symbol_names,
             name,
         } => not_found_symbol_names(relative_path, symbol_names, name),
-        ContextBundleView::Found(view) => render_context_bundle_found(view),
+        ContextBundleView::Found(view) => render_context_bundle_found(view, verbosity),
     }
 }
 
-fn render_context_bundle_found(view: &ContextBundleFoundView) -> String {
+fn render_context_bundle_found(view: &ContextBundleFoundView, verbosity: &str) -> String {
+    let body = apply_verbosity(&view.body, verbosity);
     let mut output = format!(
         "{}\n[{}, {}:{}-{}, {} bytes]\n",
-        view.body,
+        body,
         view.kind_label,
         view.file_path,
         view.line_range.0,
@@ -1757,7 +1862,7 @@ fn render_context_bundle_found(view: &ContextBundleFoundView) -> String {
 }
 
 /// Format results of `trace_symbol`.
-pub fn trace_symbol_result_view(view: &crate::live_index::TraceSymbolView, name: &str) -> String {
+pub fn trace_symbol_result_view(view: &crate::live_index::TraceSymbolView, name: &str, verbosity: &str) -> String {
     match view {
         crate::live_index::TraceSymbolView::FileNotFound { path } => not_found_file(path),
         crate::live_index::TraceSymbolView::AmbiguousSymbol {
@@ -1778,7 +1883,7 @@ pub fn trace_symbol_result_view(view: &crate::live_index::TraceSymbolView, name:
             name,
         } => not_found_symbol_names(relative_path, symbol_names, name),
         crate::live_index::TraceSymbolView::Found(found) => {
-            let mut output = render_context_bundle_found(&found.context_bundle);
+            let mut output = render_context_bundle_found(&found.context_bundle, verbosity);
 
             if !found.siblings.is_empty() {
                 output.push_str(&format_siblings(&found.siblings));
@@ -1892,7 +1997,12 @@ fn format_enclosing(enclosing: &crate::live_index::EnclosingSymbolView) -> Strin
 fn format_context_bundle_section(title: &str, section: &ContextBundleSectionView) -> String {
     let mut lines = vec![format!("\n{title} ({}):", section.total_count)];
 
+    let mut external_count = 0usize;
+
     for entry in &section.entries {
+        if is_external_symbol(&entry.display_name, &entry.file_path) {
+            external_count += 1;
+        }
         if let Some(enclosing) = &entry.enclosing {
             lines.push(format!(
                 "  {:<20} {}:{}  {}",
@@ -1907,14 +2017,155 @@ fn format_context_bundle_section(title: &str, section: &ContextBundleSectionView
     }
 
     if section.overflow_count > 0 {
-        lines.push(format!(
-            "  ...and {} more {}",
-            section.overflow_count,
-            title.to_lowercase()
-        ));
+        // Estimate external ratio from shown entries and extrapolate
+        let shown = section.entries.len();
+        let est_external = if shown > 0 {
+            (external_count as f64 / shown as f64 * section.overflow_count as f64).round() as usize
+        } else {
+            0
+        };
+        let est_project = section.overflow_count.saturating_sub(est_external);
+        if est_external > 0 {
+            lines.push(format!(
+                "  ...and {} more {} ({} project, ~{} stdlib/framework)",
+                section.overflow_count,
+                title.to_lowercase(),
+                est_project,
+                est_external
+            ));
+        } else {
+            lines.push(format!(
+                "  ...and {} more {}",
+                section.overflow_count,
+                title.to_lowercase()
+            ));
+        }
     }
 
     lines.join("\n")
+}
+
+/// Heuristic: classify a symbol reference as external (stdlib/framework) vs project-defined.
+fn is_external_symbol(name: &str, file_path: &str) -> bool {
+    // No file path means it's a builtin/external
+    if file_path.is_empty() {
+        return true;
+    }
+    // Common stdlib/framework patterns across languages
+    let external_prefixes = [
+        "std::", "core::", "alloc::", "System.", "Microsoft.", "java.", "javax.",
+        "kotlin.", "android.", "console.", "JSON.", "Math.", "Object.", "Array.",
+        "String.", "Promise.", "Map.", "Set.", "Error.",
+    ];
+    for prefix in &external_prefixes {
+        if name.starts_with(prefix) {
+            return true;
+        }
+    }
+    // Single-word lowercase names that are very common builtins
+    let common_builtins = [
+        "println", "print", "eprintln", "format", "vec", "to_string", "clone",
+        "unwrap", "expect", "push", "pop", "len", "is_empty", "iter", "map",
+        "filter", "collect", "into", "from", "default", "new", "Add", "Sub",
+        "Display", "Debug", "ToString", "log", "warn", "error", "info",
+        "LogWarning", "LogError", "LogInformation", "Console",
+    ];
+    common_builtins.contains(&name)
+}
+
+/// Extract the signature (first meaningful line) from a symbol body.
+///
+/// Handles common patterns: `fn foo(...)`, `pub struct Foo`, `class Bar`, etc.
+/// Returns the first non-empty, non-comment line. If the body is a single line
+/// or empty, returns it as-is.
+fn extract_signature(body: &str) -> String {
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with('#') {
+            continue;
+        }
+        return line.to_string();
+    }
+    body.lines().next().unwrap_or("").to_string()
+}
+
+/// Extract the first doc-comment line from a symbol body.
+///
+/// Looks for `///`, `//!`, `/** ... */`, `# ...` (Python docstring-adjacent),
+/// or `/* ... */` style comments immediately before/after the signature.
+fn extract_first_doc_line(body: &str) -> Option<String> {
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Rust doc comments
+        if let Some(rest) = trimmed.strip_prefix("///") {
+            let doc = rest.trim();
+            if !doc.is_empty() {
+                return Some(doc.to_string());
+            }
+        }
+        // Rust inner doc comments
+        if let Some(rest) = trimmed.strip_prefix("//!") {
+            let doc = rest.trim();
+            if !doc.is_empty() {
+                return Some(doc.to_string());
+            }
+        }
+        // C-style block doc comments
+        if let Some(rest) = trimmed.strip_prefix("/**") {
+            let doc = rest.trim_end_matches("*/").trim();
+            if !doc.is_empty() {
+                return Some(doc.to_string());
+            }
+        }
+        // XML doc comments (C#)
+        if trimmed.starts_with("/// <summary>") || trimmed.starts_with("/// <remarks>") {
+            continue; // skip XML tags, look for actual text
+        }
+        // Python/JS docstrings
+        if trimmed.starts_with("\"\"\"") || trimmed.starts_with("'''") {
+            let doc = trimmed
+                .trim_start_matches("\"\"\"")
+                .trim_start_matches("'''")
+                .trim_end_matches("\"\"\"")
+                .trim_end_matches("'''")
+                .trim();
+            if !doc.is_empty() {
+                return Some(doc.to_string());
+            }
+        }
+        // If we hit a non-comment line, stop looking
+        if !trimmed.starts_with("//")
+            && !trimmed.starts_with("/*")
+            && !trimmed.starts_with('*')
+            && !trimmed.starts_with('#')
+        {
+            break;
+        }
+    }
+    None
+}
+
+/// Apply verbosity filter to a symbol body.
+///
+/// - `"signature"`: first meaningful line only (~80% smaller).
+/// - `"compact"`: signature + first doc-comment line.
+/// - `"full"` or anything else: complete body (default).
+fn apply_verbosity(body: &str, verbosity: &str) -> String {
+    match verbosity {
+        "signature" => extract_signature(body),
+        "compact" => {
+            let sig = extract_signature(body);
+            if let Some(doc) = extract_first_doc_line(body) {
+                format!("{sig}\n  // {doc}")
+            } else {
+                sig
+            }
+        }
+        _ => body.to_string(),
+    }
 }
 
 fn format_type_dependencies(deps: &[TypeDependencyView]) -> String {
@@ -3543,7 +3794,7 @@ mod tests {
             "process",
             None,
             None,
-        ));
+        ), "full");
 
         assert_eq!(captured_result, live_result);
     }
@@ -3554,7 +3805,7 @@ mod tests {
             path: "src/lib.rs".to_string(),
             name: "process".to_string(),
             candidate_lines: vec![1, 10],
-        });
+        }, "full");
 
         assert!(
             result.contains("Ambiguous symbol selector"),
