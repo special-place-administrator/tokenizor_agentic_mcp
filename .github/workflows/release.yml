@@ -53,10 +53,17 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
-          sleep 5
-          PR=$(gh pr list --label "autorelease: pending" --json number --jq '.[0].number // empty')
+          # Wait for PR label to propagate, then find the release PR
+          for attempt in 1 2 3 4 5 6; do
+            sleep 10
+            PR=$(gh pr list --label "autorelease: pending" --json number --jq '.[0].number // empty')
+            if [[ -n "$PR" ]]; then
+              break
+            fi
+            echo "Attempt $attempt: no pending release PR found yet, retrying..."
+          done
           if [[ -z "$PR" ]]; then
-            echo "No pending release PR found — skipping auto-merge"
+            echo "::warning::No pending release PR found after 60s — skipping auto-merge"
             exit 0
           fi
 
