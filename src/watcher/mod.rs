@@ -580,6 +580,7 @@ mod tests {
     // --- Plan 02: Path normalization tests ---
 
     #[test]
+    #[cfg(windows)]
     fn test_normalize_event_path_basic() {
         // Windows-style absolute path: strip root prefix, normalize slashes
         let abs = Path::new(r"C:\repo\src\main.rs");
@@ -589,6 +590,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn test_normalize_event_path_unc_prefix() {
         // Windows extended-length path with \\?\ prefix
         let abs = Path::new(r"\\?\C:\repo\src\main.rs");
@@ -598,6 +600,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn test_normalize_event_path_outside_repo() {
         // Path is completely outside the repo root — should return None
         let abs = Path::new(r"C:\other\file.rs");
