@@ -525,11 +525,14 @@ async fn handle_edit_impact(
     let bytes = match std::fs::read(&abs_path) {
         Ok(b) => b,
         Err(_) => {
-            // File unreadable (locked, deleted, wrong path). Return the pre-edit
-            // snapshot as "no change" instead of overwriting the index with an
-            // empty parse — that would destroy all symbols for this file.
+            // File not on disk — remove it from the index so stale data is purged.
+            state.index.remove_file(path);
+            // Also clear the symbol cache entry.
+            if let Ok(mut cache) = state.symbol_cache.write() {
+                cache.remove(path);
+            }
             let text = format!(
-                "── Impact: {} ──\nFile not readable on disk; index preserved.",
+                "── Impact: {} ──\nFile not found on disk; removed from index.",
                 path
             );
             return Ok(text);
@@ -1767,13 +1770,13 @@ mod tests {
         );
         let text = result.unwrap();
         assert!(
-            text.contains("not readable") || text.contains("index preserved"),
-            "should indicate file was unreadable and index preserved; got: {text}"
+            text.contains("removed from index") || text.contains("not found on disk"),
+            "should indicate file was removed from index; got: {text}"
         );
     }
 
-    /// Proves that analyze_file_impact preserves the index when the file
-    /// cannot be read from disk (the critical regression fix).
+    /// Proves that analyze_file_impact removes the file from the index when
+    /// it cannot be read from disk (deleted externally).
     #[tokio::test]
     async fn test_impact_handler_edit_preserves_index_when_file_unreadable() {
         let file = make_indexed_file(
@@ -1789,22 +1792,16 @@ mod tests {
             new_file: None,
         };
 
-        // File doesn't exist on disk — impact should preserve existing index.
+        // File doesn't exist on disk — impact should remove it from the index.
         let result = impact_handler(State(state.clone()), Query(params)).await;
         assert!(result.is_ok(), "should return Ok, got: {result:?}");
 
-        // Verify the index still has the original symbol.
+        // Verify the file was removed from the index.
         let guard = state.index.read().unwrap();
-        let indexed = guard
-            .get_file("src/db.rs")
-            .expect("file must still be in index");
-        assert_eq!(
-            indexed.symbols.len(),
-            1,
-            "index must retain original symbols; got {} symbols",
-            indexed.symbols.len()
+        assert!(
+            guard.get_file("src/db.rs").is_none(),
+            "deleted file should be removed from index"
         );
-        assert_eq!(indexed.symbols[0].name, "connect");
     }
 
     // -----------------------------------------------------------------------

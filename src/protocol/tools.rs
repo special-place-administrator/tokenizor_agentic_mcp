@@ -1394,10 +1394,20 @@ impl TokenizorServer {
                 self.record_read_savings((saved / 4) as u64);
                 format!("{output}{footer}")
             }
-            Err(StatusCode::INTERNAL_SERVER_ERROR) => {
-                "Symbol context failed: internal error.".to_string()
+            Err(_) => {
+                // Sidecar unavailable — fall back to the index definition so callers
+                // always get at least the symbol body instead of an opaque error.
+                if let Some(header) = symbol_header {
+                    let footer = format::compact_savings_footer(header.len(), raw_chars);
+                    let saved = raw_chars.saturating_sub(header.len());
+                    self.record_read_savings((saved / 4) as u64);
+                    format!(
+                        "{header}\n\n(Reference data unavailable — showing definition only){footer}"
+                    )
+                } else {
+                    format!("Symbol \"{}\" not found in index.", params.0.name)
+                }
             }
-            Err(other) => format!("Symbol context failed: HTTP {}", other.as_u16()),
         }
     }
 
