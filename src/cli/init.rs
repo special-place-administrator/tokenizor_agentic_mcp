@@ -30,6 +30,8 @@ struct InitPaths {
     claude_memory: PathBuf,
     codex_config: PathBuf,
     codex_agents: PathBuf,
+    gemini_settings: PathBuf,
+    gemini_memory: PathBuf,
 }
 
 impl InitPaths {
@@ -40,6 +42,8 @@ impl InitPaths {
             claude_memory: home.join(".claude").join("CLAUDE.md"),
             codex_config: home.join(".codex").join("config.toml"),
             codex_agents: home.join(".codex").join("AGENTS.md"),
+            gemini_settings: home.join(".gemini").join("settings.json"),
+            gemini_memory: home.join(".gemini").join("GEMINI.md"),
         }
     }
 }
@@ -103,6 +107,20 @@ pub fn run_init_with_context(
         );
     }
 
+    if matches!(client, InitClient::Gemini | InitClient::All) {
+        register_gemini_mcp_server(&paths.gemini_settings, &binary_path_str)?;
+        eprintln!(
+            "Gemini MCP server registered in {}",
+            paths.gemini_settings.display()
+        );
+
+        upsert_guidance_markdown(&paths.gemini_memory, &gemini_guidance_block())?;
+        eprintln!(
+            "Gemini guidance written to {}",
+            paths.gemini_memory.display()
+        );
+    }
+
     std::fs::create_dir_all(working_dir.join(".tokenizor"))
         .with_context(|| format!("creating {}", working_dir.join(".tokenizor").display()))?;
 
@@ -152,6 +170,49 @@ pub fn merge_hooks_into_settings(
 }
 
 // ---------------------------------------------------------------------------
+// Tool name constants
+// ---------------------------------------------------------------------------
+
+const TOKENIZOR_TOOL_NAMES: &[&str] = &[
+    "mcp__tokenizor__health",
+    "mcp__tokenizor__index_folder",
+    "mcp__tokenizor__get_file_outline",
+    "mcp__tokenizor__get_file_content",
+    "mcp__tokenizor__get_file_tree",
+    "mcp__tokenizor__get_symbol",
+    "mcp__tokenizor__get_symbols",
+    "mcp__tokenizor__get_repo_outline",
+    "mcp__tokenizor__get_repo_map",
+    "mcp__tokenizor__get_file_context",
+    "mcp__tokenizor__get_symbol_context",
+    "mcp__tokenizor__get_context_bundle",
+    "mcp__tokenizor__search_symbols",
+    "mcp__tokenizor__search_text",
+    "mcp__tokenizor__search_files",
+    "mcp__tokenizor__resolve_path",
+    "mcp__tokenizor__find_references",
+    "mcp__tokenizor__find_dependents",
+    "mcp__tokenizor__find_implementations",
+    "mcp__tokenizor__trace_symbol",
+    "mcp__tokenizor__inspect_match",
+    "mcp__tokenizor__analyze_file_impact",
+    "mcp__tokenizor__what_changed",
+];
+
+fn merge_allowed_tools(settings: &mut Value) {
+    if !settings["allowedTools"].is_array() {
+        settings["allowedTools"] = json!([]);
+    }
+    let allowed = settings["allowedTools"].as_array_mut().expect("is array");
+    for tool_name in TOKENIZOR_TOOL_NAMES {
+        let val = Value::String(tool_name.to_string());
+        if !allowed.contains(&val) {
+            allowed.push(val);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Core merge logic (pub for unit testing)
 // ---------------------------------------------------------------------------
 
@@ -165,18 +226,21 @@ pub fn merge_tokenizor_hooks(settings: &mut Value, binary_path: &str) {
         settings["hooks"] = json!({});
     }
 
-    let hooks = settings["hooks"]
-        .as_object_mut()
-        .expect("hooks is an object");
-
     // Build fresh tokenizor entries.
     let post_tool_use_entries = build_post_tool_use_entries(binary_path);
     let session_start_entries = build_session_start_entries(binary_path);
     let user_prompt_submit_entries = build_user_prompt_submit_entries(binary_path);
 
-    merge_event_entries(hooks, "PostToolUse", post_tool_use_entries);
-    merge_event_entries(hooks, "SessionStart", session_start_entries);
-    merge_event_entries(hooks, "UserPromptSubmit", user_prompt_submit_entries);
+    {
+        let hooks = settings["hooks"]
+            .as_object_mut()
+            .expect("hooks is an object");
+        merge_event_entries(hooks, "PostToolUse", post_tool_use_entries);
+        merge_event_entries(hooks, "SessionStart", session_start_entries);
+        merge_event_entries(hooks, "UserPromptSubmit", user_prompt_submit_entries);
+    }
+
+    merge_allowed_tools(settings);
 }
 
 // ---------------------------------------------------------------------------
@@ -346,6 +410,16 @@ fn merge_tokenizor_codex_server(config: &mut DocumentMut, binary_path: &str) {
     tokenizor["startup_timeout_sec"] = value(CODEX_STARTUP_TIMEOUT_SEC);
     tokenizor["tool_timeout_sec"] = value(CODEX_TOOL_TIMEOUT_SEC);
 
+    let mut allow_array = Array::new();
+    for tool_name in TOKENIZOR_TOOL_NAMES {
+        // Codex uses plain tool names without mcp__ prefix
+        let short_name = tool_name
+            .strip_prefix("mcp__tokenizor__")
+            .unwrap_or(tool_name);
+        allow_array.push(short_name);
+    }
+    tokenizor["allowed_tools"] = value(allow_array);
+
     merge_codex_project_doc_fallbacks(config);
 }
 
@@ -367,6 +441,48 @@ fn merge_codex_project_doc_fallbacks(config: &mut DocumentMut) {
     if !has_claude_md {
         fallbacks.push("CLAUDE.md");
     }
+}
+
+/// Register tokenizor as an MCP server in `~/.gemini/settings.json`.
+///
+/// Gemini CLI stores MCP servers under `mcpServers` in a JSON settings file.
+/// We update only the `tokenizor` entry and preserve the rest of the file.
+pub fn register_gemini_mcp_server(
+    gemini_settings_path: &std::path::Path,
+    binary_path: &str,
+) -> anyhow::Result<()> {
+    if let Some(parent) = gemini_settings_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+
+    let mut config: Value = if gemini_settings_path.exists() {
+        let raw = std::fs::read_to_string(gemini_settings_path)
+            .with_context(|| format!("reading {}", gemini_settings_path.display()))?;
+        serde_json::from_str(&raw)
+            .with_context(|| format!("parsing {}", gemini_settings_path.display()))?
+    } else {
+        json!({})
+    };
+
+    let command_path = native_command_path(binary_path);
+
+    if !config["mcpServers"].is_object() {
+        config["mcpServers"] = json!({});
+    }
+    config["mcpServers"]["tokenizor"] = json!({
+        "command": command_path,
+        "args": [],
+        "timeout": 120
+    });
+
+    // Auto-allow all tools
+    merge_allowed_tools(&mut config);
+
+    let pretty = serde_json::to_string_pretty(&config)?;
+    std::fs::write(gemini_settings_path, pretty)
+        .with_context(|| format!("writing {}", gemini_settings_path.display()))?;
+    Ok(())
 }
 
 fn upsert_guidance_markdown(path: &std::path::Path, guidance_block: &str) -> anyhow::Result<()> {
@@ -419,6 +535,12 @@ fn claude_guidance_block() -> String {
 fn codex_guidance_block() -> String {
     format!(
         "{TOKENIZOR_GUIDANCE_START}\n## Tokenizor MCP\n- Prefer the Tokenizor MCP for codebase navigation when the `tokenizor` server is connected.\n- Start with `get_repo_map`, `get_repo_outline`, `get_file_context`, or `get_symbol_context` before broad raw file scans.\n- Use `analyze_file_impact` after edits and `what_changed` when resuming work.\n- Codex is configured to read `CLAUDE.md` project guidance too, so treat project Tokenizor instructions there as authoritative when `AGENTS.md` is absent.\n{TOKENIZOR_GUIDANCE_END}"
+    )
+}
+
+fn gemini_guidance_block() -> String {
+    format!(
+        "{TOKENIZOR_GUIDANCE_START}\n## Tokenizor MCP\n- Prefer the Tokenizor MCP for codebase navigation when the `tokenizor` server is connected.\n- Start with `get_repo_map`, `get_repo_outline`, `get_file_context`, or `get_symbol_context` before broad raw file scans.\n- Use `analyze_file_impact` after edits and `what_changed` when resuming work.\n{TOKENIZOR_GUIDANCE_END}"
     )
 }
 
@@ -722,5 +844,93 @@ mod tests {
             "hooks": [{"type": "command", "command": "/some/other/script bash"}]
         });
         assert!(!is_tokenizor_entry(&entry));
+    }
+
+    #[test]
+    fn test_merge_adds_allowed_tools() {
+        let mut settings = json!({});
+        merge_tokenizor_hooks(&mut settings, "/usr/bin/tokenizor-mcp");
+        let allowed = settings["allowedTools"]
+            .as_array()
+            .expect("allowedTools should be array");
+        assert!(
+            allowed
+                .iter()
+                .any(|v| v.as_str() == Some("mcp__tokenizor__search_symbols")),
+            "should include search_symbols, got: {allowed:?}"
+        );
+        assert!(
+            allowed
+                .iter()
+                .any(|v| v.as_str() == Some("mcp__tokenizor__get_symbol")),
+            "should include get_symbol"
+        );
+        let first_len = allowed.len();
+        // Should not duplicate on re-run
+        merge_tokenizor_hooks(&mut settings, "/usr/bin/tokenizor-mcp");
+        let allowed2 = settings["allowedTools"].as_array().unwrap();
+        assert_eq!(first_len, allowed2.len(), "should not duplicate entries");
+    }
+
+    #[test]
+    fn test_codex_registration_includes_allow_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        register_codex_mcp_server(&config_path, "/usr/bin/tokenizor-mcp").unwrap();
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            content.contains("search_symbols"),
+            "should contain tool names: {content}"
+        );
+    }
+
+    #[test]
+    fn test_gemini_registration_creates_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        register_gemini_mcp_server(&settings_path, "/usr/bin/tokenizor-mcp").unwrap();
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        let config: Value = serde_json::from_str(&content).unwrap();
+        assert!(config["mcpServers"]["tokenizor"]["command"].is_string());
+    }
+
+    #[test]
+    fn test_gemini_registration_includes_allowed_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        register_gemini_mcp_server(&settings_path, "/usr/bin/tokenizor-mcp").unwrap();
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        let config: Value = serde_json::from_str(&content).unwrap();
+        let allowed = config["allowedTools"]
+            .as_array()
+            .expect("allowedTools must be array");
+        assert!(
+            allowed
+                .iter()
+                .any(|v| v.as_str() == Some("mcp__tokenizor__search_symbols")),
+            "should include search_symbols in allowedTools"
+        );
+    }
+
+    #[test]
+    fn test_gemini_registration_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        register_gemini_mcp_server(&settings_path, "/usr/bin/tokenizor-mcp").unwrap();
+        register_gemini_mcp_server(&settings_path, "/usr/bin/tokenizor-mcp").unwrap();
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        let config: Value = serde_json::from_str(&content).unwrap();
+        let allowed = config["allowedTools"]
+            .as_array()
+            .expect("allowedTools must be array");
+        // Count occurrences of a specific tool to verify no duplicates
+        let count = allowed
+            .iter()
+            .filter(|v| v.as_str() == Some("mcp__tokenizor__search_symbols"))
+            .count();
+        assert_eq!(
+            count, 1,
+            "allowedTools should not have duplicate entries after idempotent run"
+        );
     }
 }

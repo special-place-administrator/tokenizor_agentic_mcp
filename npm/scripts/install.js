@@ -267,7 +267,13 @@ function createInstaller(overrides = {}) {
       clients.push("codex");
     }
 
-    // If both or neither detected, use "all"
+    // Gemini: check for ~/.gemini directory
+    const geminiDir = pathMod.join(osMod.homedir(), ".gemini");
+    if (fsMod.existsSync(geminiDir)) {
+      clients.push("gemini");
+    }
+
+    // If all, none, or more than 1 detected, use "all"
     if (clients.length === 0 || clients.length >= 2) {
       return "all";
     }

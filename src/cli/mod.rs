@@ -27,7 +27,7 @@ pub struct Cli {
 /// Top-level subcommands.
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Install Tokenizor integration for Claude, Codex, or both
+    /// Install Tokenizor integration for Claude, Codex, Gemini, or all
     Init {
         /// Client to configure
         #[arg(long, value_enum, default_value_t = InitClient::All)]
@@ -47,6 +47,7 @@ pub enum Commands {
 pub enum InitClient {
     Claude,
     Codex,
+    Gemini,
     All,
 }
 
@@ -89,6 +90,16 @@ mod tests {
 
         match cli.command {
             Some(Commands::Init { client }) => assert_eq!(client, InitClient::Codex),
+            _ => panic!("expected init command"),
+        }
+    }
+
+    #[test]
+    fn test_init_accepts_gemini_client() {
+        let cli = Cli::parse_from(["tokenizor", "init", "--client", "gemini"]);
+
+        match cli.command {
+            Some(Commands::Init { client }) => assert_eq!(client, InitClient::Gemini),
             _ => panic!("expected init command"),
         }
     }

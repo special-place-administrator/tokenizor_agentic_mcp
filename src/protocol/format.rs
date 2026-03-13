@@ -263,11 +263,12 @@ pub fn search_text_result_with_options(
     regex: bool,
 ) -> String {
     let result = search::search_text(index, query, terms, regex);
-    search_text_result_view(result)
+    search_text_result_view(result, None)
 }
 
 pub fn search_text_result_view(
     result: Result<search::TextSearchResult, search::TextSearchError>,
+    group_by: Option<&str>,
 ) -> String {
     let result = match result {
         Ok(result) => result,
@@ -304,6 +305,7 @@ pub fn search_text_result_view(
     for file in &result.files {
         lines.push(file.path.clone());
         if let Some(rendered_lines) = &file.rendered_lines {
+            // Context mode: don't apply grouping — context windows don't compose well with it
             for rendered_line in rendered_lines {
                 match rendered_line {
                     search::TextDisplayLine::Separator => lines.push("  ...".to_string()),
@@ -316,9 +318,130 @@ pub fn search_text_result_view(
                 }
             }
         } else {
-            for line_match in &file.matches {
-                lines.push(format!("  {}: {}", line_match.line_number, line_match.line));
+            match group_by {
+                Some("symbol") => {
+                    // One entry per unique enclosing symbol, showing match count
+                    // Preserve insertion order by tracking symbol names in order
+                    let mut symbol_order: Vec<String> = Vec::new();
+                    let mut symbol_counts: std::collections::HashMap<
+                        String,
+                        (usize, String, u32, u32),
+                    > = std::collections::HashMap::new();
+                    let mut no_symbol_count = 0usize;
+                    for line_match in &file.matches {
+                        if let Some(ref enc) = line_match.enclosing_symbol {
+                            let key = enc.name.clone();
+                            if !symbol_counts.contains_key(&key) {
+                                symbol_order.push(key.clone());
+                                symbol_counts.insert(
+                                    key,
+                                    (
+                                        1,
+                                        enc.kind.clone(),
+                                        enc.line_range.0 + 1,
+                                        enc.line_range.1 + 1,
+                                    ),
+                                );
+                            } else {
+                                symbol_counts.get_mut(&enc.name).unwrap().0 += 1;
+                            }
+                        } else {
+                            no_symbol_count += 1;
+                        }
+                    }
+                    for sym_name in &symbol_order {
+                        if let Some((count, kind, start, end)) = symbol_counts.get(sym_name) {
+                            let match_word = if *count == 1 { "match" } else { "matches" };
+                            lines.push(format!(
+                                "  {} {} (lines {}-{}): {} {}",
+                                kind, sym_name, start, end, count, match_word
+                            ));
+                        }
+                    }
+                    if no_symbol_count > 0 {
+                        let match_word = if no_symbol_count == 1 {
+                            "match"
+                        } else {
+                            "matches"
+                        };
+                        lines.push(format!("  (top-level): {} {}", no_symbol_count, match_word));
+                    }
+                }
+                Some("usage") => {
+                    // Filter out lines that look like imports or comments
+                    let mut last_symbol: Option<String> = None;
+                    for line_match in &file.matches {
+                        let trimmed = line_match.line.trim();
+                        let is_import_or_comment = trimmed.starts_with("use ")
+                            || trimmed.starts_with("import ")
+                            || trimmed.starts_with("from ")
+                            || trimmed.starts_with("require(")
+                            || trimmed.starts_with("#include")
+                            || trimmed.starts_with("//")
+                            || trimmed.starts_with('#')
+                            || trimmed.starts_with("/*")
+                            || trimmed.starts_with('*')
+                            || trimmed.starts_with("--")
+                            || line_match.line.contains("require(");
+                        if is_import_or_comment {
+                            continue;
+                        }
+                        if let Some(ref enc) = line_match.enclosing_symbol {
+                            if last_symbol.as_deref() != Some(enc.name.as_str()) {
+                                lines.push(format!(
+                                    "  in {} {} (lines {}-{}):",
+                                    enc.kind,
+                                    enc.name,
+                                    enc.line_range.0 + 1,
+                                    enc.line_range.1 + 1
+                                ));
+                                last_symbol = Some(enc.name.clone());
+                            }
+                            lines.push(format!(
+                                "    > {}: {}",
+                                line_match.line_number, line_match.line
+                            ));
+                        } else {
+                            last_symbol = None;
+                            lines
+                                .push(format!("  {}: {}", line_match.line_number, line_match.line));
+                        }
+                    }
+                }
+                // None or Some("file") — default behavior
+                _ => {
+                    let mut last_symbol: Option<String> = None;
+                    for line_match in &file.matches {
+                        if let Some(ref enc) = line_match.enclosing_symbol {
+                            if last_symbol.as_deref() != Some(enc.name.as_str()) {
+                                lines.push(format!(
+                                    "  in {} {} (lines {}-{}):",
+                                    enc.kind,
+                                    enc.name,
+                                    enc.line_range.0 + 1,
+                                    enc.line_range.1 + 1
+                                ));
+                                last_symbol = Some(enc.name.clone());
+                            }
+                            lines.push(format!(
+                                "    > {}: {}",
+                                line_match.line_number, line_match.line
+                            ));
+                        } else {
+                            last_symbol = None;
+                            lines
+                                .push(format!("  {}: {}", line_match.line_number, line_match.line));
+                        }
+                    }
+                }
             }
+        }
+        if let Some(ref callers) = file.callers {
+            let caller_strs: Vec<String> = callers
+                .iter()
+                .map(|c| format!("{} ({}:{})", c.symbol, c.file, c.line))
+                .collect();
+            lines.push(format!("    Called by: {}", caller_strs.join(", ")));
         }
     }
     lines.join("\n")
@@ -828,6 +951,9 @@ pub fn search_files_result_view(view: &SearchFilesView) -> String {
                 if last_tier != Some(hit.tier) {
                     last_tier = Some(hit.tier);
                     let header = match hit.tier {
+                        SearchFilesTier::CoChange => {
+                            "── Co-changed files (git temporal coupling) ──"
+                        }
                         SearchFilesTier::StrongPath => "── Strong path matches ──",
                         SearchFilesTier::Basename => "── Basename matches ──",
                         SearchFilesTier::LoosePath => "── Loose path matches ──",
@@ -837,7 +963,16 @@ pub fn search_files_result_view(view: &SearchFilesView) -> String {
                     }
                     lines.push(header.to_string());
                 }
-                lines.push(format!("  {}", hit.path));
+                if let (Some(score), Some(shared)) = (hit.coupling_score, hit.shared_commits) {
+                    lines.push(format!(
+                        "  {}  ({:.0}% coupled, {} shared commits)",
+                        hit.path,
+                        score * 100.0,
+                        shared
+                    ));
+                } else {
+                    lines.push(format!("  {}", hit.path));
+                }
             }
 
             if *overflow_count > 0 {
@@ -1662,6 +1797,13 @@ fn format_trace_git_activity(git: &crate::live_index::GitActivityView) -> String
 pub fn inspect_match_result_view(view: &InspectMatchView) -> String {
     match view {
         InspectMatchView::FileNotFound { path } => not_found_file(path),
+        InspectMatchView::LineOutOfBounds {
+            path,
+            line,
+            total_lines,
+        } => {
+            format!("Line {line} is out of bounds for {path} (file has {total_lines} lines).")
+        }
         InspectMatchView::Found(found) => {
             let mut output = String::new();
 
@@ -2256,7 +2398,7 @@ mod tests {
 
         let live_result = search_text_result(&index, "let");
         let captured_result =
-            search_text_result_view(search::search_text(&index, Some("let"), None, false));
+            search_text_result_view(search::search_text(&index, Some("let"), None, false), None);
 
         assert_eq!(captured_result, live_result);
     }
@@ -2339,7 +2481,7 @@ mod tests {
             },
         );
 
-        let rendered = search_text_result_view(result);
+        let rendered = search_text_result_view(result, None);
 
         assert!(
             rendered.contains("src/lib.rs"),
@@ -2642,14 +2784,20 @@ mod tests {
                 crate::live_index::SearchFilesHit {
                     tier: SearchFilesTier::StrongPath,
                     path: "src/protocol/tools.rs".to_string(),
+                    coupling_score: None,
+                    shared_commits: None,
                 },
                 crate::live_index::SearchFilesHit {
                     tier: SearchFilesTier::Basename,
                     path: "src/sidecar/tools.rs".to_string(),
+                    coupling_score: None,
+                    shared_commits: None,
                 },
                 crate::live_index::SearchFilesHit {
                     tier: SearchFilesTier::LoosePath,
                     path: "src/protocol/tools_helper.rs".to_string(),
+                    coupling_score: None,
+                    shared_commits: None,
                 },
             ],
         };
@@ -3883,4 +4031,49 @@ mod tests {
             "depth 0 should have no marker, got: {result}"
         );
     }
+}
+
+/// Format the output of the `explore` tool.
+pub fn explore_result_view(
+    label: &str,
+    symbol_hits: &[(String, String, String)], // (name, kind, path)
+    text_hits: &[(String, String, usize)],    // (path, line, line_number)
+    related_files: &[(String, usize)],        // (path, count)
+) -> String {
+    let mut lines = vec![format!("── Exploring: {label} ──")];
+    lines.push(String::new());
+
+    if !symbol_hits.is_empty() {
+        lines.push(format!("Symbols ({} found):", symbol_hits.len()));
+        for (name, kind, path) in symbol_hits {
+            lines.push(format!("  {kind} {name}  {path}"));
+        }
+        lines.push(String::new());
+    }
+
+    if !text_hits.is_empty() {
+        lines.push(format!("Code patterns ({} found):", text_hits.len()));
+        let mut last_path: Option<&str> = None;
+        for (path, line, line_number) in text_hits {
+            if last_path != Some(path.as_str()) {
+                lines.push(format!("  {path}"));
+                last_path = Some(path.as_str());
+            }
+            lines.push(format!("    > {line_number}: {line}"));
+        }
+        lines.push(String::new());
+    }
+
+    if !related_files.is_empty() {
+        lines.push("Related files:".to_string());
+        for (path, count) in related_files {
+            lines.push(format!("  {path}  ({count} matches)"));
+        }
+    }
+
+    if symbol_hits.is_empty() && text_hits.is_empty() {
+        lines.push("No matches found.".to_string());
+    }
+
+    lines.join("\n")
 }

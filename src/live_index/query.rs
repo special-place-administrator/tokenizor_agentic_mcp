@@ -604,18 +604,21 @@ pub enum ResolvePathView {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SearchFilesTier {
+    CoChange,
     StrongPath,
     Basename,
     LoosePath,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SearchFilesHit {
     pub tier: SearchFilesTier,
     pub path: String,
+    pub coupling_score: Option<f32>,
+    pub shared_commits: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SearchFilesView {
     EmptyQuery,
     NotFound {
@@ -840,7 +843,14 @@ pub struct InspectMatchFoundView {
 /// Owned result view for `inspect_match`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InspectMatchView {
-    FileNotFound { path: String },
+    FileNotFound {
+        path: String,
+    },
+    LineOutOfBounds {
+        path: String,
+        line: u32,
+        total_lines: usize,
+    },
     Found(InspectMatchFoundView),
 }
 
@@ -1162,14 +1172,20 @@ impl LiveIndex {
         hits.extend(strong_hits.into_iter().map(|path| SearchFilesHit {
             tier: SearchFilesTier::StrongPath,
             path,
+            coupling_score: None,
+            shared_commits: None,
         }));
         hits.extend(basename_only_hits.into_iter().map(|path| SearchFilesHit {
             tier: SearchFilesTier::Basename,
             path,
+            coupling_score: None,
+            shared_commits: None,
         }));
         hits.extend(loose_hits.into_iter().map(|path| SearchFilesHit {
             tier: SearchFilesTier::LoosePath,
             path,
+            coupling_score: None,
+            shared_commits: None,
         }));
 
         let overflow_count = total_matches.saturating_sub(limit);
@@ -1670,7 +1686,16 @@ impl LiveIndex {
         // 1. Render excerpt (simple around-line logic).
         let content = String::from_utf8_lossy(&file.content);
         let lines: Vec<&str> = content.lines().collect();
-        let anchor = line.max(1) as usize;
+
+        if line as usize > lines.len() || line == 0 {
+            return InspectMatchView::LineOutOfBounds {
+                path: file.relative_path.clone(),
+                line,
+                total_lines: lines.len(),
+            };
+        }
+
+        let anchor = line as usize;
         let context = context_lines.unwrap_or(3) as usize;
         let start = anchor.saturating_sub(context).max(1);
         let end = anchor.saturating_add(context).min(lines.len());
@@ -2701,10 +2726,14 @@ mod tests {
                     SearchFilesHit {
                         tier: SearchFilesTier::StrongPath,
                         path: "src/protocol/tools.rs".to_string(),
+                        coupling_score: None,
+                        shared_commits: None,
                     },
                     SearchFilesHit {
                         tier: SearchFilesTier::Basename,
                         path: "src/sidecar/tools.rs".to_string(),
+                        coupling_score: None,
+                        shared_commits: None,
                     },
                 ],
             }
@@ -2739,10 +2768,14 @@ mod tests {
                     SearchFilesHit {
                         tier: SearchFilesTier::LoosePath,
                         path: "src/live_index/query.rs".to_string(),
+                        coupling_score: None,
+                        shared_commits: None,
                     },
                     SearchFilesHit {
                         tier: SearchFilesTier::LoosePath,
                         path: "src/live_index/store.rs".to_string(),
+                        coupling_score: None,
+                        shared_commits: None,
                     },
                 ],
             }

@@ -448,9 +448,17 @@ impl FileContentOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnclosingMatchSymbol {
+    pub name: String,
+    pub kind: String,
+    pub line_range: (u32, u32),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextLineMatch {
     pub line_number: usize,
     pub line: String,
+    pub enclosing_symbol: Option<EnclosingMatchSymbol>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -467,10 +475,18 @@ pub enum TextDisplayLine {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallerEntry {
+    pub file: String,
+    pub symbol: String,
+    pub line: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextFileMatches {
     pub path: String,
     pub matches: Vec<TextLineMatch>,
     pub rendered_lines: Option<Vec<TextDisplayLine>>,
+    pub callers: Option<Vec<CallerEntry>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -921,6 +937,19 @@ where
                 matches.push(TextLineMatch {
                     line_number: line_idx + 1,
                     line: line.to_string(),
+                    enclosing_symbol: file
+                        .symbols
+                        .iter()
+                        .filter(|s| {
+                            s.line_range.0 <= (line_idx as u32)
+                                && s.line_range.1 >= (line_idx as u32)
+                        })
+                        .max_by_key(|s| s.depth)
+                        .map(|s| EnclosingMatchSymbol {
+                            name: s.name.clone(),
+                            kind: s.kind.to_string(),
+                            line_range: s.line_range,
+                        }),
                 });
                 if matches.len() >= per_file_limit {
                     break;
@@ -937,6 +966,7 @@ where
                 path: path.clone(),
                 matches,
                 rendered_lines,
+                callers: None,
             });
         }
     }
