@@ -1,38 +1,204 @@
-# Concerns
+# Codebase Concerns
 
-This document calls out the main technical debt, likely regression zones, recovery gaps, and operational unknowns in the current codebase.
+**Analysis Date:** 2026-03-14
 
-## Highest-Risk Gaps
+## Tech Debt
 
-- `src/storage/control_plane.rs`: `ControlPlaneBackend::SpacetimeDb` is selectable, but the `SpacetimeControlPlane` only wires health and deployment probes. Real CRUD methods like `find_run`, `save_run`, `save_checkpoint`, `save_repository`, and `save_idempotency_record` return a pending-operation error. Any deployment that flips to Spacetime will clear some health checks and still fail on first real mutation or lookup.
-- `src/storage/control_plane.rs` and `src/config.rs`: this is a product-direction mismatch, not just missing code. The repo mission says SpacetimeDB should be authoritative, but the runtime default is still `LocalRegistry`, and the Spacetime path is not feature-complete.
-- `src/application/run_manager.rs` and `src/storage/registry_persistence.rs`: active-run exclusion is check-then-save, not an atomic repo-level lease. `start_run` and `reindex_repository` check in-memory state and persisted runs before calling `save_run`, while registry persistence only upserts by `run_id`. Two processes can race and create concurrent queued runs for the same repo.
-- `src/application/search.rs`, `src/indexing/pipeline.rs`, and `src/indexing/commit.rs`: a run can finish with status `Succeeded` even when files failed CAS persistence or later blob reads are skipped. Search then reports `Verified` repo-level results while silently omitting damaged files. "Succeeded" currently means "pipeline reached the end" more than "the repo is fully queryable."
-- `src/application/search.rs`: `search_text_ungated` silently skips files on blob read failure, blob hash mismatch, or non-UTF-8 content and still returns `Empty` or `Success` with `TrustLevel::Verified`. Empty results can therefore mean "no match" or "coverage was degraded."
-- `src/application/search.rs`: `search_symbols_ungated` at least tracks coverage counters, but the top-level trust still stays `Verified` even when files are skipped or failed. That can overstate confidence to downstream agents.
-- `src/parsing/mod.rs` and `src/application/search.rs`: parsing uses `String::from_utf8_lossy(bytes)` before tree-sitter, but retrieval later blocks when symbol or code-slice bytes are non-UTF-8. That creates a fidelity gap where metadata may be produced from lossy-decoded content that the retrieval layer refuses to serve.
-- `src/application/run_manager.rs`, `src/application/search.rs`, and `src/domain/retrieval.rs`: `NextAction::Repair` is emitted often, but there is no dedicated `repair_index` MCP tool. `repair` exists only as a mode string on `index_folder`, and repo-wide search does not show meaningful mode-specific execution logic for `repair`, `verify`, or `incremental`.
+**V1 Feature Gate — Legacy Test Compatibility:**
+- Issue: `Cargo.toml` maintains a `v1` feature gate for backward compatibility with `retrieval_conformance.rs` tests, which depend on old domain types not present in v2
+- Files: `Cargo.toml` (line 49-51), `tests/retrieval_conformance.rs`
+- Impact: Code includes dead/unused feature gate that adds maintenance burden. Tests will need rewriting for v2 response format in Phase 2
+- Fix approach: Complete Phase 2 milestone (Intelligence) which rewrites retrieval_conformance tests. Then remove the `v1` feature gate and code paths that depend on it
 
-## Recovery And Persistence Fragility
+**RwLock Poison Handling — Silent Failures:**
+- Issue: All `RwLock` access throughout the codebase uses `.lock().unwrap()` or `.read().unwrap()` patterns (`src/live_index/store.rs`, `src/daemon.rs`). Poisoned locks will panic instead of gracefully degrading
+- Files: `src/live_index/store.rs` (line 5, 349, 357), `src/daemon.rs` (widespread use), `src/sidecar/handlers.rs` (lock interactions)
+- Impact: Single-threaded panic in any RwLock holder brings down the entire MCP server. In long-running daemon scenarios, this is a production reliability issue
+- Fix approach: Wrap all `.unwrap()` calls with explicit poison handling that logs and returns error state. Consider using `parking_lot::RwLock` which doesn't poison on panic, or implement custom recovery logic that treats poisoned locks as stale state
 
-- `src/storage/registry_persistence.rs`: `verify_integrity` only rejects `schema_version == 0` when data exists. It does not validate cross-record integrity between runs, checkpoints, discovery manifests, idempotency records, repositories, and workspaces. Corruption is likely to surface late and feature-by-feature.
-- `src/application/init.rs` and `src/storage/registry_persistence.rs`: there are two different registry persistence stacks, including duplicated Windows `MoveFileExW` atomic-replace code and different lock strategies. That is risky in exactly the platform-sensitive area where the project already knows byte-level correctness matters.
-- `src/application/init.rs`: the bootstrap registry lock is a custom sentinel-file loop with a 5 second timeout and stale-file heuristics. `src/storage/registry_persistence.rs` uses `fs2` exclusive file locking instead. Divergent locking semantics increase the chance of one path fixing a Windows edge case while the other keeps it.
-- `src/application/run_manager.rs`: periodic checkpointing is hard-coded to every 100 processed files in `spawn_pipeline_for_run_with_resume`. Large repos can still lose a meaningful chunk of progress after a crash, especially if durable record persistence is slow.
-- `src/application/run_manager.rs`: resumed runs restore `files_processed` and `symbols_extracted` but reset `files_failed` to `0` in `PipelineResumeState`. Health and progress reporting after resume can under-report prior failures.
-- `src/application/run_manager.rs`: startup sweep only reconciles persisted `Queued` and `Running` runs plus owned temp artifacts. Other bad states, such as orphaned idempotency history or semantically corrupt manifests that still deserialize, are pushed to later code paths instead of getting a first-class repair pass.
+**Loose Parsing Error Strategy — Silent Data Loss:**
+- Issue: File parse failures record only a summary message in `ParseStatus::Failed` but discard the actual parse result tree. References may be extracted from a partially-corrupt AST
+- Files: `src/live_index/store.rs` (line 66-75), `src/domain/index.rs` (FileOutcome enum), `src/parsing/mod.rs`
+- Impact: In files with syntax errors, extracted references may include false positives or miss real references. Tools like `find_references` could return misleading results
+- Fix approach: Retain the partial AST even on failure, store syntax error details alongside symbols, and explicitly mark references extracted from error states. Consider adding a confidence score to ReferenceRecord
 
-## API, Security, And Operational Unknowns
+## Known Bugs
 
-- `src/protocol/mcp.rs`: write-oriented tools like `index_folder`, `resume_index_run`, and `reindex_repository` do not use the stricter `required_non_empty_string_param` helper used by read/search tools. Empty-string validation is inconsistent, and `repo_root` is described as absolute but not enforced as absolute.
-- `src/protocol/mcp.rs` and `src/application/mod.rs`: `repo_id` and `repo_root` are fully caller-supplied and not bound to each other. A client can accidentally reuse a `repo_id` for a different path or point an existing `repo_id` at the wrong tree, which risks mixed history and confusing retrieval behavior.
-- `src/protocol/mcp.rs` and `src/indexing/discovery.rs`: the server trusts the caller's chosen `repo_root` and recursively walks readable files from there. That is acceptable for a trusted local tool, but it becomes a real filesystem exposure boundary if this server is ever bridged remotely or used in a multi-tenant setting.
-- `src/protocol/mcp.rs`: the MCP surface only exposes tools plus a narrow run-status resource view. There is no prompt surface, and repository-health / repository-outline resources described in the project direction are not implemented yet.
-- `src/application/run_manager.rs`: `list_recent_run_ids` swallows control-plane errors with `unwrap_or_default`, so MCP resource listing can degrade to "no resources" instead of surfacing storage failure clearly.
+**Definition-Site Reference Filtering — Byte Range Collision:**
+- Symptoms: References whose byte range exactly matches a symbol's byte range are filtered out as "definition sites", but in languages with complex syntax (decorators, annotations, visibility modifiers), this filter may over-aggressively exclude valid references
+- Files: `src/live_index/store.rs` (line 91-106, "Pitfall 1" comment)
+- Trigger: Parse a Python class with decorators or Java class with annotations. The decorator/annotation location may have the same byte_range as the symbol definition
+- Workaround: Manually inspect the bytewise symbol ranges if results seem incomplete
+- Fix: Refine the filter to check not just byte_range equality but also context (line number, enclosing node type) to distinguish true definitions from decorated definitions
 
-## Regression Pressure
+**Git Temporal Computation Timing — No Deadline:**
+- Symptoms: `spawn_git_temporal_computation` spawns an async background task that may run indefinitely on large repos with deep history. No timeout. If git2 library hangs, the task hangs forever
+- Files: `src/live_index/git_temporal.rs` (line 32-73, `spawn_git_temporal_computation`)
+- Trigger: Clone a large monorepo (>1M commits). Run `git log` analysis
+- Workaround: Set `git2` to read-only shallow clones or limit commits server-side
+- Fix: Add a timeout (`tokio::time::timeout`) around the spawn_blocking call. Default 30 seconds. Make configurable via env var
 
-- `src/application/run_manager.rs`: this file is a major hotspot with lifecycle orchestration, idempotency, reindexing, resume, cancellation, startup recovery, reporting, and a large embedded test block in one place. It is the most likely future regression zone.
-- `src/application/search.rs`: this file mixes request gating, repo/file/symbol retrieval, batch APIs, trust modeling, and many edge-case tests. It is doing too many jobs, which makes trust-model changes especially risky.
-- `src/application/init.rs`: initialization, registry migration, path identity resolution, workspace attachment, file locking, and Windows atomic writes all live together. Any migration or path-resolution change has a wide blast radius.
-- `src/protocol/mcp.rs`: the public API currently over-promises relative to implementation in a few places, especially around mode semantics and future MCP surface shape. That is manageable now, but it will become a support burden if clients start depending on documented behavior that is only partially real.
+**Missing Synchronization in Symbol Search — Race on Published State:**
+- Symptoms: `PublishedIndexState` is updated independently from the live index. Between write lock release and published_state update, queries may see inconsistent state (new files indexed but old symbol counts)
+- Files: `src/live_index/store.rs` (PublishedIndexState management), `src/daemon.rs` (session state updates)
+- Trigger: Multiple edits in quick succession while queries are in flight
+- Workaround: Single-threaded workloads or coordinated client-side throttling
+- Fix: Wrap the entire "update live index → recompute published_state → swap" in a single write lock scope
+
+## Security Considerations
+
+**File Path Traversal — No Normalization on User Input:**
+- Risk: Tool handlers like `get_file_content`, `search_symbols` accept user-supplied file paths. Paths like `../../etc/passwd` are not explicitly normalized
+- Files: `src/protocol/tools.rs` (handlers that take `path` parameter), `src/live_index/query.rs` (path resolution)
+- Current mitigation: Index is scoped to repo root, so `../../` would only escape within the repo boundary. Filesystem operations use `std::fs` which rejects absolute paths. But there's no explicit path canonicalization
+- Recommendations:
+  1. Add `Path::canonicalize()` on all user-supplied paths before use
+  2. Verify that canonical path starts with repo root, reject if not
+  3. Document this assumption in tool descriptions
+
+**HTTP Sidecar — No Authentication:**
+- Risk: The sidecar (`src/sidecar/server.rs`) binds to `127.0.0.1` and serves HTTP endpoints like `/outline`, `/symbol-context`. Any local process can query
+- Files: `src/sidecar/server.rs` (line ~100, server bind), `src/sidecar/handlers.rs` (endpoint handlers)
+- Current mitigation: Binds to localhost only, port dynamically allocated and written to `.tokenizor/daemon.port`. No public internet exposure
+- Recommendations: Consider adding HMAC-based request signing if the sidecar is ever used in multi-tenant environments. Document that sidecar is local-only
+
+**Git Credentials Exposure — libgit2 May Read SSH Keys:**
+- Risk: The git2 crate uses libgit2 which may attempt to load SSH keys from `~/.ssh` when accessing git repositories. No way to prevent this
+- Files: `src/git.rs` (GitRepo implementation), `Cargo.toml` (git2 dependency with vendored-libgit2)
+- Current mitigation: SSH/HTTPS features disabled in git2 to remove OpenSSL dependency (see v0.20.1 fix), so git operations are read-only to local refs
+- Recommendations: If SSH key access becomes needed, carefully audit git2 credential handling and consider running in a sandboxed environment
+
+## Performance Bottlenecks
+
+**In-Memory Symbol Storage — Unbounded Memory Growth:**
+- Problem: All file content bytes are stored in `IndexedFile::content` (Vec<u8>). For large repositories (50K+ files), this can cause multi-gigabyte memory usage
+- Files: `src/live_index/store.rs` (line 36-37, IndexedFile struct), `docs/ROADMAP-v2.md` (line 527 acknowledges this)
+- Cause: Design trade-off for zero-copy, zero-disk-I/O retrieval. Every byte of every indexed file stays in RAM
+- Improvement path:
+  1. Short-term: Add `max_file_size` filter (skip files >10MB) and soft memory budget with per-file eviction (keep symbols, drop content for untouched files)
+  2. Medium-term: Implement file-level eviction policy (LRU) for content bytes while keeping symbol indices
+  3. Long-term: Move to tiered storage (hot/cold files) or SpacetimeDB backend
+
+**Cross-Reference Query — No Index on Reference Kind:**
+- Problem: `find_references` and `find_dependents` iterate through all references in all files. For large repos, this is O(all_references)
+- Files: `src/live_index/query.rs` (line ~500+, find_references implementation), `src/live_index/store.rs` (reverse_index HashMaps)
+- Cause: No secondary index by ReferenceKind or symbol name to narrow result set
+- Improvement path: Add a `references_by_kind` index (ReferenceKind → HashMap of name → ReferenceLocations) to skip scanning irrelevant references
+
+**Git Temporal Computation — Blocks on I/O:**
+- Problem: `git_temporal.rs` spawns a background task using `spawn_blocking`, which runs on a separate thread pool. For very large histories, this can starve other blocking tasks
+- Files: `src/live_index/git_temporal.rs` (line 48-51)
+- Cause: No priority or queueing system for long-running background tasks
+- Improvement path: Add task queue with priority levels, or make git temporal computation incremental (compute top N hotspots first, backfill rest asynchronously)
+
+## Fragile Areas
+
+**Symbol Selector Matching — Line-Based Ambiguity:**
+- Files: `src/live_index/query.rs` (resolve_symbol_selector), `src/protocol/edit.rs` (resolve_or_error)
+- Why fragile: Resolves symbols by name + optional kind + optional line. Line numbers are 0-indexed internally but 1-indexed in user-facing output. Off-by-one errors are common
+- Safe modification: Always test with multi-line symbol definitions (classes, functions with decorators) and verify line number consistency through the entire stack (user input → internal representation → output). Add integration tests that specifically exercise line boundary conditions
+- Test coverage: `tests/sidecar_integration.rs` covers basic cases but lacks edge case scenarios (nested symbols, decorator lines, inline comments)
+
+**Edit Operations — Byte Range Calculations:**
+- Files: `src/protocol/edit.rs` (apply_splice, line 17-25), indentation detection (line 91-100)
+- Why fragile: All edits work at the byte level. Multi-byte UTF-8 characters, CR/LF line endings, and tabs can cause misalignment between user-facing line:column and internal byte ranges
+- Safe modification: Before modifying any edit operation, add fuzz testing with mixed line endings and non-ASCII characters. Test on Windows (CRLF) and Unix (LF)
+- Test coverage: Basic ASCII testing in `tests/sidecar_integration.rs` but no UTF-8, CRLF, or mixed-encoding tests
+
+**Reference Extraction — Language-Specific Patterns:**
+- Files: `src/parsing/xref.rs` (tree-sitter query extraction), `src/parsing/languages/*.rs` (per-language patterns)
+- Why fragile: Each language has custom tree-sitter query patterns. Changes to a single language's extractor can silently break reference detection
+- Safe modification: After any change to xref extraction, run `tests/xref_integration.rs` on real codebases. Manually spot-check a few key symbols to ensure references are found
+- Test coverage: Integration tests exist but only test basic cases. No regression tests for known false negatives (e.g., dynamic imports, reflection-based calls)
+
+**Watcher Event Handling — Platform-Specific Timing:**
+- Files: `src/watcher/mod.rs` (event processing loop), `src/live_index/mod.rs` (watcher integration)
+- Why fragile: File watcher relies on OS filesystem events which have different guarantees across Windows/macOS/Linux. Events can be coalesced, delayed, or missed under heavy I/O load
+- Safe modification: Test on multiple platforms. Add delays/retries for file stat checks if event-based update fails
+- Test coverage: `tests/watcher_integration.rs` tests basic scenarios but doesn't cover high-concurrency writes or network filesystems
+
+## Scaling Limits
+
+**Memory Usage — Current Limit ~50MB Source:**
+- Current capacity: Comfortably indexes ~10,000 files (~50MB source code)
+- Limit: At ~100,000 files (~500MB source), memory usage becomes problematic. OOM likely at 1,000,000+ files
+- Scaling path:
+  1. Add file-level eviction: keep symbols, drop content bytes for files not accessed in last hour
+  2. Implement lazy-loading: load file content on first access, not at startup
+  3. Consider SpacetimeDB backend for very large repos (deferred to Phase 5+)
+
+**Query Latency — Not Measured Under Load:**
+- Current assumption: All queries <1ms from in-memory index (per ROADMAP-v2.md line 50)
+- Scaling issue: This hasn't been benchmarked with 100K+ symbols or 50K+ files. Lock contention under heavy concurrent queries could push this higher
+- Scaling path: Add latency instrumentation. Profile under simulated load (1000+ concurrent requests). If needed, switch to lock-free data structures or shard the index
+
+**Git History Analysis — No Bounds on Commits:**
+- Current limit: `MAX_COMMITS = 500`, `WINDOW_DAYS = 90` (src/live_index/git_temporal.rs line 77-78)
+- Issue: These are hard-coded constants. For very active repos (>500 commits/month), the window is too short to capture meaningful patterns
+- Scaling path: Make these configurable via env vars. Consider adaptive windowing based on commit frequency
+
+## Dependencies at Risk
+
+**tree-sitter Grammar Versions — Pinned, May Fall Behind:**
+- Risk: All tree-sitter language grammars are pinned to specific versions (`tree-sitter-rust = "0.24"`, etc. in Cargo.toml). If upstream fixes a critical bug, we won't see it
+- Impact: Symbol extraction or cross-references could be incorrect for newly-written code if grammar lags
+- Migration plan: Monitor grammar repositories monthly. Update quarterly or on critical bug fixes. Add regression tests when updating
+
+**git2 Vendored Libgit2 — Build Complexity:**
+- Risk: `git2` with `vendored-libgit2` feature compiles a C library from source. This adds build time and introduces platform-specific compilation issues
+- Impact: CI/CD becomes slower. Windows MSVC builds are particularly fragile
+- Migration plan: Monitor git2 releases. If vendored libgit2 causes too many issues, consider replacing with `gitoxide` (pure Rust) or simple `std::process::Command` calls to system git
+
+## Missing Critical Features
+
+**No Symbol Type Information — References Are String-Based:**
+- Problem: Cross-references match by symbol name only. Can't distinguish between a function `foo()` and a variable `foo`. This causes false positive matches
+- Blocks: Precise impact analysis, type-aware refactoring, accurate dependency graphs
+- Implementation: Would require integrating a language server (rust-analyzer, pyright) or implementing type inference. Large effort
+
+**No Incremental Git Temporal Updates — Recomputes on Every Reload:**
+- Problem: `git_temporal.rs` recomputes the entire temporal index on every index reload, even if only 1 file changed
+- Blocks: Fast reload times for large repos with deep history
+- Implementation: Cache temporal data per-file, only recompute files in the changeset
+
+**No Pruning of Transient References — Symbol Aliasing Creates Duplicate Results:**
+- Problem: In Rust, `use foo::bar; bar();` creates a reference to `bar` that also implicitly references `foo`. Both show up in `find_references` results
+- Blocks: Clean reference lists, ability to remove unused imports
+- Implementation: Add re-export tracking and prune transitive reference chains
+
+## Test Coverage Gaps
+
+**Integration Tests — Limited Real-World Scenarios:**
+- What's not tested:
+  - Large repos (>10K files)
+  - Files with syntax errors during watcher updates
+  - Concurrent edits while queries are in flight
+  - Git histories with >1000 commits
+  - Mixed line endings (CRLF on Windows)
+  - Symlinks and unusual filesystem layouts
+- Files: `tests/` directory (7 integration tests, ~7K lines total)
+- Risk: High-probability bugs in real-world usage scenarios
+- Priority: High — Add at least one "large repo" benchmark test. Add concurrent edit + query test. Add CRLF/UTF-8 edge case tests
+
+**Unit Tests on Private Functions — Format/Query Logic Untested:**
+- What's not tested:
+  - `src/protocol/format.rs` functions (100+ formatter functions)
+  - `src/live_index/search.rs` trigram and relevance logic
+  - Error paths (what happens when lock is poisoned, file is deleted mid-query)
+- Files: `src/protocol/format.rs` (4,835 lines, no visible unit tests), `src/live_index/search.rs` (1,764 lines, only inline test data)
+- Risk: Format changes break tool output contracts silently
+- Priority: Medium — Add doctests to formatter functions. Add parametric tests for search scoring
+
+**End-to-End MCP Protocol Tests — Only Tool Inputs Tested:**
+- What's not tested:
+  - Full MCP request/response cycle (JSON serialization, tool schema validation)
+  - MCP error responses (tools returning errors)
+  - Prompt resource generation
+  - Resource URI resolution
+- Files: `tests/sidecar_integration.rs` tests HTTP endpoints, but no tests for MCP protocol layer (`src/protocol/mod.rs`)
+- Risk: Tools may work in HTTP sidecar but fail when called via MCP protocol
+- Priority: High — Add tests that call tools via rmcp library, verify schema compliance
+
+---
+
+*Concerns audit: 2026-03-14*

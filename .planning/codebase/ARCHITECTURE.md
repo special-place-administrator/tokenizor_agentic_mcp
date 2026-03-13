@@ -1,84 +1,267 @@
 # Architecture
 
-`tokenizor_agentic_mcp` is a Rust crate with a CLI/runtime entry in `src/main.rs` and a small public re-export surface in `src/lib.rs`.
+**Analysis Date:** 2026-03-14
 
-The live runtime starts in `src/main.rs`:
-- `run()` loads `ServerConfig` from `src/config.rs`.
-- `ApplicationContext::from_config()` in `src/application/mod.rs` builds storage services and runs startup recovery before the server accepts work.
-- `guard_and_serve()` blocks serving if the deployment report is not ready.
-- `TokenizorServer` in `src/protocol/mcp.rs` serves over RMCP stdio transport.
+## Pattern Overview
 
-The crate is layered in the same order that requests flow:
-- `src/protocol/mcp.rs`: MCP tool/resource surface, parameter validation, JSON serialization, URI handling.
-- `src/application/`: orchestration and use-case logic. This is the main coordination layer.
-- `src/domain/`: transport-agnostic records and enums such as `IndexRunMode`, `IndexRunStatus`, `Checkpoint`, `DiscoveryManifest`, `FileRecord`, `RunStatusReport`, `ResultEnvelope`, and `VerifiedSourceResponse`.
-- `src/indexing/`: file discovery, bounded-concurrency execution, and commit validation.
-- `src/parsing/`: tree-sitter parse/extract logic plus per-language adapters in `src/parsing/languages/*.rs`.
-- `src/storage/`: blob storage, control-plane abstraction, and the current registry-backed durability path.
+**Overall:** Layered event-driven architecture with symbol-aware code indexing, real-time file watching, and MCP protocol bridging.
 
-`ApplicationContext` in `src/application/mod.rs` is the runtime facade. It owns:
-- `config`
-- `blob_store`
-- `control_plane`
-- `run_manager`
-- `startup_recovery`
+**Key Characteristics:**
+- **Multi-mode execution:** Standalone MCP server, daemon-backed persistent indexing, or sidecar HTTP proxy for token hook integration
+- **Dual persistence layers:** In-memory live index with serialized snapshots + git temporal analysis for historical context
+- **Symbol-centric query model:** All code navigation is symbol-aware (not string-based) with cross-references, enclosing contexts, and dependent tracking
+- **Zero-copy on read path:** Raw file bytes stored in-memory; only slicing performed, never copying
+- **Async task isolation:** File watching, git analysis, and sidecar HTTP server run in tokio background tasks without blocking MCP queries
 
-Control flow for indexing mutations is:
-1. `src/protocol/mcp.rs` parses a tool request such as `index_folder`, `reindex_repository`, `resume_index_run`, `cancel_index_run`, or `checkpoint_now`.
-2. `src/application/mod.rs` delegates to `RunManager` in `src/application/run_manager.rs`.
-3. `RunManager` enforces one active run per repo, persists run state through the `ControlPlane` trait in `src/storage/control_plane.rs`, and spawns the async pipeline.
-4. `spawn_pipeline_for_run_with_resume()` wires three durability callbacks into `IndexingPipeline` in `src/indexing/pipeline.rs`:
-   - discovery manifest persistence
-   - durable file record persistence
-   - periodic checkpoint creation
-5. `IndexingPipeline::execute()` discovers files or rematerializes a persisted manifest on resume, then `process_discovered()` runs bounded concurrent file work.
-6. Each file is read from disk, parsed by `parsing::process_file()` in `src/parsing/mod.rs`, then committed through `commit_file_result()` in `src/indexing/commit.rs`.
-7. `commit_file_result()` writes raw bytes to the CAS, validates the blob hash against the parse result, and emits a `FileRecord`.
-8. When the pipeline completes, `RunManager` writes final run status and clears repository invalidation on successful completion.
+## Layers
 
-The indexing/retrieval pipeline is intentionally split between exact bytes and metadata:
-- `src/storage/local_cas.rs` is the byte-exact store. It hashes raw bytes, writes through a temp file, calls `sync_all`, and renames into place. Existing blobs are reused by hash.
-- `src/indexing/commit.rs` converts parse results into persisted outcomes: `Committed`, `EmptySymbols`, `Failed`, or `Quarantined`.
-- `src/storage/registry_persistence.rs` is the current durable metadata plane for repos, runs, checkpoints, manifests, idempotency records, and file records.
-- `src/application/search.rs` reads metadata from the registry/control-plane side and raw content from the blob store side, then returns verified retrieval payloads from `src/domain/retrieval.rs`.
+**Discovery & Loading:**
+- Purpose: Recursively find source files, infer languages, and load initial index
+- Location: `src/discovery/mod.rs`, `src/live_index/store.rs`
+- Contains: `.gitignore`-respecting file walker, language detection, parallel parsing
+- Depends on: File system, tree-sitter language grammars, parsing layer
+- Used by: Startup initialization (main.rs) and `index_folder` tool
 
-Retrieval control flow is stricter than the mutation path:
-- `check_request_gate()` in `src/application/search.rs` blocks requests when the repo is unknown, invalidated, failed, degraded, quarantined, actively mutating, or never successfully indexed.
-- `search_text`, `search_symbols`, `get_file_outline`, `get_repo_outline`, `get_symbol`, and `get_symbols` all pass through that gate before reading persisted state.
-- Symbol and batch retrieval paths verify blob readability, byte-range validity, and source integrity before returning `VerifiedSourceResponse` or code-slice results.
-- MCP resources in `src/protocol/mcp.rs` currently expose recent run-status documents, not general repository snapshots.
+**Parsing & Xref Extraction:**
+- Purpose: Parse source files with tree-sitter, extract symbols, and cross-reference tracking
+- Location: `src/parsing/mod.rs`, `src/parsing/languages/`, `src/parsing/xref.rs`
+- Contains: Per-language symbol extraction (14 languages), reference detection, alias maps for imports
+- Depends on: Tree-sitter library, domain types
+- Used by: LiveIndex initialization and watcher event handlers
 
-Recovery boundaries are explicit:
-- `startup_sweep()` in `src/application/run_manager.rs` transitions stale persisted `Running` runs to `Interrupted` and stale `Queued` runs to either `Interrupted` or `Aborted`.
-- The same startup sweep removes owned temp artifacts for the registry and CAS surfaces.
-- `checkpoint_run()` only succeeds for a non-terminal run that already has an active pipeline and a non-empty committed cursor.
-- `resume_run()` only resumes an `Interrupted` run when all of these are present and consistent:
-  - a checkpoint
-  - a non-empty checkpoint cursor
-  - a persisted discovery manifest
-  - the cursor inside that manifest
-  - durable file records covering every file up to the cursor
-- If resume is unsafe, `RunManager` persists a `RunRecoveryState` rejection with a concrete next action instead of guessing.
+**Live Index (In-Memory Store):**
+- Purpose: Thread-safe queryable store of all indexed files, symbols, and cross-references with circuit breaker resilience
+- Location: `src/live_index/store.rs`, `src/live_index/query.rs`, `src/live_index/search.rs`, `src/live_index/trigram.rs`
+- Contains: `LiveIndex` struct (RwLock-protected), `IndexedFile`, symbol stores, reverse reference index, trigram search accelerators
+- Depends on: Parsing layer, domain models
+- Used by: Protocol layer, watcher, persistence layer, git temporal computation
 
-Idempotency boundaries are also explicit:
-- `start_run_idempotent()` derives `index::{repo_id}::{workspace_id}` plus a SHA-256 request hash from normalized inputs.
-- `reindex_repository()` does the same with a `reindex::...` key before checking for active runs, so true replays return the original active run.
-- `invalidate_repository()` uses `invalidate::...` plus a dedicated invalidation hash and treats "already invalidated" as domain-level success.
-- Same key plus same hash returns the stored result while work is active.
-- Same key plus different hash yields a deterministic `ConflictingReplay` error when the referenced work is still active.
-- Stale or orphaned idempotency records are allowed to fall through to new work or re-application.
+**Persistence & Snapshots:**
+- Purpose: Serialize/deserialize live index to `.tokenizor/index.bin` and verify disk state against snapshot at startup
+- Location: `src/live_index/persist.rs`
+- Contains: Postcard binary encoding, background verification with mtime tracking, fast-path snapshot loading
+- Depends on: Live index, postcard crate
+- Used by: Main.rs startup flow and graceful shutdown
 
-Major abstractions to know first:
-- `ApplicationContext` in `src/application/mod.rs`
-- `RunManager` in `src/application/run_manager.rs`
-- `ControlPlane` in `src/storage/control_plane.rs`
-- `BlobStore` in `src/storage/blob.rs`
-- `RegistryPersistence` in `src/storage/registry_persistence.rs`
-- `IndexingPipeline`, `PipelineProgress`, and `CheckpointTracker` in `src/indexing/pipeline.rs`
-- `FileProcessingResult` and parsing adapters in `src/parsing/`
+**Git Temporal Intelligence:**
+- Purpose: Asynchronously compute commit history, blame, co-change patterns for deeper context
+- Location: `src/live_index/git_temporal.rs`
+- Contains: Background git repository analysis, blame computation, co-change correlation
+- Depends on: git2 crate, live index
+- Used by: Protocol tools (`get_cochanges`, `trace_symbol`)
 
-Current backend reality matters:
-- `build_control_plane()` in `src/storage/control_plane.rs` can select `InMemory`, `LocalRegistry`, or `SpacetimeDb`.
-- `LocalRegistry` is the complete durable path today.
-- `SpacetimeControlPlane` currently implements deployment and health probes, but most CRUD operations still return "not wired in this slice yet" errors.
-- The `spacetime/` directory is therefore a future landing zone, not the current authoritative execution path.
+**MCP Protocol Bridge:**
+- Purpose: Map MCP tool calls to query functions and format responses as plain text
+- Location: `src/protocol/mod.rs`, `src/protocol/tools.rs`, `src/protocol/format.rs`, `src/protocol/resources.rs`
+- Contains: `TokenizorServer` (rmcp handler), 24 tool handlers, output formatters, resource templates, prompt definitions
+- Depends on: Live index, rmcp library, format layer
+- Used by: Main stdio transport server
+
+**Edit & Code Mutation:**
+- Purpose: Support in-place file editing with symbol-aware mutations (batch operations, refactoring)
+- Location: `src/protocol/edit.rs`, `src/protocol/edit_format.rs`
+- Contains: Symbol replacement, batch edits, range-scoped insertions, diff formatting
+- Depends on: Live index, protocol layer
+- Used by: Edit/write tool handlers
+
+**Daemon (Persistent Project State):**
+- Purpose: Share indexed projects across multiple MCP sessions, managing project instances and session lifecycle
+- Location: `src/daemon.rs`
+- Contains: `DaemonState` (projects, sessions), `DaemonSessionClient` (HTTP proxy), `ProjectInstance` (index + watchers), token stats tracking
+- Depends on: Live index, watcher, token stats, axum HTTP server
+- Used by: Main.rs when `TOKENIZOR_AUTO_INDEX=true` (daemon mode) or daemon CLI subcommand
+
+**Sidecar HTTP Server:**
+- Purpose: Standalone HTTP proxy for token hook integration (Read, Edit, Write, Grep hooks fire HTTP requests)
+- Location: `src/sidecar/mod.rs`, `src/sidecar/server.rs`, `src/sidecar/handlers.rs`, `src/sidecar/router.rs`
+- Contains: Axum routes for tool handlers, `TokenStats` atomic counters for hook metrics, port/PID file management
+- Depends on: Live index, axum, protocol handlers, token stats
+- Used by: Main.rs (spawned as background task alongside MCP server)
+
+**File Watcher:**
+- Purpose: Monitor filesystem changes and incrementally update live index without full re-parse
+- Location: `src/watcher/mod.rs`
+- Contains: notify-debouncer-full integration, event filtering, adaptive debounce windowing (200ms-500ms), parse + index update
+- Depends on: notify crate, parsing layer, live index
+- Used by: Main.rs (spawned as background task during local MCP server)
+
+**CLI & Hook Handlers:**
+- Purpose: Command-line interface for setup, daemon management, and hook script integration
+- Location: `src/cli/mod.rs`, `src/cli/init.rs`, `src/cli/hook.rs`
+- Contains: clap parser, init flow for Claude/Codex/Gemini, hook handlers for Read/Edit/Write/Grep/SessionStart/PromptSubmit
+- Depends on: Live index, protocol formats, discovery
+- Used by: Main entry point (src/main.rs)
+
+## Data Flow
+
+**Index Initialization (Startup):**
+
+1. Discovery walks project root respecting `.gitignore`
+2. Files grouped by language and classified (test, vendor, generated, etc.)
+3. Parallel parsing via rayon extracts symbols and cross-references
+4. Live index populates with `IndexedFile` records
+5. Circuit breaker checks parse failure rates; if >20%, marks degraded
+6. On graceful shutdown: serialize to `.tokenizor/index.bin`
+
+**File Change Detection (Watcher):**
+
+1. Filesystem event arrives (create, modify, delete, rename)
+2. Debouncer accumulates events with adaptive 200ms-500ms window
+3. Batch of events deduplicated and parsed
+4. Live index atomically updated (new/modified files replaced, deleted files removed)
+5. Watcher info updated for health reporting
+
+**Query Path (MCP Tool Call):**
+
+1. MCP stdin receives JSON `call_tool` request
+2. Tool handler acquires RwLockReadGuard on live index (non-blocking; extractors hold lock briefly)
+3. Query function (in `src/live_index/query.rs`) executes against snapshot data
+4. Lock released; formatting happens outside lock
+5. Response formatted as plain text (never JSON)
+6. Response sent via stdout
+
+**Git Temporal Analysis (Background):**
+
+1. Spawned async task after index ready
+2. Opens repo, walks commit history for each file/symbol
+3. Computes blame, co-change patterns
+4. Stores results in live index
+5. Runs non-blocking; queries fall back gracefully if not ready
+
+**Daemon Mode (Project Sharing):**
+
+1. First MCP instance connects; spawns daemon process
+2. Daemon loads index once, watches for file changes
+3. Subsequent MCP instances connect to daemon via HTTP
+4. All tool calls forwarded to daemon's shared index
+5. Token stats accumulated at daemon level
+6. Session records track client PIDs and activity timestamps
+
+**State Management:**
+
+- **Mutable state:** Live index (`Arc<RwLock<IndexState>>`) for file/symbol storage
+- **Immutable derived data:** Query result views (no caching; computed on-demand)
+- **Atomic counters:** TokenStats (read/edit/write/grep fires and token savings)
+- **Background tasks:** Watcher (tokio), git temporal (tokio), sidecar HTTP (axum)
+- **Atomic flags:** Daemon degradation flag, circuit breaker trip flag
+
+## Key Abstractions
+
+**IndexedFile:**
+- Purpose: Represents all parsed/indexed data for a single source file
+- Examples: `src/live_index/store.rs` (definition), `src/live_index/query.rs` (queries)
+- Pattern: Immutable, cloned on read; content bytes, symbols, references all co-located
+
+**ReferenceLocation:**
+- Purpose: Points to a specific cross-reference within a file (file path + index)
+- Examples: `src/live_index/store.rs` (definition), reverse index keys
+- Pattern: Compact location tracking; enables efficient dependent finding
+
+**SymbolRecord & ReferenceRecord:**
+- Purpose: Domain types capturing symbol metadata (kind, byte range, line range) and reference metadata (kind, enclosing symbol)
+- Examples: `src/domain/index.rs` (definitions), used throughout query layer
+- Pattern: Immutable, owned by `IndexedFile`; enables query filters (e.g., "find all Function references")
+
+**FileClassification:**
+- Purpose: Semantic categorization (test, vendor, generated, config) computed at discovery time
+- Examples: `src/domain/index.rs`, used in filter logic
+- Pattern: Deterministic based on path; never changes for a file path
+
+**LiveIndex / IndexState:**
+- Purpose: Thread-safe queryable container for all indexed state
+- Examples: `src/live_index/store.rs`, central to all queries
+- Pattern: Arc<RwLock<IndexState>>; readers hold brief locks (extract then release); writers (watcher) batch multiple file updates
+
+**DaemonSessionClient:**
+- Purpose: HTTP client proxy representing a single session connection to the daemon
+- Examples: `src/daemon.rs` (definition), `src/protocol/mod.rs` (wrapped in TokenizorServer)
+- Pattern: Reconnection-aware; retries on failure; degrades gracefully
+
+**TokenStats:**
+- Purpose: Atomic counters for hook metrics (fires, estimated token savings)
+- Examples: `src/sidecar/mod.rs` (definition), reported by health tool
+- Pattern: Fire-and-forget updates with Ordering::Relaxed; no blocking reads
+
+## Entry Points
+
+**Binary: `tokenizor` (no args or `mcp`):**
+- Location: `src/main.rs` → `run_mcp_server()` / `run_local_mcp_server_async()`
+- Triggers: Direct invocation or by Claude Code MCP client registration
+- Responsibilities: Project discovery, index loading (snapshot or fresh parse), watcher spawn, sidecar HTTP spawn, MCP server startup on stdio
+
+**Binary: `tokenizor daemon`:**
+- Location: `src/main.rs` → `run_daemon()`
+- Triggers: Manual invocation or spawned by MCP server
+- Responsibilities: Long-lived HTTP daemon accepting project open/close requests, managing persistent index, coordinating sessions
+
+**Binary: `tokenizor init`:**
+- Location: `src/cli/init.rs`
+- Triggers: Manual invocation to configure Claude/Codex/Gemini
+- Responsibilities: Write MCP server config to client metadata
+
+**Binary: `tokenizor hook <subcommand>`:**
+- Location: `src/cli/hook.rs`
+- Triggers: Called by Claude Code PostToolUse and SessionStart hooks
+- Responsibilities: Read stdin (file path or prompt), query live index, output formatted context to stdout
+
+**HTTP Sidecar:**
+- Location: `src/sidecar/server.rs`
+- Triggers: Spawned by main MCP server async startup
+- Responsibilities: Expose `/query`, `/stats`, `/health` endpoints for token hooks (Read, Edit, Grep); bridge HTTP to live index
+
+**Watcher Task:**
+- Location: `src/watcher/mod.rs`
+- Triggers: Spawned by main MCP server after index ready
+- Responsibilities: Monitor filesystem, debounce events, parse changes, update live index atomically
+
+**Git Temporal Task:**
+- Location: `src/live_index/git_temporal.rs`
+- Triggers: Spawned by main MCP server after index ready
+- Responsibilities: Compute commit history, blame, co-changes in background (non-blocking)
+
+## Error Handling
+
+**Strategy:** Fail gracefully with detailed tracing; circuit breaker for parse failures; daemon degradation flag for session faults.
+
+**Patterns:**
+
+1. **Parse errors:** Caught at `process_file()` (panic catch_unwind), recorded as `ParseStatus::Failed` in index, counted by circuit breaker. Query tools return explanatory text, not error codes.
+
+2. **File I/O errors:** Watcher logs and continues on read/parse failures; live index remains usable for previously-parsed files.
+
+3. **Daemon connection errors:** Client logs, sets degradation flag, falls back to local in-process execution on subsequent calls.
+
+4. **Index mutation races:** Watcher batches updates and uses atomic compare-exchange; concurrent reads never see partial state.
+
+5. **Tracing levels:** Uses `tracing` crate with `RUST_LOG` environment variable for filtering (info, debug, error, warn).
+
+## Cross-Cutting Concerns
+
+**Logging:**
+- Framework: `tracing` crate with `tracing-subscriber` for filtering and formatting
+- Startup logs include index stats (file count, symbol count, parse status, duration)
+- Tool call logs at debug level; errors at warn/error
+- Watcher logs filesystem events at debug, parse failures at warn
+- Daemon logs session open/close and HTTP requests at info
+
+**Validation:**
+- Language detection: `LanguageId::from_extension()` validates file extensions against tree-sitter support
+- Path normalization: All relative paths use forward slashes (even on Windows)
+- Byte range validation: Cross-references validated against file content length
+- Symbol filtering: Enclosing symbol computed deterministically via `find_enclosing_symbol()`
+
+**Authentication:**
+- None at protocol level (MCP operates over stdio, no auth)
+- Daemon HTTP accepts requests from localhost only (127.0.0.1 bind)
+- Session tracking via process ID and timestamp for lifecycle management
+
+**Performance:**
+- Zero-copy reads: Content bytes stored once; queries return slices
+- Trigram search: 3-byte substring indexing for sub-linear full-text search
+- Parallel parsing: rayon worksteal for multi-file parse phase
+- Debounced watcher: Adaptive windowing prevents re-index storms
+- Snapshot fast-path: Mtime verification reuses serialized index if disk state unchanged
+
+---
+
+*Architecture analysis: 2026-03-14*

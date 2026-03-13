@@ -1,59 +1,186 @@
-# Integrations
+# External Integrations
 
-- Primary interface is MCP over stdio, started from `src/main.rs` using `rmcp` transport I/O.
-- The concrete server surface lives in `src/protocol/mcp.rs` under `TokenizorServer`.
-- Implemented tool handlers in `src/protocol/mcp.rs` cover health, indexing, run inspection, cancellation, checkpointing, repository invalidation, search, and verified symbol/file retrieval.
-- Implemented MCP resources currently expose recent run status documents as `tokenizor://runs/{run_id}/status`, generated in `src/protocol/mcp.rs`.
-- There is no prompt interface implemented yet; searches for prompt handlers return no code hits, so prompts remain planned rather than wired.
+**Analysis Date:** 2026-03-14
 
-## External Services
+## APIs & External Services
 
-- SpacetimeDB is the only explicit external service integration today.
-- SpacetimeDB settings are defined in `src/config.rs` with defaults for CLI path, endpoint `http://127.0.0.1:3007`, database `tokenizor`, module path `spacetime/tokenizor`, and schema version `2`.
-- `src/storage/control_plane.rs` performs readiness checks against the SpacetimeDB CLI binary, HTTP endpoint reachability, configured database name, module path existence, and schema-version compatibility.
-- `spacetime/tokenizor/README.md` shows the SpacetimeDB module path is currently a scaffold; schema/module deployment is not yet wired into the Rust runtime.
-- The `SpacetimeControlPlane` type exists in `src/storage/control_plane.rs`, but mutable run-state persistence is still intentionally incomplete there and the local registry path remains the practical durable implementation.
+**Model Context Protocol (MCP):**
+- MCP Server - Exposes 24 tools and resource templates to Claude and other MCP clients
+  - SDK/Client: `rmcp` (1.1.0)
+  - Transport: stdio (primary), HTTP daemon proxy (secondary)
+  - Protocol: JSON-RPC 2.0
+  - Files: `src/protocol/` (24 tools, resource handlers, input structs)
 
-## Control-Plane Boundaries
+**HTTP Services:**
+- Internal sidecar HTTP server (localhost only)
+  - Framework: `axum` (0.8)
+  - Endpoints: `/health`, `/outline`, `/impact`, `/symbol-context`, `/repo-map`, `/prompt-context`, `/stats`
+  - Binding: Configurable via `TOKENIZOR_SIDECAR_BIND` env var (default: `127.0.0.1`)
+  - Port: Auto-assigned, stored in `.tokenizor/daemon.port` and `tokenizor-sidecar.port` files
+  - Authentication: None (localhost only)
 
-- `src/storage/control_plane.rs` defines the `ControlPlane` trait as the abstraction for repositories, runs, checkpoints, file metadata, discovery manifests, and idempotency records.
-- `build_control_plane` in `src/storage/control_plane.rs` selects among `InMemory`, `LocalRegistry`, and `SpacetimeDb` backends from `TOKENIZOR_CONTROL_PLANE_BACKEND`.
-- `InMemoryControlPlane` is scaffolding/test-only behavior.
-- `RegistryBackedControlPlane` delegates to `src/storage/registry_persistence.rs` and is the currently wired durable local control plane.
-- `SpacetimeControlPlane` is mainly a deployment/readiness integration point right now, not the fully authoritative mutable store yet.
+**Daemon Control Plane:**
+- Shared daemon process (optional, daemon mode)
+  - Purpose: Multi-session project index management
+  - Client: `reqwest` (0.12) HTTP client
+  - Communication: HTTP POST/GET to daemon at `127.0.0.1:port`
+  - Features: Session pooling, heartbeat monitoring, project isolation
+  - Files: `src/daemon.rs`, daemon HTTP endpoints at root path
 
-## Local Storage And Retrieval Boundaries
+## Data Storage
 
-- `src/application/mod.rs` roots local state under `TOKENIZOR_BLOB_ROOT`, defaulting to `.tokenizor`.
-- `src/storage/local_cas.rs` keeps raw bytes in a local CAS under `blobs/sha256/`, plus `temp/`, `quarantine/`, and `derived/`.
-- `src/storage/registry_persistence.rs` writes control-plane and bootstrap metadata to `control-plane/project-workspace-registry.json` under the same root.
-- `src/application/search.rs` joins registry metadata and CAS blobs for trusted retrieval, rather than serving metadata-only matches.
-- `src/storage/local_cas.rs` validates blob ids as SHA-256 digests and preserves byte-exact content, including CRLF and NUL cases covered by tests.
+**Local File System Storage:**
+- Index persistence: `.tokenizor/index.bin` (binary postcard format)
+  - Content: Serialized `IndexSnapshot` with all symbols, references, and metadata
+  - Update: On clean shutdown, background verification on load
+  - Format: postcard (compact binary) for fast round-trips
+  - Atomicity: Writes to temp file, then atomic rename to prevent corruption
+  - Files: `src/live_index/persist.rs`
 
-## Env And Operator Integration Points
+- Content-Addressable Storage (CAS):
+  - Root directory: Configurable via `TOKENIZOR_BLOB_ROOT` (default: `.tokenizor`)
+  - Purpose: Caches file content at specific git refs for temporal analysis
+  - File location: `.tokenizor/blobs/` (relative to project root)
 
-- All product-specific runtime configuration is loaded from environment in `src/config.rs`.
-- `TOKENIZOR_REQUIRE_READY_CONTROL_PLANE` gates whether degraded control-plane readiness blocks serving.
-- `src/main.rs` exposes operator entrypoints through `doctor`, `run`, `init`, `attach`, `migrate`, `inspect`, and `resolve`.
-- `README.md` documents those commands as the local workflow expected by operators.
-- `src/observability.rs` also integrates with the standard tracing environment filter, defaulting to `info` if no env filter is present.
+**Git Repository (No External DB):**
+- Local git repository access via libgit2
+  - No external database required
+  - All git history read from `.git/` directory
+  - In-process via `git2` crate (no child processes)
+  - Supports: git log with stats, file history, uncommitted changes, branch diffs
+  - Files: `src/git.rs`
 
-## API And Protocol Notes
+**In-Memory Index:**
+- `LiveIndex` (in `src/live_index/store.rs`) - primary working set
+  - Holds all parsed symbols, references, file metadata
+  - Shared via `Arc<RwLock<LiveIndex>>` for thread-safe access
+  - Optional: persisted to `.tokenizor/index.bin` on shutdown
 
-- MCP tool arguments are plain JSON objects parsed in `src/protocol/mcp.rs`.
-- Batch retrieval supports explicit symbol/code-slice targets in `src/protocol/mcp.rs`, which is the closest thing to an API payload contract in the current codebase.
-- Resource reads return JSON text for run status reports from `src/protocol/mcp.rs`.
-- There is no HTTP API server, webhook receiver, OAuth flow, API key store, or browser-session auth layer in the current repo.
-- The only network-style dependency today is outbound reachability probing of the configured SpacetimeDB HTTP endpoint.
+**Optional SpacetimeDB Backend:**
+- SpacetimeDB control plane (if `TOKENIZOR_CONTROL_PLANE_BACKEND=spacetimedb`)
+  - Connection: `TOKENIZOR_SPACETIMEDB_ENDPOINT` (default: `http://127.0.0.1:3007`)
+  - Database: `TOKENIZOR_SPACETIMEDB_DATABASE` (default: `tokenizor`)
+  - Schema version: `TOKENIZOR_SPACETIMEDB_SCHEMA_VERSION` (default: `2`)
+  - CLI tool: `TOKENIZOR_SPACETIMEDB_CLI` (default: `spacetimedb` binary)
+  - Purpose: Durable control plane for daemon sessions (optional; not required for basic operation)
 
-## Identity And Idempotency Integration
+## Authentication & Identity
 
-- Repository/workspace identity is derived and reconciled in `src/application/init.rs`.
-- Run idempotency records are persisted through `src/domain/idempotency.rs`, `src/application/run_manager.rs`, `src/storage/control_plane.rs`, and `src/storage/registry_persistence.rs`.
-- Current idempotency key spaces include index, reindex, and invalidate flows in `src/application/run_manager.rs`.
-- Checkpoints and recovery state are integrated through `src/application/run_manager.rs` plus `src/storage/registry_persistence.rs`.
+**Auth Provider:**
+- None - Tokenizor is a local development tool
+- MCP clients authenticate using their own mechanisms (Claude Code, Codex, etc.)
+- HTTP sidecar: localhost-only, no authentication required
+- Daemon: Project sessions use auto-generated session IDs and project IDs
 
-## Practical Status
+**File Access:**
+- Direct filesystem read/write to project files
+- Respects `.gitignore` for file discovery (via `ignore` crate)
+- Reads git history from `.git/` directory
 
-- Current production-facing integration story is local-first: stdio MCP + local CAS + local registry persistence.
-- Current future-facing integration story is hybrid: keep raw bytes local and move authoritative control-plane state into SpacetimeDB once the mutable backend is finished.
+## Monitoring & Observability
+
+**Logging:**
+- Framework: `tracing` (0.1) facade with `tracing-subscriber` (0.3) output
+- Configuration: `RUST_LOG` environment variable controls log level
+- Initialization: `observability::init_tracing()` in `src/main.rs`
+- Log output: stderr (JSON or pretty-printed based on environment)
+- Includes: Index load status, file watcher events, git temporal computation, daemon session lifecycle
+
+**Error Tracking:**
+- None (no external error aggregation service)
+- Errors logged via `tracing` and returned to MCP clients in tool responses
+- Circuit breaker mechanism in index loading (`src/live_index/store.rs`)
+
+**Health Checks:**
+- HTTP endpoint: `/health` (sidecar)
+- MCP tool: `tokenizor_health` (checks index readiness, file watcher, git temporal state)
+- Daemon heartbeat: 15-second intervals between session and daemon
+
+**Performance Metrics:**
+- Token usage tracking in sidecar: `TokenStats` in `src/sidecar/mod.rs`
+- Index statistics: file count, symbol count, parsed count, failure count
+- Timing: Index load duration, git temporal computation duration
+- Accessible via `/stats` sidecar endpoint
+
+## CI/CD & Deployment
+
+**Hosting:**
+- GitHub Actions (CI/CD automation)
+- Binary release platform: GitHub Releases
+- Package registry: npm (Node.js registry) for wrapper package
+
+**CI Pipeline:**
+- Platform: GitHub Actions
+- Triggers: Push to main, PR to main, manual workflow_dispatch
+- Build matrix: Windows (x86_64), Linux (x86_64), macOS (arm64 + x86_64)
+- Commands: `cargo test`, `cargo fmt --check`, `cargo build --release`
+- Release automation: `release-please` bot creates release PRs, auto-merges, publishes
+
+**Deployment Process:**
+- Release tags: Created by `release-please` (semantic versioning)
+- Binary artifacts: Built via GitHub Actions matrix
+- npm publishing: Automatic via GitHub Actions after tag creation
+- Postinstall hook: `npm/scripts/install.js` downloads platform-specific binary
+
+## Environment Configuration
+
+**Required Environment Variables:**
+- `RUST_LOG` (optional) - Tracing log level (default: info)
+- `TOKENIZOR_CONTROL_PLANE_BACKEND` (optional) - Backend mode (default: `local_registry`)
+
+**Optional Control Plane Variables (if using SpacetimeDB):**
+- `TOKENIZOR_SPACETIMEDB_ENDPOINT`
+- `TOKENIZOR_SPACETIMEDB_DATABASE`
+- `TOKENIZOR_SPACETIMEDB_MODULE_PATH`
+- `TOKENIZOR_SPACETIMEDB_SCHEMA_VERSION`
+- `TOKENIZOR_SPACETIMEDB_CLI`
+
+**Optional Runtime Variables:**
+- `TOKENIZOR_BLOB_ROOT` - CAS root directory
+- `TOKENIZOR_AUTO_INDEX` - Enable auto-indexing on startup (default: true)
+- `TOKENIZOR_SIDECAR_BIND` - HTTP sidecar bind address (default: 127.0.0.1)
+- `TOKENIZOR_REQUIRE_READY_CONTROL_PLANE` - Require readiness before serving (default: true)
+
+**Secrets Location:**
+- `.env` file (not committed; see `.env.example` for template)
+- Environment variables at runtime (set by MCP client or shell)
+
+## Webhooks & Callbacks
+
+**Incoming Webhooks:**
+- None - Tokenizor is a pull-only service
+
+**Outgoing Webhooks:**
+- None - No outbound event notifications
+- MCP clients receive results via normal RPC responses
+
+**Internal Callbacks:**
+- File watcher events: Filesystem changes trigger index updates
+  - Framework: `notify` (8)
+  - Debouncer: `notify-debouncer-full` (0.7)
+  - Handler: `src/watcher/` processes changes and updates live index
+
+- Background git temporal computation: Asynchronous symbol enrichment
+  - Spawned: At startup and on index reload
+  - Handler: `src/live_index/git_temporal.rs::spawn_git_temporal_computation`
+  - Updates: File churn scores, ownership, co-change coupling
+
+- Daemon heartbeat: 15-second keep-alive from session to daemon
+  - Handler: `src/main.rs` line 110-116 in `run_remote_mcp_server_async`
+
+## Platform Integration Points
+
+**GitHub:**
+- Repository: `special-place-administrator/tokenizor_agentic_mcp`
+- CI: GitHub Actions (`.github/workflows/`)
+- Release automation: `release-please` bot
+- Tokens: `RELEASE_PLEASE_TOKEN` (for auto-merge), `GITHUB_TOKEN` (for CI/CD)
+
+**Development Tools (Local):**
+- Git: `.git/` directory (read via libgit2)
+- npm: For package publishing
+- Rust toolchain: For compilation
+
+---
+
+*Integration audit: 2026-03-14*
