@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.16.2...v0.17.0) (2026-03-13)
+
+
+### Features
+
+* **edit:** Tier 2 batch tools — batch_edit, batch_rename, batch_insert ([859271d](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/859271d7a1b7f2954335002e2aa3c8588cae2109))
+
 ## [0.16.2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.16.1...v0.16.2) (2026-03-13)
 
 
