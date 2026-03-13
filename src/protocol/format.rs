@@ -1445,7 +1445,7 @@ fn not_found_symbol_names(relative_path: &str, symbol_names: &[String], name: &s
     if close_matches.is_empty() {
         format!(
             "No symbol {name} in {relative_path}. No close matches found. \
-             Use get_file_outline to see all {} symbols in this file.",
+             Use get_file_context with sections=['outline'] to see all {} symbols in this file.",
             symbol_names.len()
         )
     } else {

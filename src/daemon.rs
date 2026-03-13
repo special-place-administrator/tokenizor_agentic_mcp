@@ -26,9 +26,9 @@ use crate::protocol::tools::{
     AnalyzeFileImpactInput, DiffSymbolsInput, ExploreInput, FindDependentsInput,
     FindImplementationsInput, FindReferencesInput, GetCoChangesInput, GetContextBundleInput,
     GetFileContentInput, GetFileContextInput, GetFileOutlineInput, GetFileTreeInput,
-    GetSymbolContextInput, GetSymbolInput, GetSymbolsInput, IndexFolderInput, InspectMatchInput,
-    ResolvePathInput, SearchFilesInput, SearchSymbolsInput, SearchTextInput, TraceSymbolInput,
-    WhatChangedInput,
+    GetRepoMapInput, GetSymbolContextInput, GetSymbolInput, GetSymbolsInput, IndexFolderInput,
+    InspectMatchInput, ResolvePathInput, SearchFilesInput, SearchSymbolsInput, SearchTextInput,
+    TraceSymbolInput, WhatChangedInput,
 };
 use crate::sidecar::{SidecarState, SymbolSnapshot, TokenStats};
 use crate::watcher::{self, WatcherInfo};
@@ -1217,8 +1217,18 @@ async fn execute_tool_call(
             };
             Ok(server.get_symbol(Parameters(merged)).await)
         }
-        "get_repo_outline" => Ok(server.get_repo_outline().await),
-        "get_repo_map" => Ok(server.get_repo_map().await),
+        // Backward-compat alias: get_repo_outline → get_repo_map with detail='full'
+        "get_repo_outline" => {
+            let merged = GetRepoMapInput {
+                detail: Some("full".to_string()),
+                path: None,
+                depth: None,
+            };
+            Ok(server.get_repo_map(Parameters(merged)).await)
+        }
+        "get_repo_map" => Ok(server
+            .get_repo_map(Parameters(decode_params::<GetRepoMapInput>(params)?))
+            .await),
         "get_file_context" => Ok(server
             .get_file_context(Parameters(decode_params::<GetFileContextInput>(params)?))
             .await),
@@ -1271,24 +1281,64 @@ async fn execute_tool_call(
         "find_dependents" => Ok(server
             .find_dependents(Parameters(decode_params::<FindDependentsInput>(params)?))
             .await),
-        "get_file_tree" => Ok(server
-            .get_file_tree(Parameters(decode_params::<GetFileTreeInput>(params)?))
-            .await),
-        "get_context_bundle" => Ok(server
-            .get_context_bundle(Parameters(decode_params::<GetContextBundleInput>(params)?))
-            .await),
+        // Backward-compat alias: get_file_tree → get_repo_map with detail='tree'
+        "get_file_tree" => {
+            let tree_input = decode_params::<GetFileTreeInput>(params)?;
+            let merged = GetRepoMapInput {
+                detail: Some("tree".to_string()),
+                path: tree_input.path,
+                depth: tree_input.depth,
+            };
+            Ok(server.get_repo_map(Parameters(merged)).await)
+        }
+        // Backward-compat alias: get_context_bundle → get_symbol_context with bundle=true
+        "get_context_bundle" => {
+            let bundle_input = decode_params::<GetContextBundleInput>(params)?;
+            let merged = GetSymbolContextInput {
+                name: bundle_input.name,
+                file: None,
+                path: Some(bundle_input.path),
+                symbol_kind: bundle_input.kind,
+                symbol_line: bundle_input.symbol_line,
+                verbosity: bundle_input.verbosity,
+                bundle: Some(true),
+            };
+            Ok(server.get_symbol_context(Parameters(merged)).await)
+        }
         "explore" => Ok(server
             .explore(Parameters(decode_params::<ExploreInput>(params)?))
             .await),
-        "get_co_changes" => Ok(server
-            .get_co_changes(Parameters(decode_params::<GetCoChangesInput>(params)?))
-            .await),
+        // Backward-compat alias: get_co_changes → analyze_file_impact with include_co_changes=true
+        "get_co_changes" => {
+            let co_input = decode_params::<GetCoChangesInput>(params)?;
+            let merged = AnalyzeFileImpactInput {
+                path: co_input.path,
+                new_file: None,
+                include_co_changes: Some(true),
+                co_changes_limit: co_input.limit,
+            };
+            Ok(server.analyze_file_impact(Parameters(merged)).await)
+        }
         "diff_symbols" => Ok(server
             .diff_symbols(Parameters(decode_params::<DiffSymbolsInput>(params)?))
             .await),
-        "find_implementations" => Ok(server
-            .find_implementations(Parameters(decode_params::<FindImplementationsInput>(params)?))
-            .await),
+        // Backward-compat alias: find_implementations → find_references with mode='implementations'
+        "find_implementations" => {
+            let impl_input = decode_params::<FindImplementationsInput>(params)?;
+            let merged = FindReferencesInput {
+                name: impl_input.name,
+                kind: None,
+                path: None,
+                symbol_kind: None,
+                symbol_line: None,
+                limit: impl_input.limit,
+                max_per_file: None,
+                compact: None,
+                mode: Some("implementations".to_string()),
+                direction: impl_input.direction,
+            };
+            Ok(server.find_references(Parameters(merged)).await)
+        }
         "replace_symbol_body" => Ok(server
             .replace_symbol_body(Parameters(decode_params::<ReplaceSymbolBodyInput>(params)?))
             .await),
