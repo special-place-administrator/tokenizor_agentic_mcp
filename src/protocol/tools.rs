@@ -24,7 +24,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Deserialize a `u32` from either a JSON number or a stringified number like `"5"`.
-pub(crate) fn lenient_u32<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u32>, D::Error> {
+pub(crate) fn lenient_u32<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum NumOrStr {
@@ -1234,7 +1236,11 @@ impl TokenizorServer {
                             .as_deref()
                             .map(|k| s.kind.to_string().eq_ignore_ascii_case(k))
                             .unwrap_or(true)
-                        && params.0.symbol_line.map(|l| s.line_range.0 == l).unwrap_or(true)
+                        && params
+                            .0
+                            .symbol_line
+                            .map(|l| s.line_range.0 == l)
+                            .unwrap_or(true)
                 })?;
                 let body = std::str::from_utf8(
                     &f.content[sym.byte_range.0 as usize..sym.byte_range.1 as usize],
@@ -2097,7 +2103,12 @@ impl TokenizorServer {
         if let Err(e) = edit::atomic_write_file(&abs_path, &new_content) {
             return format!("Error writing {}: {e}", params.0.path);
         }
-        edit::reindex_after_write(&self.index, &params.0.path, new_content, file.language.clone());
+        edit::reindex_after_write(
+            &self.index,
+            &params.0.path,
+            new_content,
+            file.language.clone(),
+        );
         edit_format::format_replace(
             &params.0.path,
             &params.0.name,
@@ -2117,7 +2128,10 @@ impl TokenizorServer {
         &self,
         params: Parameters<edit::InsertSymbolInput>,
     ) -> String {
-        if let Some(result) = self.proxy_tool_call("insert_before_symbol", &params.0).await {
+        if let Some(result) = self
+            .proxy_tool_call("insert_before_symbol", &params.0)
+            .await
+        {
             return result;
         }
         let repo_root = match self.capture_repo_root() {
@@ -2147,7 +2161,12 @@ impl TokenizorServer {
         if let Err(e) = edit::atomic_write_file(&abs_path, &new_content) {
             return format!("Error writing {}: {e}", params.0.path);
         }
-        edit::reindex_after_write(&self.index, &params.0.path, new_content, file.language.clone());
+        edit::reindex_after_write(
+            &self.index,
+            &params.0.path,
+            new_content,
+            file.language.clone(),
+        );
         edit_format::format_insert(
             &params.0.path,
             &params.0.name,
@@ -2196,7 +2215,12 @@ impl TokenizorServer {
         if let Err(e) = edit::atomic_write_file(&abs_path, &new_content) {
             return format!("Error writing {}: {e}", params.0.path);
         }
-        edit::reindex_after_write(&self.index, &params.0.path, new_content, file.language.clone());
+        edit::reindex_after_write(
+            &self.index,
+            &params.0.path,
+            new_content,
+            file.language.clone(),
+        );
         edit_format::format_insert(
             &params.0.path,
             &params.0.name,
@@ -2271,7 +2295,12 @@ impl TokenizorServer {
         if let Err(e) = edit::atomic_write_file(&abs_path, &new_content) {
             return format!("Error writing {}: {e}", params.0.path);
         }
-        edit::reindex_after_write(&self.index, &params.0.path, new_content, file.language.clone());
+        edit::reindex_after_write(
+            &self.index,
+            &params.0.path,
+            new_content,
+            file.language.clone(),
+        );
         edit_format::format_delete(
             &params.0.path,
             &params.0.name,
@@ -2329,7 +2358,10 @@ impl TokenizorServer {
             (replaced, count)
         } else {
             match body_str.find(&params.0.old_text) {
-                Some(_) => (body_str.replacen(&params.0.old_text, &params.0.new_text, 1), 1),
+                Some(_) => (
+                    body_str.replacen(&params.0.old_text, &params.0.new_text, 1),
+                    1,
+                ),
                 None => {
                     return format!(
                         "Error: `{}` not found within symbol `{}`",
@@ -2345,13 +2377,17 @@ impl TokenizorServer {
             );
         }
         let old_sym_bytes = sym_end - sym_start;
-        let new_content =
-            edit::apply_splice(&file.content, sym.byte_range, new_body.as_bytes());
+        let new_content = edit::apply_splice(&file.content, sym.byte_range, new_body.as_bytes());
         let abs_path = repo_root.join(&params.0.path);
         if let Err(e) = edit::atomic_write_file(&abs_path, &new_content) {
             return format!("Error writing {}: {e}", params.0.path);
         }
-        edit::reindex_after_write(&self.index, &params.0.path, new_content, file.language.clone());
+        edit::reindex_after_write(
+            &self.index,
+            &params.0.path,
+            new_content,
+            file.language.clone(),
+        );
         edit_format::format_edit_within(
             &params.0.path,
             &params.0.name,

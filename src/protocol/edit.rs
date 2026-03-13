@@ -4,11 +4,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::index::{LanguageId, SymbolRecord};
+use crate::live_index::SharedIndex;
 use crate::live_index::query::{
-    render_symbol_selector, resolve_symbol_selector, SymbolSelectorMatch,
+    SymbolSelectorMatch, render_symbol_selector, resolve_symbol_selector,
 };
 use crate::live_index::store::IndexedFile;
-use crate::live_index::SharedIndex;
 
 // ---------------------------------------------------------------------------
 // Core splice

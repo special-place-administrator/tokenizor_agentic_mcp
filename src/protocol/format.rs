@@ -1547,10 +1547,7 @@ pub fn find_references_compact_view(
             }
             for line in &hit.context_lines {
                 if line.is_reference_line {
-                    let annotation = line
-                        .enclosing_annotation
-                        .as_deref()
-                        .unwrap_or("");
+                    let annotation = line.enclosing_annotation.as_deref().unwrap_or("");
                     lines.push(format!("  :{} {}", line.line_number, annotation));
                 }
             }
@@ -1862,7 +1859,11 @@ fn render_context_bundle_found(view: &ContextBundleFoundView, verbosity: &str) -
 }
 
 /// Format results of `trace_symbol`.
-pub fn trace_symbol_result_view(view: &crate::live_index::TraceSymbolView, name: &str, verbosity: &str) -> String {
+pub fn trace_symbol_result_view(
+    view: &crate::live_index::TraceSymbolView,
+    name: &str,
+    verbosity: &str,
+) -> String {
     match view {
         crate::live_index::TraceSymbolView::FileNotFound { path } => not_found_file(path),
         crate::live_index::TraceSymbolView::AmbiguousSymbol {
@@ -2058,9 +2059,25 @@ fn is_external_symbol(name: &str, file_path: &str) -> bool {
     }
     // Common stdlib/framework patterns across languages
     let external_prefixes = [
-        "std::", "core::", "alloc::", "System.", "Microsoft.", "java.", "javax.",
-        "kotlin.", "android.", "console.", "JSON.", "Math.", "Object.", "Array.",
-        "String.", "Promise.", "Map.", "Set.", "Error.",
+        "std::",
+        "core::",
+        "alloc::",
+        "System.",
+        "Microsoft.",
+        "java.",
+        "javax.",
+        "kotlin.",
+        "android.",
+        "console.",
+        "JSON.",
+        "Math.",
+        "Object.",
+        "Array.",
+        "String.",
+        "Promise.",
+        "Map.",
+        "Set.",
+        "Error.",
     ];
     for prefix in &external_prefixes {
         if name.starts_with(prefix) {
@@ -2069,11 +2086,40 @@ fn is_external_symbol(name: &str, file_path: &str) -> bool {
     }
     // Single-word lowercase names that are very common builtins
     let common_builtins = [
-        "println", "print", "eprintln", "format", "vec", "to_string", "clone",
-        "unwrap", "expect", "push", "pop", "len", "is_empty", "iter", "map",
-        "filter", "collect", "into", "from", "default", "new", "Add", "Sub",
-        "Display", "Debug", "ToString", "log", "warn", "error", "info",
-        "LogWarning", "LogError", "LogInformation", "Console",
+        "println",
+        "print",
+        "eprintln",
+        "format",
+        "vec",
+        "to_string",
+        "clone",
+        "unwrap",
+        "expect",
+        "push",
+        "pop",
+        "len",
+        "is_empty",
+        "iter",
+        "map",
+        "filter",
+        "collect",
+        "into",
+        "from",
+        "default",
+        "new",
+        "Add",
+        "Sub",
+        "Display",
+        "Debug",
+        "ToString",
+        "log",
+        "warn",
+        "error",
+        "info",
+        "LogWarning",
+        "LogError",
+        "LogInformation",
+        "Console",
     ];
     common_builtins.contains(&name)
 }
@@ -3794,23 +3840,24 @@ mod tests {
         let index = make_index_with_reverse(vec![(key, file)]);
 
         let live_result = context_bundle_result(&index, "src/lib.rs", "process", None);
-        let captured_result = context_bundle_result_view(&index.capture_context_bundle_view(
-            "src/lib.rs",
-            "process",
-            None,
-            None,
-        ), "full");
+        let captured_result = context_bundle_result_view(
+            &index.capture_context_bundle_view("src/lib.rs", "process", None, None),
+            "full",
+        );
 
         assert_eq!(captured_result, live_result);
     }
 
     #[test]
     fn test_context_bundle_result_view_ambiguous_symbol() {
-        let result = context_bundle_result_view(&ContextBundleView::AmbiguousSymbol {
-            path: "src/lib.rs".to_string(),
-            name: "process".to_string(),
-            candidate_lines: vec![1, 10],
-        }, "full");
+        let result = context_bundle_result_view(
+            &ContextBundleView::AmbiguousSymbol {
+                path: "src/lib.rs".to_string(),
+                name: "process".to_string(),
+                candidate_lines: vec![1, 10],
+            },
+            "full",
+        );
 
         assert!(
             result.contains("Ambiguous symbol selector"),
