@@ -12,35 +12,30 @@ The installer downloads a platform binary, auto-detects your CLI agents (Claude 
 
 AI coding agents spend most of their token budget on orientation — reading files, grepping for patterns, figuring out what code is where. Tokenizor replaces that with structured tools that resolve symbols, references, and dependencies server-side.
 
-- **Fewer tool calls** — one `get_context_bundle` replaces 3–5 sequential file reads
+- **Fewer tool calls** — one `get_symbol_context(bundle=true)` replaces 3–5 sequential file reads
 - **Lower token cost** — structured responses are 50–90% smaller than raw file content
 - **Better accuracy** — symbol-aware search finds the right code faster than text matching
 - **Git intelligence** — churn scores, ownership, and co-change coupling inform which files matter most
 - **Server-side edits** — 8 edit tools modify code by symbol name, saving 82–99% of tokens vs sending full file content
 
-## Tools (34)
+## Tools (24)
 
 ### Orientation
 
 | Tool | Purpose |
 |------|---------|
-| `health` | Index status, file counts, load time, watcher state |
-| `get_repo_map` | Compact project overview — file counts, language breakdown, directory structure (~500 tokens) |
-| `get_repo_outline` | Full symbol outline of the entire indexed project |
-| `get_file_tree` | Browsable source tree with symbol counts per file and directory |
-| `explore` | Concept-driven exploration — "how does authentication work?" returns related symbols, patterns, and files |
+| `health` | Index status, file counts, load time, watcher state, git temporal status |
+| `get_repo_map` | Start here. Adjustable detail: compact overview (~500 tokens), `detail='full'` for complete symbol outline, `detail='tree'` for browsable file tree with symbol counts. Includes routing hint for next steps. |
+| `explore` | Concept-driven exploration — "how does authentication work?" returns related symbols, patterns, and files. Set `depth=2` for signatures and dependents (~1500 tokens), `depth=3` for implementations and type chains (~3000 tokens). |
 
 ### Reading Code
 
 | Tool | Purpose |
 |------|---------|
 | `get_file_content` | Read files with line ranges, `around_line`, `around_match`, `around_symbol`, or chunked paging |
-| `get_file_outline` | Symbol outline for a single file — functions, classes, enums with line ranges |
-| `get_file_context` | Enriched file summary — imports, consumers, symbol outline, references, git activity |
-| `get_symbol` | Look up a single symbol by exact file and name |
-| `get_symbols` | Batch symbol lookup or byte-range code slices |
-| `get_symbol_context` | Symbol definition + callers grouped by file + callees + type usages |
-| `get_context_bundle` | One-call context package — symbol body + all referenced type definitions, resolved recursively |
+| `get_file_context` | Rich file summary: symbol outline, imports, consumers, references, git activity. Use `sections=['outline']` for symbol-only outline. |
+| `get_symbol` | Look up symbol(s) by file path and name. Single mode or batch mode with `targets[]` array for multiple symbols or byte-range code slices. |
+| `get_symbol_context` | Three modes: (1) Default — definition + callers + callees + type usages. (2) `bundle=true` — symbol body + all referenced type definitions, resolved recursively (best for edit prep). (3) `sections=[...]` — comprehensive trace analysis with dependents, siblings, implementations, git activity. |
 
 ### Searching
 
@@ -48,37 +43,32 @@ AI coding agents spend most of their token budget on orientation — reading fil
 |------|---------|
 | `search_symbols` | Find symbols by name, filtered by kind/language/path/scope |
 | `search_text` | Full-text search with enclosing symbol context, `group_by` modes, `follow_refs` for inline callers |
-| `search_files` | Ranked file path discovery with optional `changed_with` for git co-change coupling |
-| `resolve_path` | Exact path resolution from filenames and partial hints |
+| `search_files` | Ranked file path discovery. `changed_with=path` for git co-change coupling. `resolve=true` for exact path resolution from partial hints. |
 
 ### References and Dependencies
 
 | Tool | Purpose |
 |------|---------|
-| `find_references` | Grouped reference navigation with enclosing-symbol annotations |
-| `find_dependents` | Module-aware import graph — which files depend on this one (Mermaid/Graphviz output) |
-| `find_implementations` | Trait/interface implementation mapping — bidirectional search across 16 languages |
-| `trace_symbol` | One-call semantic investigation — definition, callers, callees, implementations, type deps |
+| `find_references` | Two modes: (1) Default — call sites, imports, type usages grouped by file. (2) `mode='implementations'` — trait/interface implementors bidirectionally with `direction` control. |
+| `find_dependents` | File-level dependency graph — which files import the given file. Supports Mermaid/Graphviz output. |
 | `inspect_match` | Deep-dive a `search_text` match — full symbol context with callers and type dependencies |
 
 ### Git Intelligence
 
 | Tool | Purpose |
 |------|---------|
-| `what_changed` | Files changed since a timestamp, git ref, or uncommitted |
-| `analyze_file_impact` | Re-read a file from disk, update the index, and report symbol-level impact |
-| `get_co_changes` | Git temporal coupling — co-changing files ranked by Jaccard coefficient |
-| `diff_symbols` | Symbol-level diff between git refs — added, removed, and modified symbols |
+| `what_changed` | Files changed since a timestamp, git ref, or uncommitted. Filter with `path_prefix`, `language`, or `code_only=true` to exclude non-source files. |
+| `analyze_file_impact` | Re-read a file from disk, update the index, report symbol-level impact. Set `include_co_changes=true` for git temporal coupling data. |
+| `diff_symbols` | Symbol-level diff between git refs — added, removed, and modified symbols per file. Filter by `language` or `path_prefix`. |
 
 ### Editing — Single Symbol
 
 | Tool | Purpose |
 |------|---------|
-| `replace_symbol_body` | Replace a symbol's entire definition by name. Auto-indents to match context. Reports stale references when the signature changes. |
-| `insert_before_symbol` | Insert code before a named symbol. Auto-indented. |
-| `insert_after_symbol` | Insert code after a named symbol. Auto-indented. |
+| `replace_symbol_body` | Replace a symbol's entire definition by name. Auto-indents. Reports stale references on signature changes. |
+| `insert_symbol` | Insert code before or after a named symbol. Set `position='before'` or `'after'` (default). Auto-indented. |
 | `delete_symbol` | Remove a symbol entirely by name. Cleans up surrounding blank lines. |
-| `edit_within_symbol` | Find-and-replace text within a symbol's body (scoped, not file-wide). |
+| `edit_within_symbol` | Find-and-replace scoped to a symbol's byte range — won't affect code outside it. |
 
 ### Editing — Batch Operations
 
@@ -92,11 +82,11 @@ AI coding agents spend most of their token budget on orientation — reading fil
 
 | Tool | Purpose |
 |------|---------|
-| `index_folder` | Reload the index from a directory path |
+| `index_folder` | Reindex a directory from scratch. Use when switching projects. |
 
 ### Token Savings
 
-Structured responses include a footer showing estimated tokens saved compared to raw file reads. Automatic on `get_file_outline`, `get_file_context`, `get_symbol_context`, and `get_context_bundle`. All tools support `verbosity` levels (`signature`, `compact`, `full`) where applicable.
+Structured responses include a footer showing estimated tokens saved compared to raw file reads. Automatic on `get_file_context`, `get_symbol_context`, and `get_symbol_context(bundle=true)`. All applicable tools support `verbosity` levels (`signature`, `compact`, `full`).
 
 ## Edit Tools — How They Work
 
@@ -118,9 +108,9 @@ Agent gets:   "src/auth.rs — replaced fn `validate_token` (342 → 287 bytes)"
 
 | Prompt | Purpose |
 |--------|---------|
-| `code-review` | Structured review for a file or symbol |
-| `architecture-map` | High-level architecture analysis |
-| `failure-triage` | Systematic failure investigation |
+| `tokenizor-review` | Structured code review plan using Tokenizor context surfaces |
+| `tokenizor-architecture` | Architecture mapping plan using repo-level context and cross-reference tools |
+| `tokenizor-triage` | Debugging and failure-triage plan using health, changed files, and local context |
 
 ## Resources
 
@@ -172,7 +162,7 @@ tokenizor-mcp init --client all     # all clients
 
 ### Claude Code
 
-Updates `~/.claude.json`, `~/.claude/settings.json`, `~/.claude/CLAUDE.md`. Installs MCP server registration, hook entries (`read`, `edit`, `write`, `grep`, `session-start`, `prompt-submit`), guidance block, and auto-allows all 34 Tokenizor tools.
+Updates `~/.claude.json`, `~/.claude/settings.json`, `~/.claude/CLAUDE.md`. Installs MCP server registration, hook entries (`read`, `edit`, `write`, `grep`, `session-start`, `prompt-submit`), guidance block, and auto-allows all 24 Tokenizor tools.
 
 ### Codex
 

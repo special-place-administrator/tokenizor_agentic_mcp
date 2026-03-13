@@ -30,7 +30,7 @@ pub struct FailureTriagePromptInput {
 #[prompt_router(vis = "pub(crate)")]
 impl TokenizorServer {
     #[prompt(
-        name = "code-review",
+        name = "tokenizor-review",
         description = "Generate a code review plan using Tokenizor context surfaces."
     )]
     pub(crate) async fn code_review_prompt(
@@ -58,7 +58,7 @@ impl TokenizorServer {
     }
 
     #[prompt(
-        name = "architecture-map",
+        name = "tokenizor-architecture",
         description = "Generate an architecture mapping plan using Tokenizor repo context."
     )]
     pub(crate) async fn architecture_map_prompt(
@@ -88,7 +88,7 @@ impl TokenizorServer {
     }
 
     #[prompt(
-        name = "failure-triage",
+        name = "tokenizor-triage",
         description = "Generate a debugging and failure-triage plan using Tokenizor state."
     )]
     pub(crate) async fn failure_triage_prompt(
@@ -201,9 +201,9 @@ mod tests {
         let server = make_server();
         let prompts = server.prompt_router.list_all();
         let names: Vec<&str> = prompts.iter().map(|prompt| prompt.name.as_str()).collect();
-        assert!(names.contains(&"code-review"));
-        assert!(names.contains(&"architecture-map"));
-        assert!(names.contains(&"failure-triage"));
+        assert!(names.contains(&"tokenizor-review"));
+        assert!(names.contains(&"tokenizor-architecture"));
+        assert!(names.contains(&"tokenizor-triage"));
     }
 
     #[tokio::test]
@@ -222,7 +222,7 @@ mod tests {
                 rmcp::model::PromptMessageContent::ResourceLink { link }
                     if link.uri == REPO_HEALTH_URI
             )),
-            "code-review prompt should link repo health"
+            "tokenizor-review prompt should link repo health"
         );
         assert!(
             result.messages.iter().any(|message| matches!(
@@ -230,7 +230,7 @@ mod tests {
                 rmcp::model::PromptMessageContent::ResourceLink { link }
                     if link.uri.contains("tokenizor://file/context")
             )),
-            "code-review prompt should link file context"
+            "tokenizor-review prompt should link file context"
         );
     }
 }
