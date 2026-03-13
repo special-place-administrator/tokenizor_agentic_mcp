@@ -1,3 +1,4 @@
+pub mod explore;
 pub mod format;
 pub mod prompts;
 pub mod resources;

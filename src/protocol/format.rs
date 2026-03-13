@@ -323,8 +323,10 @@ pub fn search_text_result_view(
                     // One entry per unique enclosing symbol, showing match count
                     // Preserve insertion order by tracking symbol names in order
                     let mut symbol_order: Vec<String> = Vec::new();
-                    let mut symbol_counts: std::collections::HashMap<String, (usize, String, u32, u32)> =
-                        std::collections::HashMap::new();
+                    let mut symbol_counts: std::collections::HashMap<
+                        String,
+                        (usize, String, u32, u32),
+                    > = std::collections::HashMap::new();
                     let mut no_symbol_count = 0usize;
                     for line_match in &file.matches {
                         if let Some(ref enc) = line_match.enclosing_symbol {
@@ -333,7 +335,12 @@ pub fn search_text_result_view(
                                 symbol_order.push(key.clone());
                                 symbol_counts.insert(
                                     key,
-                                    (1, enc.kind.clone(), enc.line_range.0 + 1, enc.line_range.1 + 1),
+                                    (
+                                        1,
+                                        enc.kind.clone(),
+                                        enc.line_range.0 + 1,
+                                        enc.line_range.1 + 1,
+                                    ),
                                 );
                             } else {
                                 symbol_counts.get_mut(&enc.name).unwrap().0 += 1;
@@ -352,7 +359,11 @@ pub fn search_text_result_view(
                         }
                     }
                     if no_symbol_count > 0 {
-                        let match_word = if no_symbol_count == 1 { "match" } else { "matches" };
+                        let match_word = if no_symbol_count == 1 {
+                            "match"
+                        } else {
+                            "matches"
+                        };
                         lines.push(format!("  (top-level): {} {}", no_symbol_count, match_word));
                     }
                 }
@@ -379,14 +390,21 @@ pub fn search_text_result_view(
                             if last_symbol.as_deref() != Some(enc.name.as_str()) {
                                 lines.push(format!(
                                     "  in {} {} (lines {}-{}):",
-                                    enc.kind, enc.name, enc.line_range.0 + 1, enc.line_range.1 + 1
+                                    enc.kind,
+                                    enc.name,
+                                    enc.line_range.0 + 1,
+                                    enc.line_range.1 + 1
                                 ));
                                 last_symbol = Some(enc.name.clone());
                             }
-                            lines.push(format!("    > {}: {}", line_match.line_number, line_match.line));
+                            lines.push(format!(
+                                "    > {}: {}",
+                                line_match.line_number, line_match.line
+                            ));
                         } else {
                             last_symbol = None;
-                            lines.push(format!("  {}: {}", line_match.line_number, line_match.line));
+                            lines
+                                .push(format!("  {}: {}", line_match.line_number, line_match.line));
                         }
                     }
                 }
@@ -398,21 +416,29 @@ pub fn search_text_result_view(
                             if last_symbol.as_deref() != Some(enc.name.as_str()) {
                                 lines.push(format!(
                                     "  in {} {} (lines {}-{}):",
-                                    enc.kind, enc.name, enc.line_range.0 + 1, enc.line_range.1 + 1
+                                    enc.kind,
+                                    enc.name,
+                                    enc.line_range.0 + 1,
+                                    enc.line_range.1 + 1
                                 ));
                                 last_symbol = Some(enc.name.clone());
                             }
-                            lines.push(format!("    > {}: {}", line_match.line_number, line_match.line));
+                            lines.push(format!(
+                                "    > {}: {}",
+                                line_match.line_number, line_match.line
+                            ));
                         } else {
                             last_symbol = None;
-                            lines.push(format!("  {}: {}", line_match.line_number, line_match.line));
+                            lines
+                                .push(format!("  {}: {}", line_match.line_number, line_match.line));
                         }
                     }
                 }
             }
         }
         if let Some(ref callers) = file.callers {
-            let caller_strs: Vec<String> = callers.iter()
+            let caller_strs: Vec<String> = callers
+                .iter()
                 .map(|c| format!("{} ({}:{})", c.symbol, c.file, c.line))
                 .collect();
             lines.push(format!("    Called by: {}", caller_strs.join(", ")));
@@ -4005,4 +4031,49 @@ mod tests {
             "depth 0 should have no marker, got: {result}"
         );
     }
+}
+
+/// Format the output of the `explore` tool.
+pub fn explore_result_view(
+    label: &str,
+    symbol_hits: &[(String, String, String)], // (name, kind, path)
+    text_hits: &[(String, String, usize)],    // (path, line, line_number)
+    related_files: &[(String, usize)],        // (path, count)
+) -> String {
+    let mut lines = vec![format!("── Exploring: {label} ──")];
+    lines.push(String::new());
+
+    if !symbol_hits.is_empty() {
+        lines.push(format!("Symbols ({} found):", symbol_hits.len()));
+        for (name, kind, path) in symbol_hits {
+            lines.push(format!("  {kind} {name}  {path}"));
+        }
+        lines.push(String::new());
+    }
+
+    if !text_hits.is_empty() {
+        lines.push(format!("Code patterns ({} found):", text_hits.len()));
+        let mut last_path: Option<&str> = None;
+        for (path, line, line_number) in text_hits {
+            if last_path != Some(path.as_str()) {
+                lines.push(format!("  {path}"));
+                last_path = Some(path.as_str());
+            }
+            lines.push(format!("    > {line_number}: {line}"));
+        }
+        lines.push(String::new());
+    }
+
+    if !related_files.is_empty() {
+        lines.push("Related files:".to_string());
+        for (path, count) in related_files {
+            lines.push(format!("  {path}  ({count} matches)"));
+        }
+    }
+
+    if symbol_hits.is_empty() && text_hits.is_empty() {
+        lines.push("No matches found.".to_string());
+    }
+
+    lines.join("\n")
 }

@@ -329,6 +329,15 @@ pub struct InspectMatchInput {
     pub context: Option<u32>,
 }
 
+/// Input for `explore`.
+#[derive(Deserialize, Serialize, JsonSchema)]
+pub struct ExploreInput {
+    /// Natural-language concept or topic to explore (e.g., "error handling", "concurrency", "database").
+    pub query: String,
+    /// Maximum number of results per category (default 10).
+    pub limit: Option<u32>,
+}
+
 enum WhatChangedMode {
     Timestamp(i64),
     GitRef(String),
@@ -530,7 +539,10 @@ fn search_text_options_from_input(
     })
 }
 
-fn enrich_with_callers(index: &crate::live_index::LiveIndex, result: &mut search::TextSearchResult) {
+fn enrich_with_callers(
+    index: &crate::live_index::LiveIndex,
+    result: &mut search::TextSearchResult,
+) {
     use std::collections::HashSet;
 
     for file_matches in &mut result.files {
@@ -557,9 +569,11 @@ fn enrich_with_callers(index: &crate::live_index::LiveIndex, result: &mut search
                     continue;
                 }
                 // Get enclosing symbol of the reference
-                let enclosing_name = ref_record.enclosing_symbol_index
+                let enclosing_name = ref_record
+                    .enclosing_symbol_index
                     .and_then(|idx| {
-                        index.get_file(ref_file)
+                        index
+                            .get_file(ref_file)
                             .and_then(|f| f.symbols.get(idx as usize))
                             .map(|s| s.name.clone())
                     })
@@ -1524,6 +1538,87 @@ impl TokenizorServer {
             )
         };
         format::context_bundle_result_view(&view)
+    }
+
+    /// Explore a concept across the codebase — finds related symbols, patterns, and files.
+    #[tool(
+        description = "Explore a concept across the codebase — finds related symbols, patterns, and files."
+    )]
+    pub(crate) async fn explore(&self, params: Parameters<ExploreInput>) -> String {
+        if let Some(result) = self.proxy_tool_call("explore", &params.0).await {
+            return result;
+        }
+        let limit = params.0.limit.unwrap_or(10) as usize;
+        let guard = self.index.read().expect("lock poisoned");
+        loading_guard!(guard);
+
+        let concept = super::explore::match_concept(&params.0.query);
+
+        let (label, symbol_queries, text_queries): (String, Vec<String>, Vec<String>) =
+            if let Some(c) = concept {
+                (
+                    c.label.to_string(),
+                    c.symbol_queries.iter().map(|s| s.to_string()).collect(),
+                    c.text_queries.iter().map(|s| s.to_string()).collect(),
+                )
+            } else {
+                let terms = super::explore::fallback_terms(&params.0.query);
+                if terms.is_empty() {
+                    return "Explore requires a non-empty query.".to_string();
+                }
+                (format!("'{}'", params.0.query), terms.clone(), terms)
+            };
+
+        // Collect symbol matches
+        let mut symbol_hits: Vec<(String, String, String)> = Vec::new(); // (name, kind, path)
+        for sq in &symbol_queries {
+            let result = search::search_symbols(&guard, sq, None, limit);
+            for hit in &result.hits {
+                if symbol_hits.len() >= limit {
+                    break;
+                }
+                let entry = (hit.name.clone(), hit.kind.clone(), hit.path.clone());
+                if !symbol_hits.contains(&entry) {
+                    symbol_hits.push(entry);
+                }
+            }
+        }
+
+        // Collect text pattern matches
+        let mut text_hits: Vec<(String, String, usize)> = Vec::new(); // (path, line, line_number)
+        for tq in &text_queries {
+            let options = search::TextSearchOptions {
+                total_limit: limit.min(50),
+                max_per_file: 2,
+                ..search::TextSearchOptions::for_current_code_search()
+            };
+            let result = search::search_text_with_options(&guard, Some(tq), None, false, &options);
+            if let Ok(r) = result {
+                for file in &r.files {
+                    for m in &file.matches {
+                        if text_hits.len() >= limit {
+                            break;
+                        }
+                        text_hits.push((file.path.clone(), m.line.clone(), m.line_number));
+                    }
+                }
+            }
+        }
+
+        // Count files by symbol/text presence
+        let mut file_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (_, _, path) in &symbol_hits {
+            *file_counts.entry(path.clone()).or_default() += 1;
+        }
+        for (path, _, _) in &text_hits {
+            *file_counts.entry(path.clone()).or_default() += 1;
+        }
+        let mut related_files: Vec<(String, usize)> = file_counts.into_iter().collect();
+        related_files.sort_by(|a, b| b.1.cmp(&a.1));
+        related_files.truncate(limit);
+
+        format::explore_result_view(&label, &symbol_hits, &text_hits, &related_files)
     }
 }
 
@@ -2632,7 +2727,7 @@ mod tests {
                 case_sensitive: None,
                 whole_word: None,
                 group_by: None,
-            follow_refs: None,
+                follow_refs: None,
             }))
             .await;
         assert!(
@@ -2666,7 +2761,7 @@ mod tests {
                 case_sensitive: None,
                 whole_word: None,
                 group_by: None,
-            follow_refs: None,
+                follow_refs: None,
             }))
             .await;
         assert!(
@@ -2706,7 +2801,7 @@ mod tests {
                 case_sensitive: None,
                 whole_word: None,
                 group_by: None,
-            follow_refs: None,
+                follow_refs: None,
             }))
             .await;
 
@@ -2755,7 +2850,7 @@ mod tests {
                 case_sensitive: None,
                 whole_word: None,
                 group_by: None,
-            follow_refs: None,
+                follow_refs: None,
             }))
             .await;
 
@@ -2804,7 +2899,7 @@ mod tests {
                 case_sensitive: None,
                 whole_word: None,
                 group_by: None,
-            follow_refs: None,
+                follow_refs: None,
             }))
             .await;
 
@@ -2845,7 +2940,7 @@ mod tests {
                 case_sensitive: None,
                 whole_word: None,
                 group_by: None,
-            follow_refs: None,
+                follow_refs: None,
             }))
             .await;
 
@@ -2889,7 +2984,7 @@ mod tests {
                 case_sensitive: None,
                 whole_word: None,
                 group_by: None,
-            follow_refs: None,
+                follow_refs: None,
             }))
             .await;
 
@@ -2924,7 +3019,7 @@ mod tests {
                 case_sensitive: Some(true),
                 whole_word: Some(true),
                 group_by: None,
-            follow_refs: None,
+                follow_refs: None,
             }))
             .await;
 
@@ -2971,7 +3066,7 @@ mod tests {
                 case_sensitive: None,
                 whole_word: Some(true),
                 group_by: None,
-            follow_refs: None,
+                follow_refs: None,
             }))
             .await;
 
@@ -3780,6 +3875,63 @@ mod tests {
         );
     }
 
+    // ── Explore tool tests ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_explore_concept_returns_results() {
+        let sym = make_symbol("Error", SymbolKind::Enum, 0, 5);
+        let content = b"pub enum Error {\n    NotFound,\n    Io(std::io::Error),\n}\nimpl Error {\n    fn is_retryable(&self) -> bool { false }\n}\n";
+        let (key, file) = make_file("src/error.rs", content, vec![sym]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server
+            .explore(Parameters(super::ExploreInput {
+                query: "error handling".to_string(),
+                limit: Some(5),
+            }))
+            .await;
+        assert!(
+            result.contains("Exploring: Error Handling"),
+            "should have concept label, got: {result}"
+        );
+        assert!(
+            result.contains("Error"),
+            "should find Error symbol, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_explore_fallback_returns_results() {
+        let content = b"fn process_data() { let x = 42; }\n";
+        let sym = make_symbol("process_data", SymbolKind::Function, 0, 0);
+        let (key, file) = make_file("src/main.rs", content, vec![sym]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server
+            .explore(Parameters(super::ExploreInput {
+                query: "process data".to_string(),
+                limit: Some(5),
+            }))
+            .await;
+        assert!(
+            result.contains("Exploring:"),
+            "should have explore header, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_explore_empty_query() {
+        let server = make_server(make_live_index_ready(vec![]));
+        let result = server
+            .explore(Parameters(super::ExploreInput {
+                query: "".to_string(),
+                limit: None,
+            }))
+            .await;
+        assert!(
+            result.contains("Explore requires a non-empty query"),
+            "should reject empty query, got: {result}"
+        );
+    }
+
     // ── INFR-05: No v1 tools in server ──────────────────────────────────────
 
     #[test]
@@ -3817,8 +3969,8 @@ mod tests {
         // Sanity check: we should have a reasonable number of tools.
         // Update this lower bound when removing tools; it prevents accidental regressions.
         assert!(
-            tool_count >= 23,
-            "server should expose at least 23 tools; found {tool_count}"
+            tool_count >= 24,
+            "server should expose at least 24 tools; found {tool_count}"
         );
     }
 
@@ -4210,19 +4362,34 @@ mod tests {
         let content = b"fn handle_request() {\n    let db = connect();\n}\n";
         let (key, file) = make_file("src/handler.rs", content, vec![sym]);
         let server = make_server(make_live_index_ready(vec![(key, file)]));
-        let result = server.search_text(Parameters(super::SearchTextInput {
-            query: Some("connect".to_string()),
-            terms: None, regex: None, path_prefix: None, language: None,
-            limit: None, max_per_file: None, include_generated: None,
-            include_tests: None, glob: None, exclude_glob: None,
-            context: None, case_sensitive: None, whole_word: None,
-            group_by: None,
-            follow_refs: None,
-        })).await;
-        assert!(result.contains("handle_request"),
-            "should show enclosing symbol name, got: {result}");
-        assert!(result.contains("in fn handle_request"),
-            "should show kind and name, got: {result}");
+        let result = server
+            .search_text(Parameters(super::SearchTextInput {
+                query: Some("connect".to_string()),
+                terms: None,
+                regex: None,
+                path_prefix: None,
+                language: None,
+                limit: None,
+                max_per_file: None,
+                include_generated: None,
+                include_tests: None,
+                glob: None,
+                exclude_glob: None,
+                context: None,
+                case_sensitive: None,
+                whole_word: None,
+                group_by: None,
+                follow_refs: None,
+            }))
+            .await;
+        assert!(
+            result.contains("handle_request"),
+            "should show enclosing symbol name, got: {result}"
+        );
+        assert!(
+            result.contains("in fn handle_request"),
+            "should show kind and name, got: {result}"
+        );
     }
 
     #[tokio::test]
@@ -4231,19 +4398,35 @@ mod tests {
         let content = b"fn connect() {\n    let url = db_url();\n    let pool = Pool::new(url);\n    pool.connect()\n}\n";
         let (key, file) = make_file("src/db.rs", content, vec![sym]);
         let server = make_server(make_live_index_ready(vec![(key, file)]));
-        let result = server.search_text(Parameters(super::SearchTextInput {
-            query: Some("pool".to_string()),
-            terms: None, regex: None, path_prefix: None, language: None,
-            limit: None, max_per_file: None, include_generated: None,
-            include_tests: None, glob: None, exclude_glob: None,
-            context: None, case_sensitive: None, whole_word: None,
-            group_by: Some("symbol".to_string()),
-            follow_refs: None,
-        })).await;
+        let result = server
+            .search_text(Parameters(super::SearchTextInput {
+                query: Some("pool".to_string()),
+                terms: None,
+                regex: None,
+                path_prefix: None,
+                language: None,
+                limit: None,
+                max_per_file: None,
+                include_generated: None,
+                include_tests: None,
+                glob: None,
+                exclude_glob: None,
+                context: None,
+                case_sensitive: None,
+                whole_word: None,
+                group_by: Some("symbol".to_string()),
+                follow_refs: None,
+            }))
+            .await;
         // With group_by: "symbol", should show symbol name and match count
-        assert!(result.contains("connect"), "should show symbol name: {result}");
-        assert!(result.contains("2 matches") || result.contains("match"),
-            "should show match count: {result}");
+        assert!(
+            result.contains("connect"),
+            "should show symbol name: {result}"
+        );
+        assert!(
+            result.contains("2 matches") || result.contains("match"),
+            "should show match count: {result}"
+        );
     }
 
     #[tokio::test]
@@ -4252,18 +4435,35 @@ mod tests {
         let sym = make_symbol("handler", SymbolKind::Function, 1, 1);
         let (key, file) = make_file("src/api.rs", content, vec![sym]);
         let server = make_server(make_live_index_ready(vec![(key, file)]));
-        let result = server.search_text(Parameters(super::SearchTextInput {
-            query: Some("connect".to_string()),
-            terms: None, regex: None, path_prefix: None, language: None,
-            limit: None, max_per_file: None, include_generated: None,
-            include_tests: None, glob: None, exclude_glob: None,
-            context: None, case_sensitive: None, whole_word: None,
-            group_by: Some("usage".to_string()),
-            follow_refs: None,
-        })).await;
+        let result = server
+            .search_text(Parameters(super::SearchTextInput {
+                query: Some("connect".to_string()),
+                terms: None,
+                regex: None,
+                path_prefix: None,
+                language: None,
+                limit: None,
+                max_per_file: None,
+                include_generated: None,
+                include_tests: None,
+                glob: None,
+                exclude_glob: None,
+                context: None,
+                case_sensitive: None,
+                whole_word: None,
+                group_by: Some("usage".to_string()),
+                follow_refs: None,
+            }))
+            .await;
         // Should exclude the "use" import line
-        assert!(!result.contains("use crate"), "should filter out imports: {result}");
-        assert!(result.contains("handler"), "should keep usage matches: {result}");
+        assert!(
+            !result.contains("use crate"),
+            "should filter out imports: {result}"
+        );
+        assert!(
+            result.contains("handler"),
+            "should keep usage matches: {result}"
+        );
     }
 
     #[tokio::test]
@@ -4295,24 +4495,44 @@ mod tests {
         let sym_b = make_symbol("handler", SymbolKind::Function, 0, 1);
         let file_b_content = b"fn handler() {\n    connect()\n}\n";
         let (key_b, file_b) = make_file_with_refs(
-            "src/api.rs", file_b_content, vec![sym_b],
+            "src/api.rs",
+            file_b_content,
+            vec![sym_b],
             vec![make_ref("connect", None, ReferenceKind::Call, 1, Some(0))],
         );
 
-        let server = make_server(make_live_index_ready(vec![(key_a, file_a), (key_b, file_b)]));
-        let result = server.search_text(Parameters(super::SearchTextInput {
-            query: Some("db_open".to_string()),
-            terms: None, regex: None, path_prefix: None, language: None,
-            limit: None, max_per_file: None, include_generated: None,
-            include_tests: None, glob: None, exclude_glob: None,
-            context: None, case_sensitive: None, whole_word: None,
-            group_by: None,
-            follow_refs: Some(true),
-        })).await;
+        let server = make_server(make_live_index_ready(vec![
+            (key_a, file_a),
+            (key_b, file_b),
+        ]));
+        let result = server
+            .search_text(Parameters(super::SearchTextInput {
+                query: Some("db_open".to_string()),
+                terms: None,
+                regex: None,
+                path_prefix: None,
+                language: None,
+                limit: None,
+                max_per_file: None,
+                include_generated: None,
+                include_tests: None,
+                glob: None,
+                exclude_glob: None,
+                context: None,
+                case_sensitive: None,
+                whole_word: None,
+                group_by: None,
+                follow_refs: Some(true),
+            }))
+            .await;
         // Should show that connect() is called by handler() in src/api.rs
-        assert!(result.contains("handler") || result.contains("api.rs"),
-            "should show callers of enclosing symbol, got: {result}");
-        assert!(result.contains("Called by"),
-            "should have Called by section, got: {result}");
+        assert!(
+            result.contains("handler") || result.contains("api.rs"),
+            "should show callers of enclosing symbol, got: {result}"
+        );
+        assert!(
+            result.contains("Called by"),
+            "should have Called by section, got: {result}"
+        );
     }
 }

@@ -19,10 +19,10 @@ use tokio::net::TcpListener;
 use crate::live_index::{self, SharedIndex};
 use crate::protocol::TokenizorServer;
 use crate::protocol::tools::{
-    AnalyzeFileImpactInput, FindDependentsInput, FindReferencesInput, GetContextBundleInput,
-    GetFileContentInput, GetFileContextInput, GetFileOutlineInput, GetFileTreeInput,
-    GetSymbolContextInput, GetSymbolInput, GetSymbolsInput, IndexFolderInput, ResolvePathInput,
-    SearchFilesInput, SearchSymbolsInput, SearchTextInput, WhatChangedInput,
+    AnalyzeFileImpactInput, ExploreInput, FindDependentsInput, FindReferencesInput,
+    GetContextBundleInput, GetFileContentInput, GetFileContextInput, GetFileOutlineInput,
+    GetFileTreeInput, GetSymbolContextInput, GetSymbolInput, GetSymbolsInput, IndexFolderInput,
+    ResolvePathInput, SearchFilesInput, SearchSymbolsInput, SearchTextInput, WhatChangedInput,
 };
 use crate::sidecar::{SidecarState, SymbolSnapshot, TokenStats};
 use crate::watcher::{self, WatcherInfo};
@@ -1240,6 +1240,9 @@ async fn execute_tool_call(
             .await),
         "get_context_bundle" => Ok(server
             .get_context_bundle(Parameters(decode_params::<GetContextBundleInput>(params)?))
+            .await),
+        "explore" => Ok(server
+            .explore(Parameters(decode_params::<ExploreInput>(params)?))
             .await),
         other => anyhow::bail!("unknown tool '{other}'"),
     }
