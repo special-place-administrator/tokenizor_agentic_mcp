@@ -197,6 +197,8 @@ const TOKENIZOR_TOOL_NAMES: &[&str] = &[
     "mcp__tokenizor__inspect_match",
     "mcp__tokenizor__analyze_file_impact",
     "mcp__tokenizor__what_changed",
+    "mcp__tokenizor__get_co_changes",
+    "mcp__tokenizor__diff_symbols",
 ];
 
 fn merge_allowed_tools(settings: &mut Value) {

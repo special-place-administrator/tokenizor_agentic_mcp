@@ -242,7 +242,8 @@ pub struct SearchTextInput {
 /// Input for `search_files`.
 #[derive(Deserialize, Serialize, JsonSchema)]
 pub struct SearchFilesInput {
-    /// Filename, folder name, or partial path.
+    /// Filename, folder name, or partial path. Optional when `changed_with` is provided.
+    #[serde(default)]
     pub query: String,
     /// Optional maximum number of matches to return (default 20, capped at 50).
     #[serde(default, deserialize_with = "lenient_u32")]
@@ -466,6 +467,27 @@ pub struct ExploreInput {
     /// Maximum number of results per category (default 10).
     #[serde(default, deserialize_with = "lenient_u32")]
     pub limit: Option<u32>,
+}
+
+/// Input for `get_co_changes`.
+#[derive(Deserialize, Serialize, JsonSchema)]
+pub struct GetCoChangesInput {
+    /// Relative path to the file to query co-changes for.
+    pub path: String,
+    /// Maximum number of co-changing files to return (default 10).
+    #[serde(default, deserialize_with = "lenient_u32")]
+    pub limit: Option<u32>,
+}
+
+/// Input for `diff_symbols`.
+#[derive(Deserialize, Serialize, JsonSchema)]
+pub struct DiffSymbolsInput {
+    /// Base git ref to compare from (default: "main").
+    pub base: Option<String>,
+    /// Target git ref to compare to (default: "HEAD").
+    pub target: Option<String>,
+    /// Optional path filter — only show diffs for files matching this prefix.
+    pub path_prefix: Option<String>,
 }
 
 enum WhatChangedMode {
@@ -968,7 +990,12 @@ impl TokenizorServer {
             guard.capture_shared_file(&params.0.path)
         };
         match file {
-            Some(file) => format::file_outline_from_indexed_file(file.as_ref()),
+            Some(file) => {
+                let raw_chars = file.content.len();
+                let result = format::file_outline_from_indexed_file(file.as_ref());
+                let footer = format::compact_savings_footer(result.len(), raw_chars);
+                format!("{result}{footer}")
+            }
             None => format::not_found_file(&params.0.path),
         }
     }
@@ -1100,9 +1127,16 @@ impl TokenizorServer {
         if let Some(result) = self.proxy_tool_call("get_file_context", &params.0).await {
             return result;
         }
-        let guard = self.index.read().expect("lock poisoned");
-        loading_guard!(guard);
-        drop(guard);
+        let raw_chars = {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
+            let raw = guard
+                .capture_shared_file(&params.0.path)
+                .map(|f| f.content.len())
+                .unwrap_or(0);
+            drop(guard);
+            raw
+        };
 
         let state = sidecar_state_for_server(self);
         let outline = OutlineParams {
@@ -1110,7 +1144,10 @@ impl TokenizorServer {
             max_tokens: params.0.max_tokens,
         };
         match outline_tool_text(&state, &outline) {
-            Ok(result) => result,
+            Ok(result) => {
+                let footer = format::compact_savings_footer(result.len(), raw_chars);
+                format!("{result}{footer}")
+            }
             Err(StatusCode::NOT_FOUND) => format::not_found_file(&params.0.path),
             Err(StatusCode::INTERNAL_SERVER_ERROR) => {
                 "File context failed: internal error.".to_string()
@@ -1128,9 +1165,17 @@ impl TokenizorServer {
         if let Some(result) = self.proxy_tool_call("get_symbol_context", &params.0).await {
             return result;
         }
-        let guard = self.index.read().expect("lock poisoned");
-        loading_guard!(guard);
-        drop(guard);
+        let file_path_hint = params.0.path.as_deref().or(params.0.file.as_deref());
+        let raw_chars = {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
+            let raw = file_path_hint
+                .and_then(|p| guard.capture_shared_file(p))
+                .map(|f| f.content.len())
+                .unwrap_or(0);
+            drop(guard);
+            raw
+        };
 
         let state = sidecar_state_for_server(self);
         let symbol_context = SymbolContextParams {
@@ -1141,7 +1186,10 @@ impl TokenizorServer {
             symbol_line: params.0.symbol_line,
         };
         match symbol_context_tool_text(&state, &symbol_context) {
-            Ok(result) => result,
+            Ok(result) => {
+                let footer = format::compact_savings_footer(result.len(), raw_chars);
+                format!("{result}{footer}")
+            }
             Err(StatusCode::INTERNAL_SERVER_ERROR) => {
                 "Symbol context failed: internal error.".to_string()
             }
@@ -1353,6 +1401,10 @@ impl TokenizorServer {
                 );
             }
             return "Git temporal data is not yet available. It loads asynchronously after the first index.".to_string();
+        }
+
+        if params.0.query.is_empty() {
+            return "search_files requires a non-empty `query` (or use `changed_with` to find co-changing files).".to_string();
         }
 
         let view = {
@@ -1657,22 +1709,35 @@ impl TokenizorServer {
             return result;
         }
         let input = &params.0;
-        let view = {
+        let (view, raw_chars) = {
             let guard = self.index.read().expect("lock poisoned");
             loading_guard!(guard);
-            guard.capture_context_bundle_view(
+            let raw = guard
+                .capture_shared_file(&input.path)
+                .map(|f| f.content.len())
+                .unwrap_or(0);
+            let v = guard.capture_context_bundle_view(
                 &input.path,
                 &input.name,
                 input.kind.as_deref(),
                 input.symbol_line,
-            )
+            );
+            (v, raw)
         };
-        format::context_bundle_result_view(&view)
+        let result = format::context_bundle_result_view(&view);
+        let footer = format::compact_savings_footer(result.len(), raw_chars);
+        format!("{result}{footer}")
     }
 
-    /// Explore a concept across the codebase — finds related symbols, patterns, and files.
+    /// Start here when you don't know where to look. Accepts a natural-language concept
+    /// (e.g. "error handling", "authentication", "how are requests routed?") and runs
+    /// combined symbol + text searches using a built-in concept map. Returns a unified
+    /// overview of relevant symbols, patterns, and files — broader than search_symbols
+    /// (which needs an exact name) and more structured than search_text (which needs a
+    /// literal query). Use get_repo_map for project structure; use explore for conceptual
+    /// questions about how something works.
     #[tool(
-        description = "Explore a concept across the codebase — finds related symbols, patterns, and files."
+        description = "Start here when you don't know where to look. Accepts a natural-language concept (e.g. 'error handling', 'authentication') and returns a unified overview of related symbols, patterns, and files. Broader than search_symbols, more structured than search_text. Use for conceptual questions like 'how does X work?'."
     )]
     pub(crate) async fn explore(&self, params: Parameters<ExploreInput>) -> String {
         if let Some(result) = self.proxy_tool_call("explore", &params.0).await {
@@ -1749,6 +1814,93 @@ impl TokenizorServer {
         related_files.truncate(limit);
 
         format::explore_result_view(&label, &symbol_hits, &text_hits, &related_files)
+    }
+
+    /// Query git temporal coupling — find files that co-change with a given file.
+    #[tool(
+        description = "Query git temporal coupling data for a file. Returns co-changing files (ranked by Jaccard coupling), churn score, ownership, and recent commit info. Use when you want to understand a file's change relationships."
+    )]
+    pub(crate) async fn get_co_changes(&self, params: Parameters<GetCoChangesInput>) -> String {
+        if let Some(result) = self.proxy_tool_call("get_co_changes", &params.0).await {
+            return result;
+        }
+
+        let temporal = self.index.git_temporal();
+        match temporal.state {
+            crate::live_index::git_temporal::GitTemporalState::Ready => {}
+            crate::live_index::git_temporal::GitTemporalState::Pending
+            | crate::live_index::git_temporal::GitTemporalState::Computing => {
+                return "Git temporal data is still loading. Try again in a few seconds."
+                    .to_string();
+            }
+            crate::live_index::git_temporal::GitTemporalState::Unavailable(ref reason) => {
+                return format!("Git temporal data unavailable: {reason}");
+            }
+        }
+
+        let limit = params.0.limit.unwrap_or(10) as usize;
+        let path = params.0.path.as_str();
+
+        match temporal.files.get(path) {
+            Some(history) => format::get_co_changes_result_view(path, history, limit),
+            None => format!(
+                "No git history found for '{path}'. Check the file path is correct and that the file has been committed."
+            ),
+        }
+    }
+
+    /// Compare symbols between two git refs — shows added, removed, and modified symbols.
+    #[tool(
+        description = "Symbol-level diff between two git refs for code review. Shows which functions, structs, and other symbols were added, removed, or modified. Defaults to comparing main...HEAD."
+    )]
+    pub(crate) async fn diff_symbols(&self, params: Parameters<DiffSymbolsInput>) -> String {
+        if let Some(result) = self.proxy_tool_call("diff_symbols", &params.0).await {
+            return result;
+        }
+        let base = params.0.base.as_deref().unwrap_or("main");
+        let target = params.0.target.as_deref().unwrap_or("HEAD");
+
+        let repo_root = self.capture_repo_root();
+
+        let Some(repo_root) = repo_root else {
+            return "No repository root found.".to_string();
+        };
+
+        // Check index is not loading/empty
+        {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
+        }
+
+        // Get changed files
+        let diff_output = match run_git(
+            &repo_root,
+            &["diff", "--name-only", &format!("{base}...{target}")],
+        ) {
+            Ok(output) => output,
+            Err(e) => return format!("Failed to run git diff: {e}"),
+        };
+
+        let changed_files_owned = parse_git_name_only_paths(&diff_output);
+
+        // Apply path_prefix filter
+        let changed_files: Vec<&str> = changed_files_owned
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|p| {
+                params
+                    .0
+                    .path_prefix
+                    .as_ref()
+                    .map_or(true, |prefix| p.starts_with(prefix.as_str()))
+            })
+            .collect();
+
+        if changed_files.is_empty() {
+            return format!("No file changes found between {base} and {target}.");
+        }
+
+        format::diff_symbols_result_view(base, target, &changed_files, &repo_root)
     }
 }
 
@@ -3866,7 +4018,7 @@ mod tests {
             .await;
         assert_eq!(
             result,
-            "No symbol connect in src/lib.rs. Symbols in that file: helper"
+            "No symbol connect in src/lib.rs. Close matches: helper. Use get_file_outline for the full list (1 symbols)."
         );
     }
 
@@ -4750,5 +4902,38 @@ mod tests {
         let json = r#"{"hint":"daemon"}"#;
         let input: super::ResolvePathInput = serde_json::from_str(json).unwrap();
         assert_eq!(input.hint, "daemon");
+    }
+
+    #[test]
+    fn test_get_co_changes_input_deserializes() {
+        let json = r#"{"path":"src/lib.rs","limit":5}"#;
+        let input: super::GetCoChangesInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.path, "src/lib.rs");
+        assert_eq!(input.limit, Some(5));
+    }
+
+    #[test]
+    fn test_get_co_changes_input_limit_as_string() {
+        let json = r#"{"path":"src/lib.rs","limit":"10"}"#;
+        let input: super::GetCoChangesInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.limit, Some(10));
+    }
+
+    #[tokio::test]
+    async fn test_get_co_changes_returns_loading_message_when_no_git_data() {
+        // With an empty index (no git temporal data computed), the tool
+        // should return the "still loading" or "unavailable" message.
+        let server = make_server(make_live_index_empty());
+        let result = server
+            .get_co_changes(Parameters(super::GetCoChangesInput {
+                path: "src/lib.rs".to_string(),
+                limit: None,
+            }))
+            .await;
+        // Git temporal starts as Pending in tests (no tokio runtime spawns it)
+        assert!(
+            result.contains("still loading") || result.contains("unavailable"),
+            "expected loading/unavailable message, got: {result}"
+        );
     }
 }

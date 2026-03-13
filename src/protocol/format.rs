@@ -367,7 +367,7 @@ pub fn search_text_result_view(
                         lines.push(format!("  (top-level): {} {}", no_symbol_count, match_word));
                     }
                 }
-                Some("usage") => {
+                Some("usage") | Some("purpose") => {
                     // Filter out lines that look like imports or comments
                     let mut last_symbol: Option<String> = None;
                     for line_match in &file.matches {
@@ -1370,7 +1370,7 @@ fn out_of_range_file_chunk(path: &str, chunk_index: u32, total_chunks: usize) ->
     format!("Chunk {chunk_index} out of range for {path} ({total_chunks} chunks)")
 }
 
-/// "No symbol {name} in {path}. Symbols in that file: {comma-separated list}"
+/// "No symbol {name} in {path}. Close matches: {top 5 fuzzy matches}. Use get_file_outline for the full list."
 pub fn not_found_symbol(index: &LiveIndex, path: &str, name: &str) -> String {
     match index.capture_shared_file(path) {
         None => not_found_file(path),
@@ -1387,13 +1387,67 @@ fn render_not_found_symbol(
     not_found_symbol_names(relative_path, &symbol_names, name)
 }
 
+/// Simple edit-distance score for fuzzy matching (lower is closer).
+fn fuzzy_distance(a: &str, b: &str) -> usize {
+    let a_lower = a.to_lowercase();
+    let b_lower = b.to_lowercase();
+
+    // Substring match gets highest priority (distance 0).
+    if b_lower.contains(&a_lower) || a_lower.contains(&b_lower) {
+        return 0;
+    }
+
+    // Prefix match gets second priority.
+    let prefix_len = a_lower
+        .chars()
+        .zip(b_lower.chars())
+        .take_while(|(x, y)| x == y)
+        .count();
+    if prefix_len > 0 {
+        return a.len().max(b.len()) - prefix_len;
+    }
+
+    // Fall back to simple character overlap distance.
+    let a_chars: std::collections::HashSet<char> = a_lower.chars().collect();
+    let b_chars: std::collections::HashSet<char> = b_lower.chars().collect();
+    let intersection = a_chars.intersection(&b_chars).count();
+    if intersection == 0 {
+        return usize::MAX;
+    }
+    a.len().max(b.len()) - intersection
+}
+
 fn not_found_symbol_names(relative_path: &str, symbol_names: &[String], name: &str) -> String {
     if symbol_names.is_empty() {
-        format!("No symbol {name} in {relative_path}. No symbols in that file.")
+        return format!("No symbol {name} in {relative_path}. No symbols in that file.");
+    }
+
+    // Rank by fuzzy distance and take top 5.
+    let mut scored: Vec<(&String, usize)> = symbol_names
+        .iter()
+        .map(|s| (s, fuzzy_distance(name, s)))
+        .collect();
+    scored.sort_by_key(|(_, d)| *d);
+
+    let close_matches: Vec<&str> = scored
+        .iter()
+        .take(5)
+        .filter(|(_, d)| *d < usize::MAX)
+        .map(|(s, _)| s.as_str())
+        .collect();
+
+    if close_matches.is_empty() {
+        format!(
+            "No symbol {name} in {relative_path}. No close matches found. \
+             Use get_file_outline to see all {} symbols in this file.",
+            symbol_names.len()
+        )
     } else {
         format!(
-            "No symbol {name} in {relative_path}. Symbols in that file: {}",
-            symbol_names.join(", ")
+            "No symbol {name} in {relative_path}. Close matches: {}. \
+             Use get_file_outline for the full list ({} symbols).",
+            close_matches.join(", "),
+            symbol_names.len()
         )
     }
 }
@@ -1949,6 +2003,22 @@ pub fn format_token_savings(snap: &crate::sidecar::StatsSnapshot) -> String {
     lines.push(format!("Total: ~{} tokens saved", total_saved));
 
     lines.join("\n")
+}
+
+/// Estimate tokens saved by a structured response vs raw file content.
+/// Returns a one-line footer string, or empty string if no meaningful savings.
+pub fn compact_savings_footer(response_chars: usize, raw_chars: usize) -> String {
+    if raw_chars <= response_chars || raw_chars < 200 {
+        return String::new();
+    }
+    // Rough token estimate: ~4 chars per token for code
+    let response_tokens = response_chars / 4;
+    let raw_tokens = raw_chars / 4;
+    let saved = raw_tokens.saturating_sub(response_tokens);
+    if saved < 50 {
+        return String::new();
+    }
+    format!("\n\n~{saved} tokens saved vs raw file read")
 }
 
 /// Format a one-line git temporal summary for the health report.
@@ -3636,6 +3706,26 @@ mod tests {
         );
     }
 
+    // --- compact_savings_footer tests ---
+
+    #[test]
+    fn test_compact_savings_footer_shows_savings() {
+        let footer = compact_savings_footer(200, 2000);
+        assert!(footer.contains("tokens saved"), "got: {footer}");
+    }
+
+    #[test]
+    fn test_compact_savings_footer_empty_when_no_savings() {
+        let footer = compact_savings_footer(2000, 200);
+        assert!(footer.is_empty());
+    }
+
+    #[test]
+    fn test_compact_savings_footer_empty_for_small_files() {
+        let footer = compact_savings_footer(50, 100);
+        assert!(footer.is_empty());
+    }
+
     // ── search_symbols tier ordering tests ───────────────────────────────────
 
     #[test]
@@ -4031,6 +4121,47 @@ mod tests {
             "depth 0 should have no marker, got: {result}"
         );
     }
+
+    #[test]
+    fn test_extract_declaration_name_rust_fn() {
+        assert_eq!(
+            super::extract_declaration_name("pub fn hello_world() -> String {"),
+            Some("hello_world".to_string())
+        );
+        assert_eq!(
+            super::extract_declaration_name("fn main() {"),
+            Some("main".to_string())
+        );
+        assert_eq!(
+            super::extract_declaration_name("pub(crate) async fn process(x: u32) -> Result {"),
+            Some("process".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_declaration_name_struct() {
+        assert_eq!(
+            super::extract_declaration_name("pub struct Config {"),
+            Some("Config".to_string())
+        );
+        assert_eq!(
+            super::extract_declaration_name("struct Inner;"),
+            Some("Inner".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_declaration_name_non_declaration() {
+        assert_eq!(super::extract_declaration_name("let x = 5;"), None);
+        assert_eq!(
+            super::extract_declaration_name("// fn commented_out()"),
+            None
+        );
+        assert_eq!(
+            super::extract_declaration_name("use std::collections::HashMap;"),
+            None
+        );
+    }
 }
 
 /// Format the output of the `explore` tool.
@@ -4076,4 +4207,250 @@ pub fn explore_result_view(
     }
 
     lines.join("\n")
+}
+
+/// Format git temporal data for a single file: churn, ownership, co-changes, last commit.
+pub fn get_co_changes_result_view(
+    path: &str,
+    history: &crate::live_index::git_temporal::GitFileHistory,
+    limit: usize,
+) -> String {
+    let mut lines = Vec::new();
+
+    lines.push(format!("Git temporal data for {path}"));
+    lines.push(String::new());
+
+    // Churn
+    lines.push(format!(
+        "Churn score: {:.2} ({} commits)",
+        history.churn_score, history.commit_count
+    ));
+
+    // Last commit
+    let c = &history.last_commit;
+    lines.push(format!(
+        "Last commit: {} {} — {} ({})",
+        c.hash, c.timestamp, c.message_head, c.author
+    ));
+    lines.push(String::new());
+
+    // Ownership
+    if !history.contributors.is_empty() {
+        lines.push("Ownership:".to_string());
+        for contrib in &history.contributors {
+            lines.push(format!(
+                "  {}: {} commits ({:.0}%)",
+                contrib.author, contrib.commit_count, contrib.percentage
+            ));
+        }
+        lines.push(String::new());
+    }
+
+    // Co-changes
+    if history.co_changes.is_empty() {
+        lines.push("No co-changing files detected.".to_string());
+    } else {
+        lines.push(format!(
+            "Co-changing files (top {}):",
+            limit.min(history.co_changes.len())
+        ));
+        for entry in history.co_changes.iter().take(limit) {
+            lines.push(format!(
+                "  {:<50} coupling: {:.3}  ({} shared commits)",
+                entry.path, entry.coupling_score, entry.shared_commits
+            ));
+        }
+    }
+
+    lines.join("\n")
+}
+
+/// Format symbol-level diff between two git refs.
+pub fn diff_symbols_result_view(
+    base: &str,
+    target: &str,
+    changed_files: &[&str],
+    repo_root: &std::path::Path,
+) -> String {
+    use std::collections::HashMap;
+    use std::process::Command;
+
+    let mut lines = Vec::new();
+    lines.push(format!("Symbol diff: {base}...{target}"));
+    lines.push(format!("{} files changed", changed_files.len()));
+    lines.push(String::new());
+
+    let mut total_added = 0usize;
+    let mut total_removed = 0usize;
+    let mut total_modified = 0usize;
+
+    for file_path in changed_files {
+        // Get content at base and target refs
+        let base_content = Command::new("git")
+            .args(["show", &format!("{base}:{file_path}")])
+            .current_dir(repo_root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+
+        let target_content = Command::new("git")
+            .args(["show", &format!("{target}:{file_path}")])
+            .current_dir(repo_root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+
+        // Extract symbol names from both versions
+        let base_symbols = extract_symbol_signatures(&base_content);
+        let target_symbols = extract_symbol_signatures(&target_content);
+
+        let base_names: HashMap<&str, &str> = base_symbols
+            .iter()
+            .map(|(n, s)| (n.as_str(), s.as_str()))
+            .collect();
+        let target_names: HashMap<&str, &str> = target_symbols
+            .iter()
+            .map(|(n, s)| (n.as_str(), s.as_str()))
+            .collect();
+
+        let mut file_added = Vec::new();
+        let mut file_removed = Vec::new();
+        let mut file_modified = Vec::new();
+
+        // Find added and modified
+        for (name, sig) in &target_names {
+            match base_names.get(name) {
+                None => file_added.push(*name),
+                Some(base_sig) if base_sig != sig => file_modified.push(*name),
+                _ => {}
+            }
+        }
+
+        // Find removed
+        for name in base_names.keys() {
+            if !target_names.contains_key(name) {
+                file_removed.push(*name);
+            }
+        }
+
+        if file_added.is_empty() && file_removed.is_empty() && file_modified.is_empty() {
+            continue; // No symbol-level changes
+        }
+
+        lines.push(format!("── {} ──", file_path));
+
+        if !file_added.is_empty() {
+            total_added += file_added.len();
+            let mut sorted = file_added.clone();
+            sorted.sort_unstable();
+            for name in &sorted {
+                lines.push(format!("  + {name}"));
+            }
+        }
+        if !file_removed.is_empty() {
+            total_removed += file_removed.len();
+            let mut sorted = file_removed.clone();
+            sorted.sort_unstable();
+            for name in &sorted {
+                lines.push(format!("  - {name}"));
+            }
+        }
+        if !file_modified.is_empty() {
+            total_modified += file_modified.len();
+            let mut sorted = file_modified.clone();
+            sorted.sort_unstable();
+            for name in &sorted {
+                lines.push(format!("  ~ {name}"));
+            }
+        }
+        lines.push(String::new());
+    }
+
+    // Summary
+    lines.push(format!(
+        "Summary: +{total_added} added, -{total_removed} removed, ~{total_modified} modified"
+    ));
+
+    lines.join("\n")
+}
+
+/// Extract symbol name → signature pairs from source code using simple pattern matching.
+/// Returns Vec<(name, signature_line)> for functions, classes, structs, enums, traits, interfaces.
+fn extract_symbol_signatures(content: &str) -> Vec<(String, String)> {
+    let mut symbols = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        // Skip empty, comments, imports
+        if trimmed.is_empty()
+            || trimmed.starts_with("//")
+            || trimmed.starts_with('#')
+            || trimmed.starts_with("/*")
+            || trimmed.starts_with('*')
+            || trimmed.starts_with("use ")
+            || trimmed.starts_with("import ")
+            || trimmed.starts_with("from ")
+        {
+            continue;
+        }
+
+        // Match common symbol declaration patterns
+        let name = extract_declaration_name(trimmed);
+        if let Some(name) = name {
+            symbols.push((name, trimmed.to_string()));
+        }
+    }
+    symbols
+}
+
+/// Try to extract a declaration name from a line of code.
+pub(crate) fn extract_declaration_name(line: &str) -> Option<String> {
+    let keywords = [
+        "pub async fn ",
+        "pub(crate) async fn ",
+        "pub(crate) fn ",
+        "async fn ",
+        "pub fn ",
+        "fn ",
+        "pub struct ",
+        "struct ",
+        "pub enum ",
+        "enum ",
+        "pub trait ",
+        "trait ",
+        "pub type ",
+        "type ",
+        "pub const ",
+        "const ",
+        "pub static ",
+        "static ",
+        "class ",
+        "interface ",
+        "export function ",
+        "export async function ",
+        "export class ",
+        "export interface ",
+        "export const ",
+        "export default function ",
+        "function ",
+        "def ",
+        "async def ",
+    ];
+
+    for kw in &keywords {
+        if let Some(rest) = line.strip_prefix(kw) {
+            // Extract the name (up to first non-ident char)
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
 }
