@@ -264,14 +264,15 @@ pub struct WatcherHandle {
     pub event_rx: std::sync::mpsc::Receiver<DebounceEventResult>,
 }
 
-/// Create a new debouncer watching `repo_root` recursively with a 200ms timeout.
+/// Create a new debouncer watching `repo_root` recursively.
 ///
+/// `debounce_ms` controls the debounce window (base 200ms, extended to 500ms during bursts).
 /// Uses `std::sync::mpsc` (not tokio) because notify's callback runs on its own OS thread.
-pub(crate) fn start_watcher(repo_root: &Path) -> Result<WatcherHandle, notify::Error> {
+pub(crate) fn start_watcher(repo_root: &Path, debounce_ms: u64) -> Result<WatcherHandle, notify::Error> {
     let (tx, rx) = std::sync::mpsc::channel::<DebounceEventResult>();
 
     let mut debouncer = new_debouncer(
-        Duration::from_millis(200),
+        Duration::from_millis(debounce_ms),
         None,
         move |result: DebounceEventResult| {
             let _ = tx.send(result);
@@ -342,6 +343,11 @@ pub(crate) fn process_events(
             }
         }
     }
+
+    // Evict burst trackers that have been idle longer than 2 × QUIET_SECS to
+    // prevent the map from growing unbounded over the lifetime of the watcher.
+    let evict_threshold = Duration::from_secs(BurstTracker::QUIET_SECS * 2);
+    burst_trackers.retain(|_, tracker| tracker.last_event_at.elapsed() < evict_threshold);
 }
 
 /// Main watcher supervision loop. Spawned as a background tokio task by `main.rs`.
@@ -364,7 +370,9 @@ pub async fn run_watcher(
     const MAX_FAILURES: u32 = 3;
 
     loop {
-        match start_watcher(&repo_root) {
+        // Read the current recommended debounce window (updated by the burst tracker).
+        let debounce_ms = watcher_info.lock().unwrap().debounce_window_ms;
+        match start_watcher(&repo_root, debounce_ms) {
             Err(e) => {
                 consecutive_failures += 1;
                 warn!(
