@@ -255,21 +255,23 @@ impl DaemonState {
     }
 
     pub fn close_session(&self, session_id: &str) -> Option<CloseSessionResponse> {
-        let session = self
-            .sessions
-            .write()
-            .expect("lock poisoned")
-            .remove(session_id)?;
+        // Lock ordering: projects before sessions (matches open_project_session).
+        // We need the project_id from the session first, so peek with a read lock,
+        // then acquire projects.write(), then sessions.write() to remove.
+        let project_id = {
+            let sessions = self.sessions.read().expect("lock poisoned");
+            sessions.get(session_id)?.project_id.clone()
+        };
 
         let mut project_removed = false;
         let remaining_sessions = {
             let mut projects = self.projects.write().expect("lock poisoned");
-            match projects.get_mut(&session.project_id) {
+            match projects.get_mut(&project_id) {
                 Some(project) => {
                     project.session_ids.remove(session_id);
                     let remaining = project.session_ids.len();
                     if remaining == 0 {
-                        if let Some(removed) = projects.remove(&session.project_id) {
+                        if let Some(removed) = projects.remove(&project_id) {
                             let mut watcher_task = removed.watcher_task;
                             abort_watcher_task(&mut watcher_task);
                         }
@@ -280,6 +282,13 @@ impl DaemonState {
                 None => 0,
             }
         };
+
+        // Now remove the session (projects lock fully released).
+        let session = self
+            .sessions
+            .write()
+            .expect("lock poisoned")
+            .remove(session_id)?;
 
         Some(CloseSessionResponse {
             session_id: session.session_id,
