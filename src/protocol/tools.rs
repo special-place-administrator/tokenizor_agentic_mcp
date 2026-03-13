@@ -2044,10 +2044,13 @@ impl TokenizorServer {
 
     // ─── Edit tools (Tier 1) ─────────────────────────────────────────────────
 
-    /// Replace a symbol's entire definition by name. The index resolves byte positions server-side.
-    /// Use symbol_line to disambiguate overloaded names.
+    /// Replace a symbol's entire definition with new source code. The index resolves the symbol's
+    /// byte range server-side — no need to read the file first. Content is auto-indented to match
+    /// the original symbol's indentation level.
+    /// NOT for small edits within a symbol (use edit_within_symbol).
+    /// NOT for removing a symbol entirely (use delete_symbol).
     #[tool(
-        description = "Replace a symbol's entire definition by name. Provide the complete new source code. The index resolves byte positions server-side — no need to read the file first. Use symbol_line to disambiguate overloaded names."
+        description = "Replace a symbol's entire definition with new source code. The index resolves the symbol's byte range server-side — no need to read the file first. Content is auto-indented to match the original symbol's indentation level. Use symbol_line to disambiguate overloaded names. NOT for small edits within a symbol (use edit_within_symbol). NOT for removing a symbol entirely (use delete_symbol)."
     )]
     pub(crate) async fn replace_symbol_body(
         &self,
@@ -2079,8 +2082,17 @@ impl TokenizorServer {
             Err(e) => return e,
         };
         let old_bytes = (sym.byte_range.1 - sym.byte_range.0) as usize;
+        // Splice at line start and apply indentation — same approach as insert tools.
+        let sym_start = sym.byte_range.0 as usize;
+        let line_start = file.content[..sym_start]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map(|p| p + 1)
+            .unwrap_or(0) as u32;
+        let indent = edit::detect_indentation(&file.content, sym.byte_range.0);
+        let indented = edit::apply_indentation(&params.0.new_body, &indent);
         let new_content =
-            edit::apply_splice(&file.content, sym.byte_range, params.0.new_body.as_bytes());
+            edit::apply_splice(&file.content, (line_start, sym.byte_range.1), &indented);
         let abs_path = repo_root.join(&params.0.path);
         if let Err(e) = edit::atomic_write_file(&abs_path, &new_content) {
             return format!("Error writing {}: {e}", params.0.path);
@@ -2095,9 +2107,11 @@ impl TokenizorServer {
         )
     }
 
-    /// Insert code before a named symbol. Content is auto-indented to match.
+    /// Insert code before a named symbol. Content is auto-indented to match the target symbol's
+    /// indentation level — provide unindented code.
+    /// NOT for replacing existing code (use replace_symbol_body or edit_within_symbol).
     #[tool(
-        description = "Insert code before a named symbol. Content is auto-indented to match the target's indentation. Use symbol_line to disambiguate overloaded names."
+        description = "Insert code before a named symbol. Content is auto-indented to match the target symbol's indentation level — provide unindented code. Use symbol_line to disambiguate overloaded names. NOT for replacing existing code (use replace_symbol_body or edit_within_symbol)."
     )]
     pub(crate) async fn insert_before_symbol(
         &self,
@@ -2142,9 +2156,11 @@ impl TokenizorServer {
         )
     }
 
-    /// Insert code after a named symbol. Content is auto-indented to match.
+    /// Insert code after a named symbol. Content is auto-indented to match the target symbol's
+    /// indentation level — provide unindented code.
+    /// NOT for replacing existing code (use replace_symbol_body or edit_within_symbol).
     #[tool(
-        description = "Insert code after a named symbol. Content is auto-indented to match the target's indentation. Use symbol_line to disambiguate overloaded names."
+        description = "Insert code after a named symbol. Content is auto-indented to match the target symbol's indentation level — provide unindented code. Use symbol_line to disambiguate overloaded names. NOT for replacing existing code (use replace_symbol_body or edit_within_symbol)."
     )]
     pub(crate) async fn insert_after_symbol(
         &self,
@@ -2189,9 +2205,10 @@ impl TokenizorServer {
         )
     }
 
-    /// Delete a symbol cleanly — removes the entire definition and surrounding blank lines.
+    /// Remove a symbol's entire definition and clean up surrounding blank lines.
+    /// NOT for replacing a symbol (use replace_symbol_body).
     #[tool(
-        description = "Delete a symbol by name — removes the entire definition. Cleans up surrounding blank lines. Use symbol_line to disambiguate overloaded names."
+        description = "Remove a symbol's entire definition and clean up surrounding blank lines. Use symbol_line to disambiguate overloaded names. NOT for replacing a symbol (use replace_symbol_body)."
     )]
     pub(crate) async fn delete_symbol(
         &self,
@@ -2263,9 +2280,12 @@ impl TokenizorServer {
         )
     }
 
-    /// Scoped text replacement within a single symbol's byte range.
+    /// Find-and-replace scoped to a symbol's byte range — won't affect code outside it. The LLM
+    /// never needs to read the symbol body — just provide the old and new text.
+    /// NOT for replacing the entire symbol (use replace_symbol_body).
+    /// NOT for adding new symbols (use insert_before/after_symbol).
     #[tool(
-        description = "Find-and-replace within a symbol's body. Scoped to the symbol's byte range — won't affect code outside it. Set replace_all=true to replace every occurrence. Use for surgical edits without replacing the entire symbol."
+        description = "Find-and-replace scoped to a symbol's byte range — won't affect code outside it. The LLM never needs to read the symbol body — just provide the old and new text. Set replace_all=true for every occurrence within the symbol. NOT for replacing the entire symbol (use replace_symbol_body). NOT for adding new symbols (use insert_before/after_symbol)."
     )]
     pub(crate) async fn edit_within_symbol(
         &self,
@@ -5448,6 +5468,31 @@ mod tests {
         let file = guard.get_file("src/lib.rs").unwrap();
         assert!(file.symbols.iter().any(|s| s.name == "hello"));
         assert!(file.symbols.iter().any(|s| s.name == "world"));
+    }
+
+    #[tokio::test]
+    async fn test_replace_symbol_body_preserves_indentation() {
+        // Simulates a method inside a class — symbol is indented 4 spaces.
+        let original = b"mod outer {\n    fn inner() {\n        old_body();\n    }\n}\n";
+        let (_dir, server, file_path) = setup_edit_test(original);
+
+        // Provide unindented replacement — tool should auto-indent to match.
+        let input = crate::protocol::edit::ReplaceSymbolBodyInput {
+            path: "src/lib.rs".to_string(),
+            name: "inner".to_string(),
+            kind: None,
+            symbol_line: None,
+            new_body: "fn inner() {\n    new_body();\n}".to_string(),
+        };
+        let result = server.replace_symbol_body(Parameters(input)).await;
+        assert!(result.contains("replaced"), "result: {result}");
+
+        let on_disk = std::fs::read_to_string(&file_path).unwrap();
+        // Every line of the replacement should be indented 4 spaces.
+        assert!(
+            on_disk.contains("    fn inner() {\n        new_body();\n    }"),
+            "indentation preserved: {on_disk}"
+        );
     }
 
     #[tokio::test]
