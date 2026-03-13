@@ -108,7 +108,7 @@ Each language file defines `pub(super) const DOC_SPEC: DocCommentSpec`.
 - Body extraction currently uses `byte_range` to slice the source content.
 - Change: when `doc_byte_range` is present, use `doc_byte_range.0` as the start of the extracted body so that doc comments are included in the returned source.
 - This ensures that `replace_symbol_body` callers see (and can preserve) doc comments when they read the symbol before replacing it.
-- `context_bundle_result` in `src/live_index/query.rs` also uses `byte_range` for body extraction and needs the same change.
+- `context_bundle_result` in `src/protocol/format.rs` also uses `byte_range` for body extraction and needs the same change.
 
 ### 5. Edit Tool Changes
 
@@ -125,9 +125,14 @@ Each language file defines `pub(super) const DOC_SPEC: DocCommentSpec`.
 **`batch_edit`** (`src/protocol/edit.rs`):
 - The `Replace` and `Delete` branches have inline splice logic that reads `sym.byte_range`. These also need updating to use `doc_byte_range` when present, matching the single-symbol edit tools.
 - **Overlap validation** (Phase 1b, `execute_batch_edit` lines ~412-439): currently compares `sym.byte_range` pairs. After this change, two symbols with non-overlapping `byte_range` could have overlapping effective splice ranges when doc comments are included. The overlap check must use the effective range (`doc_byte_range.0..byte_range.1` when doc range is present) to prevent silent data corruption.
+- **Phase 2 sort key** (~line 460): sorts by `sym.byte_range.0` descending for reverse-order application. Must use the effective start (`doc_byte_range.0` when present, else `byte_range.0`) as the sort key, otherwise splices starting from doc comments could be applied in wrong order.
 
 **`edit_within_symbol`** (`src/protocol/edit.rs`):
 - `build_edit_within` uses `byte_range` for the search scope. Since `get_symbol` now returns doc comments in the body, users may provide `old_text` that spans doc comments. Change: use `doc_byte_range.0` (when present) as the search scope start so edits within doc comments work correctly.
+
+**`insert_before_symbol` / `insert_after_symbol`:**
+- `insert_before_symbol` (`build_insert_before` in `edit.rs`): currently inserts before the line of `sym.byte_range.0`. Decision: when `doc_byte_range` is present, insert before `doc_byte_range.0` instead. Inserting between doc comments and the symbol keyword would be surprising — doc comments are logically part of the symbol.
+- `insert_after_symbol` (`build_insert_after`): unaffected — it inserts after `byte_range.1`, which remains correct.
 
 **No changes needed to:** outlines, search, format positioning. These continue using `byte_range` for line/byte positioning. Future: outlines could optionally show first doc line using the range.
 
@@ -147,19 +152,18 @@ Each language file defines `pub(super) const DOC_SPEC: DocCommentSpec`.
 | `src/domain/index.rs` | Add `doc_byte_range` field to `SymbolRecord` |
 | `src/parsing/languages/mod.rs` | Add `DocCommentSpec`, `scan_doc_range`, update `push_symbol`/`push_named_symbol` signatures |
 | `src/parsing/languages/*.rs` (16 files) | Add `DOC_SPEC` constant, update `push_symbol`/`push_named_symbol` call sites |
-| `src/protocol/format.rs` | `render_symbol_detail` uses `doc_byte_range` for body extraction |
+| `src/protocol/format.rs` | `render_symbol_detail` and `context_bundle_result` use `doc_byte_range` for body extraction |
 | `src/protocol/tools.rs` | `replace_symbol_body` uses `doc_byte_range` for splice start |
-| `src/protocol/edit.rs` | `build_delete`, `batch_edit`, `build_edit_within` use `doc_byte_range` |
-| `src/live_index/query.rs` | `context_bundle_result` uses `doc_byte_range` for body extraction |
+| `src/protocol/edit.rs` | `build_delete`, `batch_edit`, `build_edit_within`, `build_insert_before` use `doc_byte_range` |
 | `src/live_index/persist.rs` | Serialize/deserialize `doc_byte_range`; bump `CURRENT_VERSION` to 3 |
 | 11 `src/` files with `SymbolRecord` construction sites | Add `doc_byte_range: None` (54 sites in `query.rs`, `persist.rs`, `search.rs`, `store.rs`, `format.rs`, `sidecar/handlers.rs`, `resources.rs`, etc.) |
-| 2 `tests/` files with `SymbolRecord` construction sites | Add `doc_byte_range: None` (54 sites in `tests/sidecar_integration.rs`, 1 in `tests/hook_enrichment_integration.rs`) |
+| 2 `tests/` files with `SymbolRecord` construction sites | Add `doc_byte_range: None` (53 sites in `tests/sidecar_integration.rs`, 1 in `tests/hook_enrichment_integration.rs`) |
 
 **Kotlin note:** The spec lists `["line_comment", "multiline_comment"]` based on `tree-sitter-kotlin-sg` research. These node type names should be verified at implementation time with a test that parses a Kotlin file with a KDoc comment and asserts `doc_byte_range` is populated.
 
 ### 8. Testing Strategy
 
-- **Unit tests in `src/parsing/languages/mod.rs`**: test `scan_doc_range` with synthetic tree-sitter trees for Rust (`///`), Java (`/** */`), Go (all adjacent), and Elixir (`@doc`).
+- **Unit tests in `src/parsing/languages/mod.rs`**: parse small source snippets through tree-sitter and test `scan_doc_range` on the resulting nodes for Rust (`///`), Java (`/** */`), Go (all adjacent), and Elixir (`@doc`). (Tree-sitter nodes cannot be constructed programmatically — must parse real source.)
 - **Integration tests**: parse real source snippets through `extract_symbols` and verify `doc_byte_range` is set correctly for each language.
 - **Edit tests**: verify `replace_symbol_body` and `delete_symbol` include doc comments in the replaced/deleted range.
 - **Regression tests**: ensure existing behavior is unchanged when `doc_byte_range` is `None`.
