@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.18.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.17.1...v0.18.0) (2026-03-13)
+
+
+### Features
+
+* add depth parameter to explore for enriched symbol analysis ([a81fdad](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/a81fdad79b2ff06b96e9e841041e617675182652))
+* add routing hint, code_only flag, and update stale tool descriptions ([b941eff](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/b941effdef0b608b01bb6394330f65459107f403))
+
 ## [0.17.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.17.0...v0.17.1) (2026-03-13)
 
 
