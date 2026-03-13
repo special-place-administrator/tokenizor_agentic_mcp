@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.13.1...v0.13.2) (2026-03-13)
+
+
+### Bug Fixes
+
+* auto-merge release-please PRs for continuous deployment ([e58ce57](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/e58ce57ce77d56e66219a6e7663459f72bfb8dc2))
+
 ## [0.13.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.13.0...v0.13.1) (2026-03-13)
 
 
