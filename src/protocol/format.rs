@@ -4625,10 +4625,9 @@ pub fn diff_symbols_result_view(
     base: &str,
     target: &str,
     changed_files: &[&str],
-    repo_root: &std::path::Path,
+    repo: &crate::git::GitRepo,
 ) -> String {
     use std::collections::HashMap;
-    use std::process::Command;
 
     let mut lines = Vec::new();
     lines.push(format!("Symbol diff: {base}...{target}"));
@@ -4641,22 +4640,14 @@ pub fn diff_symbols_result_view(
 
     for file_path in changed_files {
         // Get content at base and target refs
-        let base_content = Command::new("git")
-            .args(["show", &format!("{base}:{file_path}")])
-            .current_dir(repo_root)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        let base_content = repo
+            .file_at_ref(base, file_path)
+            .unwrap_or_default()
             .unwrap_or_default();
 
-        let target_content = Command::new("git")
-            .args(["show", &format!("{target}:{file_path}")])
-            .current_dir(repo_root)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        let target_content = repo
+            .file_at_ref(target, file_path)
+            .unwrap_or_default()
             .unwrap_or_default();
 
         // Extract symbol names from both versions

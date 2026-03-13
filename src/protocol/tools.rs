@@ -14,7 +14,6 @@
 /// - Never hold RwLockReadGuard across await points — extract into owned values first
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::{Arc, RwLock};
 
 use axum::http::StatusCode;
@@ -613,59 +612,6 @@ fn determine_what_changed_mode(
                 .to_string(),
         )
     }
-}
-
-fn run_git(repo_root: &std::path::Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_root)
-        .args(args)
-        .output()
-        .map_err(|error| format!("failed to start git: {error}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let message = if stderr.is_empty() {
-            format!("git exited with status {}", output.status)
-        } else {
-            stderr
-        };
-        return Err(message);
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-fn parse_git_status_paths(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let raw_path = line.get(3..)?.trim();
-            if raw_path.is_empty() {
-                return None;
-            }
-            let normalized = raw_path
-                .rsplit(" -> ")
-                .next()
-                .unwrap_or(raw_path)
-                .trim_matches('"')
-                .replace('\\', "/");
-            if normalized.is_empty() {
-                None
-            } else {
-                Some(normalized)
-            }
-        })
-        .collect()
-}
-
-fn parse_git_name_only_paths(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(|line| line.trim_matches('"').replace('\\', "/"))
-        .collect()
 }
 
 fn parse_language_filter(input: Option<&str>) -> Result<Option<LanguageId>, String> {
@@ -1864,12 +1810,12 @@ impl TokenizorServer {
                     return "Git change detection unavailable; pass `since` for timestamp mode."
                         .to_string();
                 };
-                match run_git(
-                    repo_root,
-                    &["status", "--porcelain", "--untracked-files=all"],
-                ) {
-                    Ok(output) => {
-                        let paths = parse_git_status_paths(&output);
+                let repo = match crate::git::GitRepo::open(repo_root) {
+                    Ok(r) => r,
+                    Err(e) => return format!("Git change detection failed: {e}"),
+                };
+                match repo.uncommitted_paths() {
+                    Ok(paths) => {
                         match filter_paths_by_prefix_and_language(
                             paths,
                             params.0.path_prefix.as_deref(),
@@ -1883,7 +1829,7 @@ impl TokenizorServer {
                             Err(e) => e,
                         }
                     }
-                    Err(error) => format!("Git change detection failed: {error}"),
+                    Err(e) => format!("Git change detection failed: {e}"),
                 }
             }
             WhatChangedMode::GitRef(git_ref) => {
@@ -1895,9 +1841,12 @@ impl TokenizorServer {
                     return "Git change detection unavailable; pass `since` for timestamp mode."
                         .to_string();
                 };
-                match run_git(repo_root, &["diff", "--name-only", &git_ref, "--"]) {
-                    Ok(output) => {
-                        let paths = parse_git_name_only_paths(&output);
+                let repo = match crate::git::GitRepo::open(repo_root) {
+                    Ok(r) => r,
+                    Err(e) => return format!("Git change detection failed: {e}"),
+                };
+                match repo.changed_paths_from_ref(&git_ref) {
+                    Ok(paths) => {
                         match filter_paths_by_prefix_and_language(
                             paths,
                             params.0.path_prefix.as_deref(),
@@ -1911,7 +1860,7 @@ impl TokenizorServer {
                             Err(e) => e,
                         }
                     }
-                    Err(error) => format!("Git change detection failed: {error}"),
+                    Err(e) => format!("Git change detection failed: {e}"),
                 }
             }
         }
@@ -2229,15 +2178,14 @@ impl TokenizorServer {
         }
 
         // Get changed files
-        let diff_output = match run_git(
-            &repo_root,
-            &["diff", "--name-only", &format!("{base}...{target}")],
-        ) {
-            Ok(output) => output,
+        let repo = match crate::git::GitRepo::open(&repo_root) {
+            Ok(r) => r,
+            Err(e) => return format!("Failed to open repository: {e}"),
+        };
+        let changed_files_owned = match repo.changed_paths_between_refs(base, target) {
+            Ok(paths) => paths,
             Err(e) => return format!("Failed to run git diff: {e}"),
         };
-
-        let changed_files_owned = parse_git_name_only_paths(&diff_output);
 
         // Apply path_prefix + language filter
         let lang_filter = match parse_language_filter(params.0.language.as_deref()) {
@@ -2268,7 +2216,7 @@ impl TokenizorServer {
             return format!("No file changes found between {base} and {target}.");
         }
 
-        format::diff_symbols_result_view(base, target, &changed_files, &repo_root)
+        format::diff_symbols_result_view(base, target, &changed_files, &repo)
     }
 
     // ─── Edit tools (Tier 1) ─────────────────────────────────────────────────
