@@ -1891,7 +1891,12 @@ pub fn trace_symbol_result_view(view: &crate::live_index::TraceSymbolView, name:
 
             if !found.dependents.files.is_empty() {
                 output.push_str("\n\n");
-                output.push_str(&find_dependents_result_view(
+                let dependents_fn = if verbosity == "full" {
+                    find_dependents_result_view
+                } else {
+                    find_dependents_compact_view
+                };
+                output.push_str(&dependents_fn(
                     &found.dependents,
                     &found.context_bundle.file_path,
                     &OutputLimits::default(),
@@ -2153,7 +2158,7 @@ fn extract_first_doc_line(body: &str) -> Option<String> {
 /// - `"signature"`: first meaningful line only (~80% smaller).
 /// - `"compact"`: signature + first doc-comment line.
 /// - `"full"` or anything else: complete body (default).
-fn apply_verbosity(body: &str, verbosity: &str) -> String {
+pub(crate) fn apply_verbosity(body: &str, verbosity: &str) -> String {
     match verbosity {
         "signature" => extract_signature(body),
         "compact" => {
