@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.5](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.20.4...v0.20.5) (2026-03-13)
+
+
+### Bug Fixes
+
+* index purge on file delete, richer default symbol context, path-scoped implementations ([1cb084b](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/1cb084b0444f89d825cae0d2d60e631e0cbd54c5))
+
 ## [0.20.4](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.20.3...v0.20.4) (2026-03-13)
 
 
