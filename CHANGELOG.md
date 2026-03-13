@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.3](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.20.2...v0.20.3) (2026-03-13)
+
+
+### Bug Fixes
+
+* address review findings — OR search terms, range validation, depth 3, schema docs, insert spacing, token counter ([249f987](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/249f9876196de831e1dc5d6a34b8dd5cf284e1f1))
+
 ## [0.20.2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.20.1...v0.20.2) (2026-03-13)
 
 
