@@ -21,7 +21,95 @@ use axum::http::StatusCode;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Deserialize a `u32` from either a JSON number or a stringified number like `"5"`.
+fn lenient_u32<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u32>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        Num(u32),
+        Str(String),
+        Null,
+    }
+    match NumOrStr::deserialize(deserializer)? {
+        NumOrStr::Num(n) => Ok(Some(n)),
+        NumOrStr::Str(s) if s.is_empty() => Ok(None),
+        NumOrStr::Str(s) => s.parse::<u32>().map(Some).map_err(serde::de::Error::custom),
+        NumOrStr::Null => Ok(None),
+    }
+}
+
+/// Deserialize a `bool` from either a JSON boolean or a stringified boolean like `"true"`.
+fn lenient_bool<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum BoolOrStr {
+        Bool(bool),
+        Str(String),
+        Null,
+    }
+    match BoolOrStr::deserialize(deserializer)? {
+        BoolOrStr::Bool(b) => Ok(Some(b)),
+        BoolOrStr::Str(s) => match s.as_str() {
+            "true" | "1" => Ok(Some(true)),
+            "false" | "0" => Ok(Some(false)),
+            "" => Ok(None),
+            _ => Err(serde::de::Error::custom(format!(
+                "expected boolean or \"true\"/\"false\", got \"{s}\""
+            ))),
+        },
+        BoolOrStr::Null => Ok(None),
+    }
+}
+
+/// Deserialize a required `u32` from either a JSON number or a stringified number.
+fn lenient_u32_required<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        Num(u32),
+        Str(String),
+    }
+    match NumOrStr::deserialize(deserializer)? {
+        NumOrStr::Num(n) => Ok(n),
+        NumOrStr::Str(s) => s.parse::<u32>().map_err(serde::de::Error::custom),
+    }
+}
+
+/// Deserialize a `u64` from either a JSON number or a stringified number.
+fn lenient_u64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u64>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        Num(u64),
+        Str(String),
+        Null,
+    }
+    match NumOrStr::deserialize(deserializer)? {
+        NumOrStr::Num(n) => Ok(Some(n)),
+        NumOrStr::Str(s) if s.is_empty() => Ok(None),
+        NumOrStr::Str(s) => s.parse::<u64>().map(Some).map_err(serde::de::Error::custom),
+        NumOrStr::Null => Ok(None),
+    }
+}
+
+/// Deserialize an `i64` from either a JSON number or a stringified number.
+fn lenient_i64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<i64>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        Num(i64),
+        Str(String),
+        Null,
+    }
+    match NumOrStr::deserialize(deserializer)? {
+        NumOrStr::Num(n) => Ok(Some(n)),
+        NumOrStr::Str(s) if s.is_empty() => Ok(None),
+        NumOrStr::Str(s) => s.parse::<i64>().map(Some).map_err(serde::de::Error::custom),
+        NumOrStr::Null => Ok(None),
+    }
+}
 
 use crate::domain::LanguageId;
 use crate::live_index::{
@@ -68,8 +156,10 @@ pub struct SymbolTarget {
     /// Kind filter for symbol lookup (e.g., "fn", "struct").
     pub kind: Option<String>,
     /// Start byte offset for code slice (mutually exclusive with name).
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub start_byte: Option<u32>,
     /// End byte offset for code slice (inclusive).
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub end_byte: Option<u32>,
 }
 
@@ -92,10 +182,13 @@ pub struct SearchSymbolsInput {
     /// Optional canonical language name such as `Rust`, `TypeScript`, `C#`, or `C++`.
     pub language: Option<String>,
     /// Optional maximum number of matches to return (default 50, capped at 100).
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub limit: Option<u32>,
     /// When true, include generated files in the result set.
+    #[serde(default, deserialize_with = "lenient_bool")]
     pub include_generated: Option<bool>,
     /// When true, include test files in the result set.
+    #[serde(default, deserialize_with = "lenient_bool")]
     pub include_tests: Option<bool>,
 }
 
@@ -107,33 +200,42 @@ pub struct SearchTextInput {
     /// Optional list of terms to match with OR semantics.
     pub terms: Option<Vec<String>>,
     /// Interpret `query` as a regex pattern instead of a literal substring.
+    #[serde(default, deserialize_with = "lenient_bool")]
     pub regex: Option<bool>,
     /// Optional relative path prefix scope, for example `src/` or `src/protocol`.
     pub path_prefix: Option<String>,
     /// Optional canonical language name such as `Rust`, `TypeScript`, `C#`, or `C++`.
     pub language: Option<String>,
     /// Optional maximum number of matches to return across all files (default 50).
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub limit: Option<u32>,
     /// Optional maximum number of matches to return per file (default 5).
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub max_per_file: Option<u32>,
     /// When true, include generated files in the result set.
+    #[serde(default, deserialize_with = "lenient_bool")]
     pub include_generated: Option<bool>,
     /// When true, include test files in the result set.
+    #[serde(default, deserialize_with = "lenient_bool")]
     pub include_tests: Option<bool>,
     /// Optional repo-relative include glob, for example `src/**/*.ts`.
     pub glob: Option<String>,
     /// Optional repo-relative exclude glob, for example `**/*.spec.ts`.
     pub exclude_glob: Option<String>,
     /// Optional symmetric number of surrounding lines to render around each match.
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub context: Option<u32>,
     /// Optional case-sensitivity override. Literal mode defaults to false; regex mode defaults to true.
+    #[serde(default, deserialize_with = "lenient_bool")]
     pub case_sensitive: Option<bool>,
     /// When true, require whole-word matches for literal searches. Not supported with `regex=true`.
+    #[serde(default, deserialize_with = "lenient_bool")]
     pub whole_word: Option<bool>,
     /// Group matches: "file" (default), "symbol" (one entry per enclosing symbol),
     /// or "usage" (exclude imports and comments).
     pub group_by: Option<String>,
     /// When true, for each match include a compact list of callers of the enclosing symbol.
+    #[serde(default, deserialize_with = "lenient_bool")]
     pub follow_refs: Option<bool>,
 }
 
@@ -143,6 +245,7 @@ pub struct SearchFilesInput {
     /// Filename, folder name, or partial path.
     pub query: String,
     /// Optional maximum number of matches to return (default 20, capped at 50).
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub limit: Option<u32>,
     /// Optional current file path to boost local results.
     pub current_file: Option<String>,
@@ -154,6 +257,7 @@ pub struct SearchFilesInput {
 #[derive(Deserialize, Serialize, JsonSchema)]
 pub struct ResolvePathInput {
     /// Filename, partial path, or ambiguous path hint.
+    #[serde(alias = "query")]
     pub hint: String,
 }
 
@@ -168,10 +272,12 @@ pub struct IndexFolderInput {
 #[derive(Deserialize, Serialize, JsonSchema)]
 pub struct WhatChangedInput {
     /// Optional Unix timestamp (seconds since epoch). Files newer than this are returned.
+    #[serde(default, deserialize_with = "lenient_i64")]
     pub since: Option<i64>,
     /// Optional git ref to diff against, for example `HEAD~5` or `branch:main`.
     pub git_ref: Option<String>,
     /// When true, report uncommitted git changes. Defaults to true when no other mode is specified and a repo root exists.
+    #[serde(default, deserialize_with = "lenient_bool")]
     pub uncommitted: Option<bool>,
 }
 
@@ -181,26 +287,35 @@ pub struct GetFileContentInput {
     /// Relative path to the file.
     pub path: String,
     /// First line to include (1-indexed).
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub start_line: Option<u32>,
     /// Last line to include (1-indexed, inclusive).
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub end_line: Option<u32>,
     /// Select a 1-based chunk from the file using `max_lines` as the chunk size.
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub chunk_index: Option<u32>,
     /// Maximum number of lines to include in a chunked read.
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub max_lines: Option<u32>,
     /// Center the read around this 1-indexed line.
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub around_line: Option<u32>,
     /// Center the read around the first case-insensitive literal match in the file.
     pub around_match: Option<String>,
     /// Center the read around a symbol in the target file.
     pub around_symbol: Option<String>,
     /// Optional exact-selector line for `around_symbol`.
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub symbol_line: Option<u32>,
     /// Number of lines of symmetric context to include around `around_line` or `around_match`.
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub context_lines: Option<u32>,
     /// Show 1-indexed line numbers for ordinary full-file or explicit-range reads.
+    #[serde(default, deserialize_with = "lenient_bool")]
     pub show_line_numbers: Option<bool>,
     /// Prepend a stable path or path-plus-range header for ordinary full-file or explicit-range reads.
+    #[serde(default, deserialize_with = "lenient_bool")]
     pub header: Option<bool>,
 }
 
@@ -216,10 +331,13 @@ pub struct FindReferencesInput {
     /// Optional selected symbol kind such as `fn`, `class`, or `struct`.
     pub symbol_kind: Option<String>,
     /// Optional selected symbol line from `search_symbols`.
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub symbol_line: Option<u32>,
     /// Maximum number of files to show (default 20, capped at 100).
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub limit: Option<u32>,
     /// Maximum number of reference hits per file (default 10, capped at 50).
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub max_per_file: Option<u32>,
 }
 
@@ -229,8 +347,10 @@ pub struct FindDependentsInput {
     /// Relative file path to find dependents for.
     pub path: String,
     /// Maximum number of dependent files to show (default 20, capped at 100).
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub limit: Option<u32>,
     /// Maximum number of reference lines per file (default 10, capped at 50).
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub max_per_file: Option<u32>,
     /// Output format: "text" (default), "mermaid", or "dot".
     pub format: Option<String>,
@@ -244,6 +364,7 @@ pub struct FindImplementationsInput {
     /// Search direction: "trait" (find implementors of a trait), "type" (find traits a type implements), or "auto" (default: search both directions).
     pub direction: Option<String>,
     /// Maximum entries to show (default 200).
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub limit: Option<u32>,
 }
 
@@ -253,6 +374,7 @@ pub struct GetFileTreeInput {
     /// Subtree path to browse (default: project root).
     pub path: Option<String>,
     /// Max depth levels to expand (default: 2, max: 5).
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub depth: Option<u32>,
 }
 
@@ -266,6 +388,7 @@ pub struct GetContextBundleInput {
     /// Optional kind filter for the symbol lookup (e.g., "fn", "struct").
     pub kind: Option<String>,
     /// Optional selected symbol line from `search_symbols`.
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub symbol_line: Option<u32>,
 }
 
@@ -275,6 +398,7 @@ pub struct GetFileContextInput {
     /// Relative path to the file.
     pub path: String,
     /// Optional max token budget, matching hook behavior.
+    #[serde(default, deserialize_with = "lenient_u64")]
     pub max_tokens: Option<u64>,
 }
 
@@ -290,6 +414,7 @@ pub struct GetSymbolContextInput {
     /// Optional selected symbol kind such as `fn`, `class`, or `struct`.
     pub symbol_kind: Option<String>,
     /// Optional selected symbol line from `search_symbols`.
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub symbol_line: Option<u32>,
 }
 
@@ -299,6 +424,7 @@ pub struct AnalyzeFileImpactInput {
     /// Relative path to the file to re-read from disk.
     pub path: String,
     /// When true, treat the file as newly created and index it.
+    #[serde(default, deserialize_with = "lenient_bool")]
     pub new_file: Option<bool>,
 }
 
@@ -312,6 +438,7 @@ pub struct TraceSymbolInput {
     /// Optional kind filter (e.g., "fn", "struct").
     pub kind: Option<String>,
     /// Optional line number to disambiguate overloaded symbols.
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub symbol_line: Option<u32>,
     /// Optional list of output sections to include. When omitted, all sections are included.
     /// Valid values: "dependents", "siblings", "implementations", "git".
@@ -324,8 +451,10 @@ pub struct InspectMatchInput {
     /// Relative path to the file.
     pub path: String,
     /// 1-based line number to inspect.
+    #[serde(deserialize_with = "lenient_u32_required")]
     pub line: u32,
     /// Number of context lines to show around the match (default 3).
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub context: Option<u32>,
 }
 
@@ -335,6 +464,7 @@ pub struct ExploreInput {
     /// Natural-language concept or topic to explore (e.g., "error handling", "concurrency", "database").
     pub query: String,
     /// Maximum number of results per category (default 10).
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub limit: Option<u32>,
 }
 
@@ -4534,5 +4664,91 @@ mod tests {
             result.contains("Called by"),
             "should have Called by section, got: {result}"
         );
+    }
+
+    // ── Lenient deserialization tests ────────────────────────────────────
+
+    #[test]
+    fn test_lenient_u32_accepts_string() {
+        let json = r#"{"query":"test","limit":"10"}"#;
+        let input: super::SearchFilesInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.limit, Some(10));
+    }
+
+    #[test]
+    fn test_lenient_u32_accepts_number() {
+        let json = r#"{"query":"test","limit":10}"#;
+        let input: super::SearchFilesInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.limit, Some(10));
+    }
+
+    #[test]
+    fn test_lenient_u32_accepts_null() {
+        let json = r#"{"query":"test","limit":null}"#;
+        let input: super::SearchFilesInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.limit, None);
+    }
+
+    #[test]
+    fn test_lenient_u32_accepts_absent() {
+        let json = r#"{"query":"test"}"#;
+        let input: super::SearchFilesInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.limit, None);
+    }
+
+    #[test]
+    fn test_lenient_bool_accepts_string_true() {
+        let json = r#"{"uncommitted":"true"}"#;
+        let input: super::WhatChangedInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.uncommitted, Some(true));
+    }
+
+    #[test]
+    fn test_lenient_bool_accepts_string_false() {
+        let json = r#"{"uncommitted":"false"}"#;
+        let input: super::WhatChangedInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.uncommitted, Some(false));
+    }
+
+    #[test]
+    fn test_lenient_bool_accepts_native_bool() {
+        let json = r#"{"uncommitted":true}"#;
+        let input: super::WhatChangedInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.uncommitted, Some(true));
+    }
+
+    #[test]
+    fn test_lenient_u32_required_accepts_string() {
+        let json = r#"{"path":"src/lib.rs","line":"42"}"#;
+        let input: super::InspectMatchInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.line, 42);
+    }
+
+    #[test]
+    fn test_lenient_u32_required_accepts_number() {
+        let json = r#"{"path":"src/lib.rs","line":42}"#;
+        let input: super::InspectMatchInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.line, 42);
+    }
+
+    #[test]
+    fn test_lenient_depth_accepts_string() {
+        let json = r#"{"depth":"1"}"#;
+        let input: super::GetFileTreeInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.depth, Some(1));
+    }
+
+    #[test]
+    fn test_resolve_path_accepts_query_alias() {
+        let json = r#"{"query":"daemon"}"#;
+        let input: super::ResolvePathInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.hint, "daemon");
+    }
+
+    #[test]
+    fn test_resolve_path_accepts_hint() {
+        let json = r#"{"hint":"daemon"}"#;
+        let input: super::ResolvePathInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.hint, "daemon");
     }
 }

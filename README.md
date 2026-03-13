@@ -26,7 +26,7 @@ Tokenizor is already useful today as a local, code-first MCP. The current implem
 - a local daemon mode for shared project/session state across concurrent terminals
 - tree-sitter-based symbol extraction across a broad set of programming languages
 - hook and sidecar enrichment for Claude Code
-- MCP tools, resources, and prompts for Claude Code, Codex, and other stdio MCP clients
+- MCP tools, resources, and prompts for Claude Code, Codex, Gemini CLI, and other stdio MCP clients
 - local snapshot persistence and file watching for supported source files
 
 At the time of this README rewrite, `cargo test` is green in this repository.
@@ -38,23 +38,27 @@ At the time of this README rewrite, `cargo test` is green in this repository.
 - Local same-machine use
 - MCP over stdio
 - Local daemon mode via `tokenizor-mcp daemon`
-- Automatic client setup for Claude Code and Codex via `tokenizor-mcp init`
+- Automatic client setup for Claude Code, Codex, and Gemini CLI via `tokenizor-mcp init`
 - Automatic hook registration for Claude Code
+- Auto-allow of all Tokenizor tools during Claude Code and Codex init (no permission prompts)
 - Local snapshot persistence at `.tokenizor/index.bin`
 - File watching and incremental re-indexing for supported source files
 - Background git temporal analysis — computes churn, ownership, and co-change metrics after index load
 
 ### Search and navigation gains
 
-- `search_files` for ranked path discovery
+- `search_files` for ranked path discovery with optional `changed_with` parameter for git temporal co-change coupling (finds files that frequently change together)
 - `resolve_path` for exact path resolution from filenames and partial hints
 - `search_symbols` with `kind`, `path_prefix`, `language`, `limit`, `include_generated`, and `include_tests`
-- `search_text` with literal, OR-term, and regex search plus `path_prefix`, `language`, `limit`, `max_per_file`, `glob`, `exclude_glob`, symmetric `context`, `case_sensitive`, `whole_word`, generated/test suppression, and relevance-ranked results (files sorted by match count rather than alphabetically)
+- `search_text` with literal, OR-term, and regex search plus `path_prefix`, `language`, `limit`, `max_per_file`, `glob`, `exclude_glob`, symmetric `context`, `case_sensitive`, `whole_word`, generated/test suppression, and relevance-ranked results (files sorted by match count rather than alphabetically); results show enclosing symbol context for each match; `group_by` parameter supports `"symbol"` (one summary line per symbol) and `"usage"` (filters out imports/comments to show only substantive usage sites); `follow_refs` enriches results with caller information for each matched symbol
 - `get_file_content` with full-file reads, explicit line ranges, optional `show_line_numbers` and `header` for full-file or explicit-range reads, `around_line`, first-match `around_match`, exact-path `around_symbol`, and exact-path line-oriented chunked reads via `chunk_index` plus `max_lines`; error messages show valid parameter combinations for the attempted mode
 - exact-selector reference navigation through `find_references`, `get_symbol_context`, and `get_context_bundle` using `path`, symbol kind, and symbol line; `find_references` supports `limit` and `max_per_file` for bounded output; `get_context_bundle` automatically resolves type dependencies — custom types referenced in the symbol's signature and body are included with their full definitions, recursively up to depth 2 (e.g. if a function takes `UserConfig` which contains an `Address` field, both type bodies are returned in a single call)
 - `get_file_context` with enriched import/export summaries — shows grouped import sources with symbol counts ("Imports from N sources") and grouped consumers with reference counts ("Used by M files"), alongside the symbol outline and key references; also includes a **Git activity** section with exponential-decay churn score (14-day half-life, rank-normalized 0.0–1.0 with visual bar), last commit summary, ownership distribution (top contributors by commit share), and Jaccard co-change coupling (files that frequently change together)
 - `find_dependents` with module- and namespace-aware attribution, `limit`/`max_per_file` output bounds, and optional `format` parameter for Mermaid flowchart or Graphviz DOT graph output
 - `find_implementations` for trait/interface implementation mapping — given a trait name returns all implementors, given a type name returns all traits it implements; bidirectional search with `direction` parameter; supports Rust (`impl Trait for Struct`), TypeScript/Java (`implements`), C# (base list), Python (class inheritance), C++, Ruby, PHP, Swift
+- `trace_symbol` for one-call semantic investigation of an exact symbol — returns definition, callers, callees, trait implementations, and type dependencies in a single response
+- `inspect_match` for deep-diving a specific search_text match — shows the match in full symbol context with callers and type dependencies, replacing the manual read-after-search pattern
+- `explore` for concept-driven codebase exploration — accepts a natural-language question (e.g. "how does authentication work?") and runs combined symbol + text searches using a built-in concept map, returning a unified overview
 - prompt-submit hook routing that can use file hints, basename/extensionless aliases, module aliases, qualified symbol aliases, and `:line` hints to choose the right file or symbol more reliably
 
 ### MCP surface implemented today
@@ -82,6 +86,9 @@ Current tools:
 - `get_file_tree`
 - `get_context_bundle`
 - `what_changed`
+- `trace_symbol`
+- `inspect_match`
+- `explore`
 
 Current prompts:
 
@@ -134,9 +141,7 @@ Near-term items not yet in the runtime:
 - transparent hook-based enrichment for Codex
 - `chunk_count_hint` for `get_file_content`
 
-Longer-term goals tracked in `.planning/milestones/`:
-
-- git temporal context (churn scores, co-change detection)
+Longer-term goals tracked in `.planning/milestones/`.
 
 ## Current Limitations
 
@@ -180,7 +185,7 @@ Current updater behavior:
 
 Automatic client initialization:
 
-- After a successful install or update, the installer auto-detects installed CLI agents (Claude Code, Codex) and runs `init` automatically — no manual `tokenizor-mcp init` needed.
+- After a successful install or update, the installer auto-detects installed CLI agents (Claude Code, Codex, Gemini CLI) and runs `init` automatically — no manual `tokenizor-mcp init` needed.
 - When an update is staged as `.pending` (active MCP session), auto-init runs on the next launch after the pending binary is applied.
 - Existing hooks and MCP registrations are updated in place; non-Tokenizor entries are preserved.
 
@@ -221,6 +226,7 @@ Current client targets:
 ```bash
 tokenizor-mcp init --client claude
 tokenizor-mcp init --client codex
+tokenizor-mcp init --client gemini
 tokenizor-mcp init --client all
 ```
 
@@ -258,6 +264,20 @@ The Codex setup writes or updates:
 - a bounded Tokenizor guidance block in `~/.codex/AGENTS.md`
 
 Codex currently uses MCP tools, resources, prompts, and AGENTS guidance, but it does not yet get the automatic transparent hook enrichment path that Claude Code gets.
+
+### Gemini CLI
+
+`tokenizor-mcp init --client gemini` updates:
+
+- `~/.gemini/settings.json`
+- `~/.gemini/GEMINI.md`
+
+The Gemini setup writes or updates:
+
+- MCP server registration in Gemini's `mcpServers` config
+- a bounded Tokenizor guidance block in `~/.gemini/GEMINI.md`
+
+Gemini CLI auto-detection: the npm installer detects `~/.gemini` and includes Gemini in automatic init.
 
 ## Runtime Model
 
