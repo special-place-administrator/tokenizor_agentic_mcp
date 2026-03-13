@@ -152,6 +152,49 @@ pub fn merge_hooks_into_settings(
 }
 
 // ---------------------------------------------------------------------------
+// Tool name constants
+// ---------------------------------------------------------------------------
+
+const TOKENIZOR_TOOL_NAMES: &[&str] = &[
+    "mcp__tokenizor__health",
+    "mcp__tokenizor__index_folder",
+    "mcp__tokenizor__get_file_outline",
+    "mcp__tokenizor__get_file_content",
+    "mcp__tokenizor__get_file_tree",
+    "mcp__tokenizor__get_symbol",
+    "mcp__tokenizor__get_symbols",
+    "mcp__tokenizor__get_repo_outline",
+    "mcp__tokenizor__get_repo_map",
+    "mcp__tokenizor__get_file_context",
+    "mcp__tokenizor__get_symbol_context",
+    "mcp__tokenizor__get_context_bundle",
+    "mcp__tokenizor__search_symbols",
+    "mcp__tokenizor__search_text",
+    "mcp__tokenizor__search_files",
+    "mcp__tokenizor__resolve_path",
+    "mcp__tokenizor__find_references",
+    "mcp__tokenizor__find_dependents",
+    "mcp__tokenizor__find_implementations",
+    "mcp__tokenizor__trace_symbol",
+    "mcp__tokenizor__inspect_match",
+    "mcp__tokenizor__analyze_file_impact",
+    "mcp__tokenizor__what_changed",
+];
+
+fn merge_allowed_tools(settings: &mut Value) {
+    if !settings["allowedTools"].is_array() {
+        settings["allowedTools"] = json!([]);
+    }
+    let allowed = settings["allowedTools"].as_array_mut().expect("is array");
+    for tool_name in TOKENIZOR_TOOL_NAMES {
+        let val = Value::String(tool_name.to_string());
+        if !allowed.contains(&val) {
+            allowed.push(val);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Core merge logic (pub for unit testing)
 // ---------------------------------------------------------------------------
 
@@ -165,18 +208,21 @@ pub fn merge_tokenizor_hooks(settings: &mut Value, binary_path: &str) {
         settings["hooks"] = json!({});
     }
 
-    let hooks = settings["hooks"]
-        .as_object_mut()
-        .expect("hooks is an object");
-
     // Build fresh tokenizor entries.
     let post_tool_use_entries = build_post_tool_use_entries(binary_path);
     let session_start_entries = build_session_start_entries(binary_path);
     let user_prompt_submit_entries = build_user_prompt_submit_entries(binary_path);
 
-    merge_event_entries(hooks, "PostToolUse", post_tool_use_entries);
-    merge_event_entries(hooks, "SessionStart", session_start_entries);
-    merge_event_entries(hooks, "UserPromptSubmit", user_prompt_submit_entries);
+    {
+        let hooks = settings["hooks"]
+            .as_object_mut()
+            .expect("hooks is an object");
+        merge_event_entries(hooks, "PostToolUse", post_tool_use_entries);
+        merge_event_entries(hooks, "SessionStart", session_start_entries);
+        merge_event_entries(hooks, "UserPromptSubmit", user_prompt_submit_entries);
+    }
+
+    merge_allowed_tools(settings);
 }
 
 // ---------------------------------------------------------------------------
@@ -345,6 +391,14 @@ fn merge_tokenizor_codex_server(config: &mut DocumentMut, binary_path: &str) {
     tokenizor["command"] = value(native_command_path(binary_path));
     tokenizor["startup_timeout_sec"] = value(CODEX_STARTUP_TIMEOUT_SEC);
     tokenizor["tool_timeout_sec"] = value(CODEX_TOOL_TIMEOUT_SEC);
+
+    let mut allow_array = Array::new();
+    for tool_name in TOKENIZOR_TOOL_NAMES {
+        // Codex uses plain tool names without mcp__ prefix
+        let short_name = tool_name.strip_prefix("mcp__tokenizor__").unwrap_or(tool_name);
+        allow_array.push(short_name);
+    }
+    tokenizor["allowed_tools"] = value(allow_array);
 
     merge_codex_project_doc_fallbacks(config);
 }
@@ -722,5 +776,30 @@ mod tests {
             "hooks": [{"type": "command", "command": "/some/other/script bash"}]
         });
         assert!(!is_tokenizor_entry(&entry));
+    }
+
+    #[test]
+    fn test_merge_adds_allowed_tools() {
+        let mut settings = json!({});
+        merge_tokenizor_hooks(&mut settings, "/usr/bin/tokenizor-mcp");
+        let allowed = settings["allowedTools"].as_array().expect("allowedTools should be array");
+        assert!(allowed.iter().any(|v| v.as_str() == Some("mcp__tokenizor__search_symbols")),
+            "should include search_symbols, got: {allowed:?}");
+        assert!(allowed.iter().any(|v| v.as_str() == Some("mcp__tokenizor__get_symbol")),
+            "should include get_symbol");
+        let first_len = allowed.len();
+        // Should not duplicate on re-run
+        merge_tokenizor_hooks(&mut settings, "/usr/bin/tokenizor-mcp");
+        let allowed2 = settings["allowedTools"].as_array().unwrap();
+        assert_eq!(first_len, allowed2.len(), "should not duplicate entries");
+    }
+
+    #[test]
+    fn test_codex_registration_includes_allow_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        register_codex_mcp_server(&config_path, "/usr/bin/tokenizor-mcp").unwrap();
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("search_symbols"), "should contain tool names: {content}");
     }
 }
