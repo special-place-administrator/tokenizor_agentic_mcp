@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.3](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.11.2...v0.11.3) (2026-03-13)
+
+
+### Bug Fixes
+
+* gate Windows-specific path tests with #[cfg(windows)] ([1710de0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/1710de0ca89d0bffe124994d91b2b714ea389312))
+* gate Windows-specific path tests with #[cfg(windows)] ([32f2964](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/32f2964da4f41897ac4988393968fde7505662f5))
+
 ## [0.11.2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.11.1...v0.11.2) (2026-03-13)
 
 
