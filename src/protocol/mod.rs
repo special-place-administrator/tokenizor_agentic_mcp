@@ -3,6 +3,8 @@ pub mod format;
 pub mod prompts;
 pub mod resources;
 pub mod tools;
+pub(crate) mod edit;
+pub(crate) mod edit_format;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};

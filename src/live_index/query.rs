@@ -305,13 +305,13 @@ fn matches_exact_symbol_reference(
             .unwrap_or(false)
 }
 
-enum SymbolSelectorMatch<'a> {
+pub(crate) enum SymbolSelectorMatch<'a> {
     Selected(usize, &'a SymbolRecord),
     NotFound,
     Ambiguous(Vec<u32>),
 }
 
-fn resolve_symbol_selector<'a>(
+pub(crate) fn resolve_symbol_selector<'a>(
     file: &'a IndexedFile,
     name: &str,
     symbol_kind: Option<&str>,
@@ -348,7 +348,7 @@ fn resolve_symbol_selector<'a>(
     }
 }
 
-fn render_symbol_selector(
+pub(crate) fn render_symbol_selector(
     name: &str,
     symbol_kind: Option<&str>,
     symbol_line: Option<u32>,

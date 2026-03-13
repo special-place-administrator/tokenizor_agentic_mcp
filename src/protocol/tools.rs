@@ -24,7 +24,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Deserialize a `u32` from either a JSON number or a stringified number like `"5"`.
-fn lenient_u32<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u32>, D::Error> {
+pub(crate) fn lenient_u32<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u32>, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum NumOrStr {
@@ -115,6 +115,8 @@ use crate::domain::LanguageId;
 use crate::live_index::{
     IndexedFile, SearchFilesHit, SearchFilesTier, SearchFilesView, search, store::IndexState,
 };
+use crate::protocol::edit;
+use crate::protocol::edit_format;
 use crate::protocol::format;
 use crate::sidecar::handlers::{
     ImpactParams, OutlineParams, SymbolContextParams, impact_tool_text, outline_tool_text,
@@ -2038,6 +2040,305 @@ impl TokenizorServer {
         }
 
         format::diff_symbols_result_view(base, target, &changed_files, &repo_root)
+    }
+
+    // ─── Edit tools (Tier 1) ─────────────────────────────────────────────────
+
+    /// Replace a symbol's entire definition by name. The index resolves byte positions server-side.
+    /// Use symbol_line to disambiguate overloaded names.
+    #[tool(
+        description = "Replace a symbol's entire definition by name. Provide the complete new source code. The index resolves byte positions server-side — no need to read the file first. Use symbol_line to disambiguate overloaded names."
+    )]
+    pub(crate) async fn replace_symbol_body(
+        &self,
+        params: Parameters<edit::ReplaceSymbolBodyInput>,
+    ) -> String {
+        if let Some(result) = self.proxy_tool_call("replace_symbol_body", &params.0).await {
+            return result;
+        }
+        let repo_root = match self.capture_repo_root() {
+            Some(root) => root,
+            None => return "Error: no repository root configured.".to_string(),
+        };
+        let file = {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
+            guard.capture_shared_file(&params.0.path)
+        };
+        let file = match file {
+            Some(f) => f,
+            None => return format::not_found_file(&params.0.path),
+        };
+        let (_, sym) = match edit::resolve_or_error(
+            &file,
+            &params.0.name,
+            params.0.kind.as_deref(),
+            params.0.symbol_line,
+        ) {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+        let old_bytes = (sym.byte_range.1 - sym.byte_range.0) as usize;
+        let new_content =
+            edit::apply_splice(&file.content, sym.byte_range, params.0.new_body.as_bytes());
+        let abs_path = repo_root.join(&params.0.path);
+        if let Err(e) = edit::atomic_write_file(&abs_path, &new_content) {
+            return format!("Error writing {}: {e}", params.0.path);
+        }
+        edit::reindex_after_write(&self.index, &params.0.path, new_content, file.language.clone());
+        edit_format::format_replace(
+            &params.0.path,
+            &params.0.name,
+            &sym.kind.to_string(),
+            old_bytes,
+            params.0.new_body.len(),
+        )
+    }
+
+    /// Insert code before a named symbol. Content is auto-indented to match.
+    #[tool(
+        description = "Insert code before a named symbol. Content is auto-indented to match the target's indentation. Use symbol_line to disambiguate overloaded names."
+    )]
+    pub(crate) async fn insert_before_symbol(
+        &self,
+        params: Parameters<edit::InsertSymbolInput>,
+    ) -> String {
+        if let Some(result) = self.proxy_tool_call("insert_before_symbol", &params.0).await {
+            return result;
+        }
+        let repo_root = match self.capture_repo_root() {
+            Some(root) => root,
+            None => return "Error: no repository root configured.".to_string(),
+        };
+        let file = {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
+            guard.capture_shared_file(&params.0.path)
+        };
+        let file = match file {
+            Some(f) => f,
+            None => return format::not_found_file(&params.0.path),
+        };
+        let (_, sym) = match edit::resolve_or_error(
+            &file,
+            &params.0.name,
+            params.0.kind.as_deref(),
+            params.0.symbol_line,
+        ) {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+        let new_content = edit::build_insert_before(&file.content, &sym, &params.0.content);
+        let abs_path = repo_root.join(&params.0.path);
+        if let Err(e) = edit::atomic_write_file(&abs_path, &new_content) {
+            return format!("Error writing {}: {e}", params.0.path);
+        }
+        edit::reindex_after_write(&self.index, &params.0.path, new_content, file.language.clone());
+        edit_format::format_insert(
+            &params.0.path,
+            &params.0.name,
+            "before",
+            params.0.content.len(),
+        )
+    }
+
+    /// Insert code after a named symbol. Content is auto-indented to match.
+    #[tool(
+        description = "Insert code after a named symbol. Content is auto-indented to match the target's indentation. Use symbol_line to disambiguate overloaded names."
+    )]
+    pub(crate) async fn insert_after_symbol(
+        &self,
+        params: Parameters<edit::InsertSymbolInput>,
+    ) -> String {
+        if let Some(result) = self.proxy_tool_call("insert_after_symbol", &params.0).await {
+            return result;
+        }
+        let repo_root = match self.capture_repo_root() {
+            Some(root) => root,
+            None => return "Error: no repository root configured.".to_string(),
+        };
+        let file = {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
+            guard.capture_shared_file(&params.0.path)
+        };
+        let file = match file {
+            Some(f) => f,
+            None => return format::not_found_file(&params.0.path),
+        };
+        let (_, sym) = match edit::resolve_or_error(
+            &file,
+            &params.0.name,
+            params.0.kind.as_deref(),
+            params.0.symbol_line,
+        ) {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+        let new_content = edit::build_insert_after(&file.content, &sym, &params.0.content);
+        let abs_path = repo_root.join(&params.0.path);
+        if let Err(e) = edit::atomic_write_file(&abs_path, &new_content) {
+            return format!("Error writing {}: {e}", params.0.path);
+        }
+        edit::reindex_after_write(&self.index, &params.0.path, new_content, file.language.clone());
+        edit_format::format_insert(
+            &params.0.path,
+            &params.0.name,
+            "after",
+            params.0.content.len(),
+        )
+    }
+
+    /// Delete a symbol cleanly — removes the entire definition and surrounding blank lines.
+    #[tool(
+        description = "Delete a symbol by name — removes the entire definition. Cleans up surrounding blank lines. Use symbol_line to disambiguate overloaded names."
+    )]
+    pub(crate) async fn delete_symbol(
+        &self,
+        params: Parameters<edit::DeleteSymbolInput>,
+    ) -> String {
+        if let Some(result) = self.proxy_tool_call("delete_symbol", &params.0).await {
+            return result;
+        }
+        let repo_root = match self.capture_repo_root() {
+            Some(root) => root,
+            None => return "Error: no repository root configured.".to_string(),
+        };
+        let file = {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
+            guard.capture_shared_file(&params.0.path)
+        };
+        let file = match file {
+            Some(f) => f,
+            None => return format::not_found_file(&params.0.path),
+        };
+        let (_, sym) = match edit::resolve_or_error(
+            &file,
+            &params.0.name,
+            params.0.kind.as_deref(),
+            params.0.symbol_line,
+        ) {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+        // Extend range to include leading whitespace on the same line and trailing newline.
+        let start = {
+            let s = sym.byte_range.0 as usize;
+            file.content[..s]
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map(|p| p + 1)
+                .unwrap_or(0) as u32
+        };
+        let end = {
+            let e = sym.byte_range.1 as usize;
+            // Consume up to one trailing blank line.
+            let mut pos = e;
+            // Skip to end of current line
+            while pos < file.content.len() && file.content[pos] != b'\n' {
+                pos += 1;
+            }
+            if pos < file.content.len() {
+                pos += 1; // consume the \n
+            }
+            // If next line is blank, consume it too
+            if pos < file.content.len() && file.content[pos] == b'\n' {
+                pos += 1;
+            }
+            pos as u32
+        };
+        let deleted_bytes = (end - start) as usize;
+        let new_content = edit::apply_splice(&file.content, (start, end), b"");
+        let abs_path = repo_root.join(&params.0.path);
+        if let Err(e) = edit::atomic_write_file(&abs_path, &new_content) {
+            return format!("Error writing {}: {e}", params.0.path);
+        }
+        edit::reindex_after_write(&self.index, &params.0.path, new_content, file.language.clone());
+        edit_format::format_delete(
+            &params.0.path,
+            &params.0.name,
+            &sym.kind.to_string(),
+            deleted_bytes,
+        )
+    }
+
+    /// Scoped text replacement within a single symbol's byte range.
+    #[tool(
+        description = "Find-and-replace within a symbol's body. Scoped to the symbol's byte range — won't affect code outside it. Set replace_all=true to replace every occurrence. Use for surgical edits without replacing the entire symbol."
+    )]
+    pub(crate) async fn edit_within_symbol(
+        &self,
+        params: Parameters<edit::EditWithinSymbolInput>,
+    ) -> String {
+        if let Some(result) = self.proxy_tool_call("edit_within_symbol", &params.0).await {
+            return result;
+        }
+        let repo_root = match self.capture_repo_root() {
+            Some(root) => root,
+            None => return "Error: no repository root configured.".to_string(),
+        };
+        let file = {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
+            guard.capture_shared_file(&params.0.path)
+        };
+        let file = match file {
+            Some(f) => f,
+            None => return format::not_found_file(&params.0.path),
+        };
+        let (_, sym) = match edit::resolve_or_error(
+            &file,
+            &params.0.name,
+            params.0.kind.as_deref(),
+            params.0.symbol_line,
+        ) {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+        let sym_start = sym.byte_range.0 as usize;
+        let sym_end = sym.byte_range.1 as usize;
+        let body = &file.content[sym_start..sym_end];
+        let body_str = match std::str::from_utf8(body) {
+            Ok(s) => s,
+            Err(_) => return "Error: symbol body is not valid UTF-8.".to_string(),
+        };
+        let (new_body, count) = if params.0.replace_all {
+            let replaced = body_str.replace(&params.0.old_text, &params.0.new_text);
+            let count = body_str.matches(&params.0.old_text).count();
+            (replaced, count)
+        } else {
+            match body_str.find(&params.0.old_text) {
+                Some(_) => (body_str.replacen(&params.0.old_text, &params.0.new_text, 1), 1),
+                None => {
+                    return format!(
+                        "Error: `{}` not found within symbol `{}`",
+                        params.0.old_text, params.0.name
+                    );
+                }
+            }
+        };
+        if count == 0 {
+            return format!(
+                "Error: `{}` not found within symbol `{}`",
+                params.0.old_text, params.0.name
+            );
+        }
+        let old_sym_bytes = sym_end - sym_start;
+        let new_content =
+            edit::apply_splice(&file.content, sym.byte_range, new_body.as_bytes());
+        let abs_path = repo_root.join(&params.0.path);
+        if let Err(e) = edit::atomic_write_file(&abs_path, &new_content) {
+            return format!("Error writing {}: {e}", params.0.path);
+        }
+        edit::reindex_after_write(&self.index, &params.0.path, new_content, file.language.clone());
+        edit_format::format_edit_within(
+            &params.0.path,
+            &params.0.name,
+            count,
+            old_sym_bytes,
+            new_body.len(),
+        )
     }
 }
 
@@ -4405,8 +4706,8 @@ mod tests {
         // Sanity check: we should have a reasonable number of tools.
         // Update this lower bound when removing tools; it prevents accidental regressions.
         assert!(
-            tool_count >= 24,
-            "server should expose at least 24 tools; found {tool_count}"
+            tool_count >= 31,
+            "server should expose at least 31 tools; found {tool_count}"
         );
     }
 
@@ -5104,5 +5405,179 @@ mod tests {
             result.contains("still loading") || result.contains("unavailable"),
             "expected loading/unavailable message, got: {result}"
         );
+    }
+
+    // ─── Edit tool integration tests ─────────────────────────────────────────
+
+    /// Helper: write a file to disk and build a server with it indexed.
+    fn setup_edit_test(original: &[u8]) -> (TempDir, TokenizorServer, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let file_path = src_dir.join("lib.rs");
+        std::fs::write(&file_path, original).unwrap();
+
+        let result = crate::parsing::process_file("src/lib.rs", original, LanguageId::Rust);
+        let indexed = IndexedFile::from_parse_result(result, original.to_vec());
+        let index = make_live_index_ready(vec![("src/lib.rs".to_string(), indexed)]);
+        let server = make_server_with_root(index, Some(dir.path().to_path_buf()));
+        (dir, server, file_path)
+    }
+
+    #[tokio::test]
+    async fn test_replace_symbol_body_replaces_and_reindexes() {
+        let original = b"fn hello() {\n    println!(\"hello\");\n}\n\nfn world() {\n    println!(\"world\");\n}\n";
+        let (_dir, server, file_path) = setup_edit_test(original);
+
+        let input = crate::protocol::edit::ReplaceSymbolBodyInput {
+            path: "src/lib.rs".to_string(),
+            name: "hello".to_string(),
+            kind: None,
+            symbol_line: None,
+            new_body: "fn hello() {\n    println!(\"HELLO\");\n}".to_string(),
+        };
+        let result = server.replace_symbol_body(Parameters(input)).await;
+        assert!(result.contains("replaced"), "result was: {result}");
+        assert!(result.contains("hello"), "result was: {result}");
+
+        let on_disk = std::fs::read_to_string(&file_path).unwrap();
+        assert!(on_disk.contains("HELLO"), "disk: {on_disk}");
+        assert!(on_disk.contains("world"), "other symbol intact: {on_disk}");
+
+        let guard = server.index.read().unwrap();
+        let file = guard.get_file("src/lib.rs").unwrap();
+        assert!(file.symbols.iter().any(|s| s.name == "hello"));
+        assert!(file.symbols.iter().any(|s| s.name == "world"));
+    }
+
+    #[tokio::test]
+    async fn test_replace_symbol_body_not_found() {
+        let original = b"fn hello() {}\n";
+        let (_dir, server, _) = setup_edit_test(original);
+
+        let input = crate::protocol::edit::ReplaceSymbolBodyInput {
+            path: "nonexistent.rs".to_string(),
+            name: "foo".to_string(),
+            kind: None,
+            symbol_line: None,
+            new_body: "fn foo() {}".to_string(),
+        };
+        let result = server.replace_symbol_body(Parameters(input)).await;
+        assert!(
+            result.contains("not found") || result.contains("Not found"),
+            "result: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_insert_after_symbol_works() {
+        let original = b"fn hello() {\n    println!(\"hello\");\n}\n";
+        let (_dir, server, file_path) = setup_edit_test(original);
+
+        let input = crate::protocol::edit::InsertSymbolInput {
+            path: "src/lib.rs".to_string(),
+            name: "hello".to_string(),
+            kind: None,
+            symbol_line: None,
+            content: "fn world() {\n    println!(\"world\");\n}".to_string(),
+        };
+        let result = server.insert_after_symbol(Parameters(input)).await;
+        assert!(result.contains("inserted"), "result: {result}");
+        assert!(result.contains("after"), "result: {result}");
+
+        let on_disk = std::fs::read_to_string(&file_path).unwrap();
+        assert!(on_disk.contains("hello"), "original intact: {on_disk}");
+        assert!(on_disk.contains("world"), "new symbol: {on_disk}");
+
+        let guard = server.index.read().unwrap();
+        let file = guard.get_file("src/lib.rs").unwrap();
+        assert!(file.symbols.iter().any(|s| s.name == "world"));
+    }
+
+    #[tokio::test]
+    async fn test_insert_before_symbol_works() {
+        let original = b"fn world() {\n    println!(\"world\");\n}\n";
+        let (_dir, server, file_path) = setup_edit_test(original);
+
+        let input = crate::protocol::edit::InsertSymbolInput {
+            path: "src/lib.rs".to_string(),
+            name: "world".to_string(),
+            kind: None,
+            symbol_line: None,
+            content: "fn hello() {\n    println!(\"hello\");\n}".to_string(),
+        };
+        let result = server.insert_before_symbol(Parameters(input)).await;
+        assert!(result.contains("inserted"), "result: {result}");
+        assert!(result.contains("before"), "result: {result}");
+
+        let on_disk = std::fs::read_to_string(&file_path).unwrap();
+        let hello_pos = on_disk.find("hello").unwrap();
+        let world_pos = on_disk.find("world").unwrap();
+        assert!(hello_pos < world_pos, "hello before world: {on_disk}");
+    }
+
+    #[tokio::test]
+    async fn test_delete_symbol_removes_and_reindexes() {
+        let original = b"fn hello() {\n    println!(\"hello\");\n}\n\nfn world() {\n    println!(\"world\");\n}\n";
+        let (_dir, server, file_path) = setup_edit_test(original);
+
+        let input = crate::protocol::edit::DeleteSymbolInput {
+            path: "src/lib.rs".to_string(),
+            name: "hello".to_string(),
+            kind: None,
+            symbol_line: None,
+        };
+        let result = server.delete_symbol(Parameters(input)).await;
+        assert!(result.contains("deleted"), "result: {result}");
+
+        let on_disk = std::fs::read_to_string(&file_path).unwrap();
+        assert!(!on_disk.contains("hello"), "hello removed: {on_disk}");
+        assert!(on_disk.contains("world"), "world intact: {on_disk}");
+
+        let guard = server.index.read().unwrap();
+        let file = guard.get_file("src/lib.rs").unwrap();
+        assert!(!file.symbols.iter().any(|s| s.name == "hello"));
+        assert!(file.symbols.iter().any(|s| s.name == "world"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_within_symbol_replaces_text() {
+        let original = b"fn hello() {\n    println!(\"hello\");\n}\n";
+        let (_dir, server, file_path) = setup_edit_test(original);
+
+        let input = crate::protocol::edit::EditWithinSymbolInput {
+            path: "src/lib.rs".to_string(),
+            name: "hello".to_string(),
+            kind: None,
+            symbol_line: None,
+            old_text: "\"hello\"".to_string(),
+            new_text: "\"HELLO\"".to_string(),
+            replace_all: false,
+        };
+        let result = server.edit_within_symbol(Parameters(input)).await;
+        assert!(result.contains("edited within"), "result: {result}");
+        assert!(result.contains("1 replacement"), "result: {result}");
+
+        let on_disk = std::fs::read_to_string(&file_path).unwrap();
+        assert!(on_disk.contains("HELLO"), "edited: {on_disk}");
+        assert!(!on_disk.contains("\"hello\""), "old text gone: {on_disk}");
+    }
+
+    #[tokio::test]
+    async fn test_edit_within_symbol_not_found_text() {
+        let original = b"fn hello() {\n    println!(\"hello\");\n}\n";
+        let (_dir, server, _) = setup_edit_test(original);
+
+        let input = crate::protocol::edit::EditWithinSymbolInput {
+            path: "src/lib.rs".to_string(),
+            name: "hello".to_string(),
+            kind: None,
+            symbol_line: None,
+            old_text: "nonexistent".to_string(),
+            new_text: "replacement".to_string(),
+            replace_all: false,
+        };
+        let result = server.edit_within_symbol(Parameters(input)).await;
+        assert!(result.contains("not found within"), "result: {result}");
     }
 }
