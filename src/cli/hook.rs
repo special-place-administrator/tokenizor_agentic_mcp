@@ -490,6 +490,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn test_relative_path_normalizes_backslashes() {
         // Simulate a Windows-style result from strip_prefix.
         // Since we're on MSYS/Windows the path may use backslashes.
