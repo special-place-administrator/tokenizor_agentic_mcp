@@ -2103,19 +2103,34 @@ impl TokenizorServer {
         if let Err(e) = edit::atomic_write_file(&abs_path, &new_content) {
             return format!("Error writing {}: {e}", params.0.path);
         }
+        let old_sig = edit::extract_signature(&file.content, sym.byte_range);
+        let new_sig = params.0.new_body.lines().next().unwrap_or("").to_string();
         edit::reindex_after_write(
             &self.index,
             &params.0.path,
             new_content,
             file.language.clone(),
         );
-        edit_format::format_replace(
+        let warnings = edit::detect_stale_references(
+            &self.index,
+            &params.0.path,
+            &params.0.name,
+            &old_sig,
+            &new_sig,
+        );
+        let mut result = edit_format::format_replace(
             &params.0.path,
             &params.0.name,
             &sym.kind.to_string(),
             old_bytes,
             params.0.new_body.len(),
-        )
+        );
+        result.push_str(&edit_format::format_stale_warnings(
+            &params.0.path,
+            &params.0.name,
+            &warnings,
+        ));
+        result
     }
 
     /// Insert code before a named symbol. Content is auto-indented to match the target symbol's
@@ -2263,34 +2278,8 @@ impl TokenizorServer {
             Ok(s) => s,
             Err(e) => return e,
         };
-        // Extend range to include leading whitespace on the same line and trailing newline.
-        let start = {
-            let s = sym.byte_range.0 as usize;
-            file.content[..s]
-                .iter()
-                .rposition(|&b| b == b'\n')
-                .map(|p| p + 1)
-                .unwrap_or(0) as u32
-        };
-        let end = {
-            let e = sym.byte_range.1 as usize;
-            // Consume up to one trailing blank line.
-            let mut pos = e;
-            // Skip to end of current line
-            while pos < file.content.len() && file.content[pos] != b'\n' {
-                pos += 1;
-            }
-            if pos < file.content.len() {
-                pos += 1; // consume the \n
-            }
-            // If next line is blank, consume it too
-            if pos < file.content.len() && file.content[pos] == b'\n' {
-                pos += 1;
-            }
-            pos as u32
-        };
-        let deleted_bytes = (end - start) as usize;
-        let new_content = edit::apply_splice(&file.content, (start, end), b"");
+        let deleted_bytes = (sym.byte_range.1 - sym.byte_range.0) as usize;
+        let new_content = edit::build_delete(&file.content, &sym);
         let abs_path = repo_root.join(&params.0.path);
         if let Err(e) = edit::atomic_write_file(&abs_path, &new_content) {
             return format!("Error writing {}: {e}", params.0.path);
@@ -2395,6 +2384,92 @@ impl TokenizorServer {
             old_sym_bytes,
             new_body.len(),
         )
+    }
+
+    // ── Tier 2: Batch edit tools ──────────────────────────────────────────
+
+    /// Apply multiple symbol-addressed edits atomically.
+    #[tool(
+        description = "Apply multiple symbol-addressed edits atomically across files. Each edit specifies a file, symbol, and operation (replace/insert_before/insert_after/delete/edit_within). All symbols are validated before any writes — if any resolution fails, no files are modified. Edits within the same file must target non-overlapping symbols. NOT for single-symbol edits (use replace_symbol_body, insert_before_symbol, etc.)."
+    )]
+    pub(crate) async fn batch_edit(&self, params: Parameters<edit::BatchEditInput>) -> String {
+        if let Some(result) = self.proxy_tool_call("batch_edit", &params.0).await {
+            return result;
+        }
+        let repo_root = match self.capture_repo_root() {
+            Some(root) => root,
+            None => return "Error: no repository root configured.".to_string(),
+        };
+        {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
+        }
+        match edit::execute_batch_edit(&self.index, &repo_root, &params.0.edits) {
+            Ok(summaries) => {
+                let file_count = params
+                    .0
+                    .edits
+                    .iter()
+                    .map(|e| e.path.as_str())
+                    .collect::<std::collections::HashSet<_>>()
+                    .len();
+                edit_format::format_batch_summary(&summaries, file_count)
+            }
+            Err(e) => e,
+        }
+    }
+
+    /// Rename a symbol and update all references project-wide.
+    #[tool(
+        description = "Rename a symbol and update all references across the project. Finds the definition and all usage sites via the index's reverse reference map. Best-effort: common names (e.g. `new`, `get`) may produce false positives — verify with what_changed afterward. NOT for replacing a symbol's body (use replace_symbol_body)."
+    )]
+    pub(crate) async fn batch_rename(&self, params: Parameters<edit::BatchRenameInput>) -> String {
+        if let Some(result) = self.proxy_tool_call("batch_rename", &params.0).await {
+            return result;
+        }
+        let repo_root = match self.capture_repo_root() {
+            Some(root) => root,
+            None => return "Error: no repository root configured.".to_string(),
+        };
+        {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
+        }
+        match edit::execute_batch_rename(&self.index, &repo_root, &params.0) {
+            Ok(summary) => summary,
+            Err(e) => e,
+        }
+    }
+
+    /// Insert the same code at multiple symbol locations across files.
+    #[tool(
+        description = "Insert the same code before or after multiple symbols across the project. Useful for adding logging, instrumentation, or boilerplate to many locations at once. Code is auto-indented to match each target symbol. NOT for inserting at a single location (use insert_before_symbol or insert_after_symbol)."
+    )]
+    pub(crate) async fn batch_insert(&self, params: Parameters<edit::BatchInsertInput>) -> String {
+        if let Some(result) = self.proxy_tool_call("batch_insert", &params.0).await {
+            return result;
+        }
+        let repo_root = match self.capture_repo_root() {
+            Some(root) => root,
+            None => return "Error: no repository root configured.".to_string(),
+        };
+        {
+            let guard = self.index.read().expect("lock poisoned");
+            loading_guard!(guard);
+        }
+        match edit::execute_batch_insert(&self.index, &repo_root, &params.0) {
+            Ok(summaries) => {
+                let file_count = params
+                    .0
+                    .targets
+                    .iter()
+                    .map(|t| t.path.as_str())
+                    .collect::<std::collections::HashSet<_>>()
+                    .len();
+                edit_format::format_batch_summary(&summaries, file_count)
+            }
+            Err(e) => e,
+        }
     }
 }
 
@@ -4762,8 +4837,8 @@ mod tests {
         // Sanity check: we should have a reasonable number of tools.
         // Update this lower bound when removing tools; it prevents accidental regressions.
         assert!(
-            tool_count >= 31,
-            "server should expose at least 31 tools; found {tool_count}"
+            tool_count >= 34,
+            "server should expose at least 34 tools; found {tool_count}"
         );
     }
 
@@ -5660,5 +5735,157 @@ mod tests {
         };
         let result = server.edit_within_symbol(Parameters(input)).await;
         assert!(result.contains("not found within"), "result: {result}");
+    }
+
+    // ── Tier 2 batch tool integration tests ──
+
+    #[tokio::test]
+    async fn test_batch_edit_applies_across_files() {
+        use crate::protocol::edit::{BatchEditInput, EditOperation, SingleEdit};
+
+        let dir = tempfile::tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+
+        let a_content = b"fn alpha() { old }\n";
+        let b_content = b"fn beta() { keep }\n";
+        std::fs::write(src_dir.join("a.rs"), a_content).unwrap();
+        std::fs::write(src_dir.join("b.rs"), b_content).unwrap();
+
+        let mut files = vec![];
+        for (path, content) in [
+            ("src/a.rs", a_content as &[u8]),
+            ("src/b.rs", b_content as &[u8]),
+        ] {
+            let result = crate::parsing::process_file(path, content, LanguageId::Rust);
+            let indexed =
+                crate::live_index::store::IndexedFile::from_parse_result(result, content.to_vec());
+            files.push((path.to_string(), indexed));
+        }
+        let index = make_live_index_ready(files);
+        let server = make_server_with_root(index, Some(dir.path().to_path_buf()));
+
+        let input = BatchEditInput {
+            edits: vec![
+                SingleEdit {
+                    path: "src/a.rs".to_string(),
+                    name: "alpha".to_string(),
+                    kind: None,
+                    symbol_line: None,
+                    operation: EditOperation::Replace {
+                        new_body: "fn alpha() { new }".to_string(),
+                    },
+                },
+                SingleEdit {
+                    path: "src/b.rs".to_string(),
+                    name: "beta".to_string(),
+                    kind: None,
+                    symbol_line: None,
+                    operation: EditOperation::Delete,
+                },
+            ],
+        };
+        let result = server.batch_edit(Parameters(input)).await;
+        assert!(result.contains("2 edit(s)"), "result: {result}");
+
+        let a = std::fs::read_to_string(src_dir.join("a.rs")).unwrap();
+        assert!(a.contains("new"), "a.rs: {a}");
+        let b = std::fs::read_to_string(src_dir.join("b.rs")).unwrap();
+        assert!(!b.contains("beta"), "b.rs: {b}");
+    }
+
+    #[tokio::test]
+    async fn test_batch_rename_renames_def_and_refs() {
+        use crate::protocol::edit::BatchRenameInput;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+
+        let lib_content = b"fn old_name() {}\n";
+        let main_content = b"fn caller() { old_name(); }\n";
+        std::fs::write(src_dir.join("lib.rs"), lib_content).unwrap();
+        std::fs::write(src_dir.join("main.rs"), main_content).unwrap();
+
+        let mut files = vec![];
+        for (path, content) in [
+            ("src/lib.rs", lib_content as &[u8]),
+            ("src/main.rs", main_content as &[u8]),
+        ] {
+            let result = crate::parsing::process_file(path, content, LanguageId::Rust);
+            let indexed =
+                crate::live_index::store::IndexedFile::from_parse_result(result, content.to_vec());
+            files.push((path.to_string(), indexed));
+        }
+        let index = make_live_index_ready(files);
+        let server = make_server_with_root(index, Some(dir.path().to_path_buf()));
+
+        let input = BatchRenameInput {
+            path: "src/lib.rs".to_string(),
+            name: "old_name".to_string(),
+            kind: None,
+            symbol_line: None,
+            new_name: "new_name".to_string(),
+        };
+        let result = server.batch_rename(Parameters(input)).await;
+        assert!(result.contains("Renamed"), "result: {result}");
+        assert!(result.contains("new_name"), "result: {result}");
+
+        let lib = std::fs::read_to_string(src_dir.join("lib.rs")).unwrap();
+        assert!(lib.contains("new_name"), "lib.rs: {lib}");
+        assert!(!lib.contains("old_name"), "lib.rs: {lib}");
+    }
+
+    #[tokio::test]
+    async fn test_batch_insert_adds_to_multiple_files() {
+        use crate::protocol::edit::{BatchInsertInput, InsertPosition, InsertTarget};
+
+        let dir = tempfile::tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+
+        let a_content = b"fn handler_a() {}\n";
+        let b_content = b"fn handler_b() {}\n";
+        std::fs::write(src_dir.join("a.rs"), a_content).unwrap();
+        std::fs::write(src_dir.join("b.rs"), b_content).unwrap();
+
+        let mut files = vec![];
+        for (path, content) in [
+            ("src/a.rs", a_content as &[u8]),
+            ("src/b.rs", b_content as &[u8]),
+        ] {
+            let result = crate::parsing::process_file(path, content, LanguageId::Rust);
+            let indexed =
+                crate::live_index::store::IndexedFile::from_parse_result(result, content.to_vec());
+            files.push((path.to_string(), indexed));
+        }
+        let index = make_live_index_ready(files);
+        let server = make_server_with_root(index, Some(dir.path().to_path_buf()));
+
+        let input = BatchInsertInput {
+            content: "fn logging() {}".to_string(),
+            position: InsertPosition::After,
+            targets: vec![
+                InsertTarget {
+                    path: "src/a.rs".to_string(),
+                    name: "handler_a".to_string(),
+                    kind: None,
+                    symbol_line: None,
+                },
+                InsertTarget {
+                    path: "src/b.rs".to_string(),
+                    name: "handler_b".to_string(),
+                    kind: None,
+                    symbol_line: None,
+                },
+            ],
+        };
+        let result = server.batch_insert(Parameters(input)).await;
+        assert!(result.contains("2 edit(s)"), "result: {result}");
+
+        let a = std::fs::read_to_string(src_dir.join("a.rs")).unwrap();
+        assert!(a.contains("logging"), "a.rs: {a}");
+        let b = std::fs::read_to_string(src_dir.join("b.rs")).unwrap();
+        assert!(b.contains("logging"), "b.rs: {b}");
     }
 }

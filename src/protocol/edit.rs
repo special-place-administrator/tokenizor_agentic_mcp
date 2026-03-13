@@ -163,6 +163,102 @@ pub(crate) fn build_insert_after(
 }
 
 // ---------------------------------------------------------------------------
+// Delete helper
+// ---------------------------------------------------------------------------
+
+/// Build file content with the symbol removed, including leading whitespace and trailing newlines.
+/// Collapses runs of 3+ consecutive blank lines down to 1 after deletion.
+pub(crate) fn build_delete(file_content: &[u8], sym: &SymbolRecord) -> Vec<u8> {
+    // Extend to start of line (include leading whitespace).
+    let start = {
+        let s = sym.byte_range.0 as usize;
+        file_content[..s]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map(|p| p + 1)
+            .unwrap_or(0) as u32
+    };
+    // Extend past trailing newlines (consume up to one blank line).
+    let end = {
+        let e = sym.byte_range.1 as usize;
+        let mut pos = e;
+        while pos < file_content.len() && file_content[pos] != b'\n' {
+            pos += 1;
+        }
+        if pos < file_content.len() {
+            pos += 1;
+        }
+        if pos < file_content.len() && file_content[pos] == b'\n' {
+            pos += 1;
+        }
+        pos as u32
+    };
+    let spliced = apply_splice(file_content, (start, end), b"");
+    collapse_blank_lines(&spliced)
+}
+
+/// Collapse runs of 3+ consecutive newlines (\n\n\n+) down to 2 (\n\n = one blank line).
+fn collapse_blank_lines(content: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(content.len());
+    let mut consecutive_newlines = 0u32;
+    for &b in content {
+        if b == b'\n' {
+            consecutive_newlines += 1;
+            if consecutive_newlines <= 2 {
+                result.push(b);
+            }
+        } else {
+            consecutive_newlines = 0;
+            result.push(b);
+        }
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Edit-within helper
+// ---------------------------------------------------------------------------
+
+/// Find-and-replace text within a symbol's byte range. Returns (new_content, replacement_count).
+pub(crate) fn build_edit_within(
+    file_content: &[u8],
+    sym: &SymbolRecord,
+    old_text: &str,
+    new_text: &str,
+    replace_all: bool,
+) -> Result<(Vec<u8>, usize), String> {
+    let sym_start = sym.byte_range.0 as usize;
+    let sym_end = sym.byte_range.1 as usize;
+    let body = &file_content[sym_start..sym_end];
+    let body_str =
+        std::str::from_utf8(body).map_err(|_| "Symbol body is not valid UTF-8.".to_string())?;
+
+    let (new_body, count) = if replace_all {
+        let count = body_str.matches(old_text).count();
+        if count == 0 {
+            return Err(format!(
+                "`{old_text}` not found within symbol `{}`",
+                sym.name
+            ));
+        }
+        (body_str.replace(old_text, new_text), count)
+    } else {
+        match body_str.find(old_text) {
+            Some(_) => (body_str.replacen(old_text, new_text, 1), 1),
+            None => {
+                return Err(format!(
+                    "`{old_text}` not found within symbol `{}`",
+                    sym.name
+                ));
+            }
+        }
+    };
+
+    let new_content = apply_splice(file_content, sym.byte_range, new_body.as_bytes());
+    Ok((new_content, count))
+}
+
+// ---------------------------------------------------------------------------
 // Input structs for tool handlers
 // ---------------------------------------------------------------------------
 
@@ -227,6 +323,455 @@ pub struct EditWithinSymbolInput {
     /// If true, replace all occurrences within the symbol. Default: false (first match only).
     #[serde(default)]
     pub replace_all: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Batch edit types and execution
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+pub struct BatchEditInput {
+    /// List of individual edits to apply atomically.
+    pub edits: Vec<SingleEdit>,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+pub struct SingleEdit {
+    /// Relative file path.
+    pub path: String,
+    /// Symbol name.
+    pub name: String,
+    /// Optional kind filter.
+    pub kind: Option<String>,
+    /// Line number to disambiguate.
+    #[serde(default, deserialize_with = "super::tools::lenient_u32")]
+    pub symbol_line: Option<u32>,
+    /// The edit operation to perform.
+    pub operation: EditOperation,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum EditOperation {
+    /// Replace the entire symbol definition.
+    #[serde(rename = "replace")]
+    Replace { new_body: String },
+    /// Insert code before the symbol.
+    #[serde(rename = "insert_before")]
+    InsertBefore { content: String },
+    /// Insert code after the symbol.
+    #[serde(rename = "insert_after")]
+    InsertAfter { content: String },
+    /// Delete the symbol.
+    #[serde(rename = "delete")]
+    Delete,
+    /// Find-and-replace within the symbol.
+    #[serde(rename = "edit_within")]
+    EditWithin { old_text: String, new_text: String },
+}
+
+/// Apply multiple symbol-addressed edits atomically.
+/// Validates all symbols first, rejects overlapping ranges, then applies in reverse-offset order.
+pub(crate) fn execute_batch_edit(
+    index: &SharedIndex,
+    repo_root: &Path,
+    edits: &[SingleEdit],
+) -> Result<Vec<String>, String> {
+    struct ResolvedEdit {
+        path: String,
+        sym: SymbolRecord,
+        operation: usize,
+        language: LanguageId,
+    }
+
+    // Phase 1: Resolve all symbols.
+    let mut resolved = Vec::with_capacity(edits.len());
+    {
+        let guard = index.read().expect("lock poisoned");
+        for (i, edit) in edits.iter().enumerate() {
+            let file = guard
+                .get_file(&edit.path)
+                .ok_or_else(|| format!("File not indexed: {}", edit.path))?;
+            let (_, sym) =
+                resolve_or_error(file, &edit.name, edit.kind.as_deref(), edit.symbol_line)
+                    .map_err(|e| format!("Edit {}: {e}", i + 1))?;
+            resolved.push(ResolvedEdit {
+                path: edit.path.clone(),
+                sym,
+                operation: i,
+                language: file.language.clone(),
+            });
+        }
+    }
+
+    // Phase 1b: Validate no overlapping byte ranges within the same file.
+    let mut by_file: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (i, r) in resolved.iter().enumerate() {
+        by_file.entry(r.path.clone()).or_default().push(i);
+    }
+    for (path, indices) in &by_file {
+        for i in 0..indices.len() {
+            for j in (i + 1)..indices.len() {
+                let (a, b) = (
+                    resolved[indices[i]].sym.byte_range,
+                    resolved[indices[j]].sym.byte_range,
+                );
+                if a.0 < b.1 && b.0 < a.1 {
+                    return Err(format!(
+                        "Overlapping edits in {path}: `{}` ({}-{}) and `{}` ({}-{}). \
+                         Split into separate calls.",
+                        resolved[indices[i]].sym.name,
+                        a.0,
+                        a.1,
+                        resolved[indices[j]].sym.name,
+                        b.0,
+                        b.1,
+                    ));
+                }
+            }
+        }
+    }
+
+    // Phase 2: Sort each file's edits reverse by byte offset.
+    for indices in by_file.values_mut() {
+        indices.sort_by(|&a, &b| {
+            resolved[b]
+                .sym
+                .byte_range
+                .0
+                .cmp(&resolved[a].sym.byte_range.0)
+        });
+    }
+
+    // Phase 3: Apply edits per file, write, reindex.
+    let mut summaries = Vec::new();
+
+    for (path, indices) in &by_file {
+        let file = {
+            let guard = index.read().expect("lock poisoned");
+            guard
+                .capture_shared_file(path)
+                .ok_or_else(|| format!("File disappeared: {path}"))?
+        };
+
+        let mut content = file.content.clone();
+        let language = resolved[indices[0]].language.clone();
+
+        for &ri in indices {
+            let r = &resolved[ri];
+            let edit = &edits[r.operation];
+            match &edit.operation {
+                EditOperation::Replace { new_body } => {
+                    let old_bytes = (r.sym.byte_range.1 - r.sym.byte_range.0) as usize;
+                    let sym_start = r.sym.byte_range.0 as usize;
+                    let line_start = content[..sym_start]
+                        .iter()
+                        .rposition(|&b| b == b'\n')
+                        .map(|p| p + 1)
+                        .unwrap_or(0) as u32;
+                    let indent = detect_indentation(&content, r.sym.byte_range.0);
+                    let indented = apply_indentation(new_body, &indent);
+                    content = apply_splice(&content, (line_start, r.sym.byte_range.1), &indented);
+                    summaries.push(super::edit_format::format_replace(
+                        path,
+                        &r.sym.name,
+                        &r.sym.kind.to_string(),
+                        old_bytes,
+                        new_body.len(),
+                    ));
+                }
+                EditOperation::InsertBefore { content: code } => {
+                    content = build_insert_before(&content, &r.sym, code);
+                    summaries.push(super::edit_format::format_insert(
+                        path,
+                        &r.sym.name,
+                        "before",
+                        code.len(),
+                    ));
+                }
+                EditOperation::InsertAfter { content: code } => {
+                    content = build_insert_after(&content, &r.sym, code);
+                    summaries.push(super::edit_format::format_insert(
+                        path,
+                        &r.sym.name,
+                        "after",
+                        code.len(),
+                    ));
+                }
+                EditOperation::Delete => {
+                    let deleted = (r.sym.byte_range.1 - r.sym.byte_range.0) as usize;
+                    content = build_delete(&content, &r.sym);
+                    summaries.push(super::edit_format::format_delete(
+                        path,
+                        &r.sym.name,
+                        &r.sym.kind.to_string(),
+                        deleted,
+                    ));
+                }
+                EditOperation::EditWithin { old_text, new_text } => {
+                    let old_bytes = (r.sym.byte_range.1 - r.sym.byte_range.0) as usize;
+                    let (new, count) =
+                        build_edit_within(&content, &r.sym, old_text, new_text, false)
+                            .map_err(|e| format!("Edit in {path}:{}: {e}", r.sym.name))?;
+                    content = new;
+                    summaries.push(super::edit_format::format_edit_within(
+                        path,
+                        &r.sym.name,
+                        count,
+                        old_bytes,
+                        old_bytes,
+                    ));
+                }
+            }
+        }
+
+        let abs_path = repo_root.join(path);
+        atomic_write_file(&abs_path, &content)
+            .map_err(|e| format!("Write failed for {path}: {e}"))?;
+        reindex_after_write(index, path, content, language);
+    }
+
+    Ok(summaries)
+}
+
+// ---------------------------------------------------------------------------
+// Batch rename
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+pub struct BatchRenameInput {
+    /// Relative file path containing the symbol definition.
+    pub path: String,
+    /// Current symbol name.
+    pub name: String,
+    /// Optional kind filter.
+    pub kind: Option<String>,
+    /// Line number to disambiguate.
+    #[serde(default, deserialize_with = "super::tools::lenient_u32")]
+    pub symbol_line: Option<u32>,
+    /// New name for the symbol.
+    pub new_name: String,
+}
+
+/// Rename a symbol and all its references across the project.
+pub(crate) fn execute_batch_rename(
+    index: &SharedIndex,
+    repo_root: &Path,
+    input: &BatchRenameInput,
+) -> Result<String, String> {
+    // Phase 1: Resolve the definition and find the name within its body.
+    let (def_name_range, language) = {
+        let guard = index.read().expect("lock poisoned");
+        let file = guard
+            .get_file(&input.path)
+            .ok_or_else(|| format!("File not indexed: {}", input.path))?;
+        let (_, sym) =
+            resolve_or_error(file, &input.name, input.kind.as_deref(), input.symbol_line)?;
+        let body = &file.content[sym.byte_range.0 as usize..sym.byte_range.1 as usize];
+        let name_offset = body
+            .windows(input.name.len())
+            .position(|w| w == input.name.as_bytes())
+            .ok_or_else(|| {
+                format!(
+                    "Could not locate name `{}` within symbol body at {}:{}-{}",
+                    input.name, input.path, sym.byte_range.0, sym.byte_range.1
+                )
+            })?;
+        let abs_start = sym.byte_range.0 + name_offset as u32;
+        let abs_end = abs_start + input.name.len() as u32;
+        ((abs_start, abs_end), file.language.clone())
+    };
+
+    // Phase 2: Find all references across the project.
+    let ref_sites: Vec<(String, (u32, u32))> = {
+        let guard = index.read().expect("lock poisoned");
+        let refs = guard.find_references_for_name(&input.name, None, false);
+        refs.into_iter()
+            .map(|(path, rr)| (path.to_string(), rr.byte_range))
+            .collect()
+    };
+
+    // Phase 3: Group all rename sites by file.
+    let mut by_file: std::collections::HashMap<String, Vec<(u32, u32)>> =
+        std::collections::HashMap::new();
+    by_file
+        .entry(input.path.clone())
+        .or_default()
+        .push(def_name_range);
+    for (path, range) in &ref_sites {
+        by_file.entry(path.clone()).or_default().push(*range);
+    }
+    // Sort reverse by offset, dedup.
+    for ranges in by_file.values_mut() {
+        ranges.sort_by(|a, b| b.0.cmp(&a.0));
+        ranges.dedup();
+    }
+
+    // Phase 4: Apply renames, write, reindex.
+    let new_name_bytes = input.new_name.as_bytes();
+    let mut files_updated = 0;
+    let mut refs_updated = 0;
+
+    for (path, ranges) in &by_file {
+        let file = {
+            let guard = index.read().expect("lock poisoned");
+            guard
+                .capture_shared_file(path)
+                .ok_or_else(|| format!("File disappeared: {path}"))?
+        };
+
+        let mut content = file.content.clone();
+        for range in ranges {
+            content = apply_splice(&content, *range, new_name_bytes);
+            refs_updated += 1;
+        }
+
+        let abs_path = repo_root.join(path);
+        atomic_write_file(&abs_path, &content)
+            .map_err(|e| format!("Write failed for {path}: {e}"))?;
+
+        let lang = if path == &input.path {
+            language.clone()
+        } else {
+            file.language.clone()
+        };
+        reindex_after_write(index, path, content, lang);
+        files_updated += 1;
+    }
+
+    Ok(format!(
+        "Renamed `{}` → `{}` — {refs_updated} site(s) across {files_updated} file(s)",
+        input.name, input.new_name,
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Batch insert
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+pub struct BatchInsertInput {
+    /// Code to insert at each target location.
+    pub content: String,
+    /// Where to insert: before or after.
+    pub position: InsertPosition,
+    /// Target symbols to insert adjacent to.
+    pub targets: Vec<InsertTarget>,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InsertPosition {
+    Before,
+    After,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+pub struct InsertTarget {
+    /// Relative file path.
+    pub path: String,
+    /// Symbol name.
+    pub name: String,
+    /// Optional kind filter.
+    pub kind: Option<String>,
+    /// Line number to disambiguate.
+    #[serde(default, deserialize_with = "super::tools::lenient_u32")]
+    pub symbol_line: Option<u32>,
+}
+
+/// Insert the same code before or after multiple symbols across the project.
+pub(crate) fn execute_batch_insert(
+    index: &SharedIndex,
+    repo_root: &Path,
+    input: &BatchInsertInput,
+) -> Result<Vec<String>, String> {
+    let mut summaries = Vec::new();
+    let position_label = match input.position {
+        InsertPosition::Before => "before",
+        InsertPosition::After => "after",
+    };
+
+    for target in &input.targets {
+        let file = {
+            let guard = index.read().expect("lock poisoned");
+            guard
+                .capture_shared_file(&target.path)
+                .ok_or_else(|| format!("File not indexed: {}", target.path))?
+        };
+
+        let (_, sym) = resolve_or_error(
+            &file,
+            &target.name,
+            target.kind.as_deref(),
+            target.symbol_line,
+        )
+        .map_err(|e| format!("Target {}: {e}", target.path))?;
+
+        let new_content = match input.position {
+            InsertPosition::Before => build_insert_before(&file.content, &sym, &input.content),
+            InsertPosition::After => build_insert_after(&file.content, &sym, &input.content),
+        };
+
+        let abs_path = repo_root.join(&target.path);
+        atomic_write_file(&abs_path, &new_content)
+            .map_err(|e| format!("Write failed for {}: {e}", target.path))?;
+
+        let lang = file.language.clone();
+        reindex_after_write(index, &target.path, new_content, lang);
+        summaries.push(super::edit_format::format_insert(
+            &target.path,
+            &target.name,
+            position_label,
+            input.content.len(),
+        ));
+    }
+
+    Ok(summaries)
+}
+
+// ---------------------------------------------------------------------------
+// Stale reference detection
+// ---------------------------------------------------------------------------
+
+/// Extract the first line of a symbol as a rough "signature" for change detection.
+pub(crate) fn extract_signature(content: &[u8], byte_range: (u32, u32)) -> String {
+    let start = byte_range.0 as usize;
+    let end = byte_range.1 as usize;
+    let slice = &content[start..end];
+    let first_line_end = slice
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(slice.len());
+    String::from_utf8_lossy(&slice[..first_line_end]).to_string()
+}
+
+/// Detect references that may be stale after a symbol edit.
+/// Compares old vs new signature (first line). Returns (path, line, enclosing_name) triples.
+pub(crate) fn detect_stale_references(
+    index: &SharedIndex,
+    path: &str,
+    name: &str,
+    old_signature: &str,
+    new_signature: &str,
+) -> Vec<(String, u32, Option<String>)> {
+    if old_signature == new_signature {
+        return Vec::new();
+    }
+    let guard = index.read().expect("lock poisoned");
+    let refs = guard.find_references_for_name(name, None, false);
+    refs.into_iter()
+        .filter(|(ref_path, _)| *ref_path != path)
+        .map(|(ref_path, rr)| {
+            let enclosing = rr.enclosing_symbol_index.and_then(|idx| {
+                guard
+                    .get_file(ref_path)
+                    .and_then(|f| f.symbols.get(idx as usize))
+                    .map(|s| s.name.clone())
+            });
+            (ref_path.to_string(), rr.line_range.0 + 1, enclosing)
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -500,5 +1045,214 @@ mod tests {
             text.contains("fn existing() {}\n\n    fn new_fn() {}"),
             "got: {text}"
         );
+    }
+
+    // -- build_delete --
+
+    #[test]
+    fn test_build_delete_removes_symbol_and_trailing_newline() {
+        let content = b"fn keep() {}\n\nfn remove() {}\n\nfn also_keep() {}\n";
+        let sym = make_test_symbol("remove", SymbolKind::Function, (14, 28), 3);
+        let result = build_delete(content, &sym);
+        let text = std::str::from_utf8(&result).unwrap();
+        assert!(!text.contains("remove"), "got: {text}");
+        assert!(text.contains("keep"), "got: {text}");
+        assert!(text.contains("also_keep"), "got: {text}");
+    }
+
+    #[test]
+    fn test_build_delete_collapses_excessive_blank_lines() {
+        // Simulate what happens after deleting 3 adjacent symbols: triple blank lines.
+        let content = b"fn a() {}\n\n\n\nfn d() {}\n";
+        // "a" occupies bytes 0..9, pretend we already removed the middle ones.
+        // Just verify collapse_blank_lines works on this content.
+        let collapsed = super::collapse_blank_lines(content);
+        let text = std::str::from_utf8(&collapsed).unwrap();
+        // Should have at most one blank line (two consecutive \n).
+        assert!(
+            !text.contains("\n\n\n"),
+            "should collapse 3+ newlines: {text:?}"
+        );
+        assert!(text.contains("fn a() {}\n\nfn d()"), "got: {text:?}");
+    }
+
+    // -- build_edit_within --
+
+    #[test]
+    fn test_build_edit_within_replaces_first_match() {
+        let content = b"fn foo() { old; old; }";
+        let sym = make_test_symbol("foo", SymbolKind::Function, (0, 22), 1);
+        let (result, count) = build_edit_within(content, &sym, "old", "new", false).unwrap();
+        let text = std::str::from_utf8(&result).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(text, "fn foo() { new; old; }");
+    }
+
+    #[test]
+    fn test_build_edit_within_replaces_all() {
+        let content = b"fn foo() { old; old; }";
+        let sym = make_test_symbol("foo", SymbolKind::Function, (0, 22), 1);
+        let (result, count) = build_edit_within(content, &sym, "old", "new", true).unwrap();
+        let text = std::str::from_utf8(&result).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(text, "fn foo() { new; new; }");
+    }
+
+    #[test]
+    fn test_build_edit_within_not_found() {
+        let content = b"fn foo() { body; }";
+        let sym = make_test_symbol("foo", SymbolKind::Function, (0, 18), 1);
+        let result = build_edit_within(content, &sym, "missing", "new", false);
+        assert!(result.is_err());
+    }
+
+    // -- execute_batch_edit --
+
+    #[test]
+    fn test_execute_batch_edit_applies_multiple_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.rs"), b"fn alpha() { old }\n").unwrap();
+        std::fs::write(src.join("b.rs"), b"fn beta() { keep }\n").unwrap();
+
+        let handle = crate::live_index::LiveIndex::empty();
+        for (path, content) in [
+            ("src/a.rs", b"fn alpha() { old }\n" as &[u8]),
+            ("src/b.rs", b"fn beta() { keep }\n"),
+        ] {
+            let result = crate::parsing::process_file(path, content, LanguageId::Rust);
+            let indexed = IndexedFile::from_parse_result(result, content.to_vec());
+            handle.update_file(path.to_string(), indexed);
+        }
+
+        let edits = vec![
+            SingleEdit {
+                path: "src/a.rs".to_string(),
+                name: "alpha".to_string(),
+                kind: None,
+                symbol_line: None,
+                operation: EditOperation::Replace {
+                    new_body: "fn alpha() { new }".to_string(),
+                },
+            },
+            SingleEdit {
+                path: "src/b.rs".to_string(),
+                name: "beta".to_string(),
+                kind: None,
+                symbol_line: None,
+                operation: EditOperation::Delete,
+            },
+        ];
+
+        let summaries = execute_batch_edit(&handle, dir.path(), &edits).unwrap();
+        assert_eq!(summaries.len(), 2);
+
+        let a_content = std::fs::read_to_string(src.join("a.rs")).unwrap();
+        assert!(a_content.contains("new"), "a.rs: {a_content}");
+
+        let b_content = std::fs::read_to_string(src.join("b.rs")).unwrap();
+        assert!(!b_content.contains("beta"), "b.rs: {b_content}");
+    }
+
+    #[test]
+    fn test_execute_batch_edit_rejects_overlapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.rs"), b"fn foo() {}\nfn bar() {}\n").unwrap();
+
+        let handle = crate::live_index::LiveIndex::empty();
+        let content = b"fn foo() {}\nfn bar() {}\n" as &[u8];
+        let result = crate::parsing::process_file("src/a.rs", content, LanguageId::Rust);
+        let indexed = IndexedFile::from_parse_result(result, content.to_vec());
+        handle.update_file("src/a.rs".to_string(), indexed);
+
+        // Create two edits that target overlapping fake ranges won't work easily,
+        // but we can test with two edits on the same symbol (same range = overlapping).
+        let edits = vec![
+            SingleEdit {
+                path: "src/a.rs".to_string(),
+                name: "foo".to_string(),
+                kind: None,
+                symbol_line: None,
+                operation: EditOperation::Delete,
+            },
+            SingleEdit {
+                path: "src/a.rs".to_string(),
+                name: "foo".to_string(),
+                kind: None,
+                symbol_line: None,
+                operation: EditOperation::Delete,
+            },
+        ];
+
+        let result = execute_batch_edit(&handle, dir.path(), &edits);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Overlapping"));
+    }
+
+    // -- execute_batch_insert --
+
+    #[test]
+    fn test_execute_batch_insert_adds_to_multiple_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.rs"), b"fn handler_a() {}\n").unwrap();
+        std::fs::write(src.join("b.rs"), b"fn handler_b() {}\n").unwrap();
+
+        let handle = crate::live_index::LiveIndex::empty();
+        for (path, content) in [
+            ("src/a.rs", b"fn handler_a() {}\n" as &[u8]),
+            ("src/b.rs", b"fn handler_b() {}\n"),
+        ] {
+            let result = crate::parsing::process_file(path, content, LanguageId::Rust);
+            let indexed = IndexedFile::from_parse_result(result, content.to_vec());
+            handle.update_file(path.to_string(), indexed);
+        }
+
+        let input = BatchInsertInput {
+            content: "fn logging() { log::info!(\"called\"); }".to_string(),
+            position: InsertPosition::After,
+            targets: vec![
+                InsertTarget {
+                    path: "src/a.rs".to_string(),
+                    name: "handler_a".to_string(),
+                    kind: None,
+                    symbol_line: None,
+                },
+                InsertTarget {
+                    path: "src/b.rs".to_string(),
+                    name: "handler_b".to_string(),
+                    kind: None,
+                    symbol_line: None,
+                },
+            ],
+        };
+
+        let summaries = execute_batch_insert(&handle, dir.path(), &input).unwrap();
+        assert_eq!(summaries.len(), 2);
+
+        let a = std::fs::read_to_string(src.join("a.rs")).unwrap();
+        assert!(a.contains("logging"), "a.rs: {a}");
+        let b = std::fs::read_to_string(src.join("b.rs")).unwrap();
+        assert!(b.contains("logging"), "b.rs: {b}");
+    }
+
+    // -- extract_signature --
+
+    #[test]
+    fn test_extract_signature_returns_first_line() {
+        let content = b"fn foo(x: i32) {\n    body();\n}";
+        let sig = extract_signature(content, (0, 30));
+        assert_eq!(sig, "fn foo(x: i32) {");
+    }
+
+    #[test]
+    fn test_extract_signature_single_line() {
+        let content = b"fn foo() {}";
+        let sig = extract_signature(content, (0, 11));
+        assert_eq!(sig, "fn foo() {}");
     }
 }
