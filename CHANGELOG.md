@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.14.2...v0.15.0) (2026-03-13)
+
+
+### Features
+
+* add token savings — verbosity param, sections filter, compact modes ([0184917](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/018491738218681c5d6c85c6fee267ca321a8aaa))
+
 ## [0.14.2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.14.1...v0.14.2) (2026-03-13)
 
 
