@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.20.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.19.0...v0.20.0) (2026-03-13)
+
+
+### Features
+
+* add git2 library wrapper for in-process git operations ([dc5e146](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/dc5e146cccc1a8f78af7916104cf9ae87c2ab375))
+* replace git CLI with git2 library in tools and diff_symbols ([db3824a](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/db3824aff0197cdc7408a82d71add37e6ae2b2e2))
+* replace git log CLI with git2 library in temporal analysis ([f6877eb](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/f6877ebc81e3d8f6a6ebc6001cdbecc29979292c))
+
 ## [0.19.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.18.0...v0.19.0) (2026-03-13)
 
 
