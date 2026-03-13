@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.13.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.12.0...v0.13.0) (2026-03-13)
+
+
+### Features
+
+* add get_co_changes, diff_symbols tools + UX improvements ([c00c2f8](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/c00c2f84395a6a7f680cbc0d32838356ce106dfc))
+
+
+### Bug Fixes
+
+* lenient parameter deserialization for MCP clients that stringify values ([5d613d4](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/5d613d4b9e06e296b3f3ce9bbd4d133a0a94b726))
+
 ## [0.12.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.11.4...v0.12.0) (2026-03-13)
 
 
