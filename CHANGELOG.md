@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.16.1...v0.16.2) (2026-03-13)
+
+
+### Bug Fixes
+
+* auto-indent replace_symbol_body + update edit tool descriptions ([a113c7b](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/a113c7b5444656cb3935a22defdede73ba538c2f))
+
 ## [0.16.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.16.0...v0.16.1) (2026-03-13)
 
 
