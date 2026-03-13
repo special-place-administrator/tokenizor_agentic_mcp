@@ -112,6 +112,18 @@ impl TokenizorServer {
         *self.repo_root.write().expect("lock poisoned") = repo_root;
     }
 
+    /// Record token savings from an MCP tool response so the health counter accumulates.
+    pub(crate) fn record_read_savings(&self, saved_tokens: u64) {
+        if let Some(ref stats) = self.token_stats {
+            stats
+                .read_saved_tokens
+                .fetch_add(saved_tokens, std::sync::atomic::Ordering::Relaxed);
+            stats
+                .read_fires
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     /// Forward a tool call to the daemon. Returns:
     /// - `Some(result)` on success
     /// - `None` on connection failure (after one reconnect attempt), signalling

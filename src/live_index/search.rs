@@ -743,6 +743,29 @@ pub fn search_text_with_options(
         format!("terms [{}]", normalized_terms.join(", "))
     };
 
+    // When multiple OR terms are provided, scale up the total_limit so each term
+    // gets a fair share of results.  Without this, high-frequency terms dominate
+    // the ranked file list and exhaust the limit before rarer terms appear.
+    let effective_options;
+    let opts = if normalized_terms.len() > 1 {
+        effective_options = TextSearchOptions {
+            total_limit: options.total_limit * normalized_terms.len(),
+            max_per_file: options.max_per_file,
+            case_sensitive: options.case_sensitive,
+            whole_word: options.whole_word,
+            path_scope: options.path_scope.clone(),
+            language_filter: options.language_filter.clone(),
+            glob: options.glob.clone(),
+            exclude_glob: options.exclude_glob.clone(),
+            search_scope: options.search_scope,
+            noise_policy: options.noise_policy,
+            context: options.context,
+        };
+        &effective_options
+    } else {
+        options
+    };
+
     Ok(collect_text_matches(
         index,
         candidate_paths.into_iter().collect(),
@@ -763,7 +786,7 @@ pub fn search_text_with_options(
             }
         },
         label,
-        options,
+        opts,
     ))
 }
 

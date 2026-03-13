@@ -140,7 +140,9 @@ pub(crate) fn build_insert_before(
     let indent = detect_indentation(file_content, sym.byte_range.0);
     let indented = apply_indentation(new_code, &indent);
     let mut insertion = indented;
-    insertion.extend_from_slice(b"\n\n");
+    // Single newline: the content is placed immediately before the symbol's line.
+    // Using \n\n would create an unwanted blank line between e.g. a doc comment and the symbol.
+    insertion.extend_from_slice(b"\n");
     apply_splice(file_content, (line_start, line_start), &insertion)
 }
 
@@ -1128,7 +1130,7 @@ mod tests {
         let result = build_insert_before(content, &sym, "fn new_fn() {}");
         let text = std::str::from_utf8(&result).unwrap();
         assert!(
-            text.starts_with("    fn new_fn() {}\n\n    fn existing"),
+            text.starts_with("    fn new_fn() {}\n    fn existing"),
             "got: {text}"
         );
     }

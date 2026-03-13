@@ -462,7 +462,7 @@ pub struct GetSymbolContextInput {
     pub name: String,
     /// Optional file filter (ignored when bundle=true; use path instead).
     pub file: Option<String>,
-    /// Optional exact-selector path from `search_symbols`. Required when bundle=true.
+    /// File path from `search_symbols`. Required when bundle=true or sections is provided.
     pub path: Option<String>,
     /// Optional selected symbol kind such as `fn`, `class`, or `struct`.
     pub symbol_kind: Option<String>,
@@ -1233,7 +1233,9 @@ impl TokenizorServer {
         };
         match outline_tool_text(&state, &outline) {
             Ok(result) => {
+                let saved = raw_chars.saturating_sub(result.len());
                 let footer = format::compact_savings_footer(result.len(), raw_chars);
+                self.record_read_savings((saved / 4) as u64);
                 format!("{result}{footer}")
             }
             Err(StatusCode::NOT_FOUND) => format::not_found_file(&params.0.path),
@@ -1295,7 +1297,9 @@ impl TokenizorServer {
             };
             let verbosity = params.0.verbosity.as_deref().unwrap_or("full");
             let result = format::context_bundle_result_view(&view, verbosity);
+            let saved = raw_chars.saturating_sub(result.len());
             let footer = format::compact_savings_footer(result.len(), raw_chars);
+            self.record_read_savings((saved / 4) as u64);
             return format!("{result}{footer}");
         }
 
@@ -1385,7 +1389,9 @@ impl TokenizorServer {
                     output.push_str("\n\n");
                 }
                 output.push_str(&refs_text);
+                let saved = raw_chars.saturating_sub(output.len());
                 let footer = format::compact_savings_footer(output.len(), raw_chars);
+                self.record_read_savings((saved / 4) as u64);
                 format!("{output}{footer}")
             }
             Err(StatusCode::INTERNAL_SERVER_ERROR) => {
@@ -2115,11 +2121,13 @@ impl TokenizorServer {
             }
         }
 
-        // Depth 3: also gather implementations for top symbols
-        let mut symbol_impls: Vec<(String, Vec<String>)> = Vec::new(); // (name, impl_descriptions)
+        // Depth 3: gather implementations AND type dependencies for top symbols
+        let mut symbol_impls: Vec<(String, Vec<String>)> = Vec::new();
+        let mut symbol_deps: Vec<(String, Vec<String>)> = Vec::new();
         if depth >= 3 {
             let impl_limit = 3.min(enriched_symbols.len());
-            for (name, _kind, _path, _, _) in &enriched_symbols[..impl_limit] {
+            for (name, _kind, path, _, _) in &enriched_symbols[..impl_limit] {
+                // Implementations (trait → implementors)
                 let impl_view = guard.capture_find_implementations_view(name, None);
                 let impl_names: Vec<String> = impl_view
                     .entries
@@ -2135,6 +2143,20 @@ impl TokenizorServer {
                 if !impl_names.is_empty() {
                     symbol_impls.push((name.clone(), impl_names));
                 }
+
+                // Type dependencies (what types does this symbol reference?)
+                let bundle = guard.capture_context_bundle_view(path, name, None, None);
+                if let crate::live_index::query::ContextBundleView::Found(found) = bundle {
+                    let dep_names: Vec<String> = found
+                        .dependencies
+                        .iter()
+                        .take(8)
+                        .map(|d| format!("{} {} ({})", d.kind_label, d.name, d.file_path))
+                        .collect();
+                    if !dep_names.is_empty() {
+                        symbol_deps.push((name.clone(), dep_names));
+                    }
+                }
             }
         }
 
@@ -2145,6 +2167,7 @@ impl TokenizorServer {
             &related_files,
             &enriched_symbols,
             &symbol_impls,
+            &symbol_deps,
             depth,
         )
     }

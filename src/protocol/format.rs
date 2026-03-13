@@ -1092,6 +1092,17 @@ fn render_file_content_bytes(
 ) -> String {
     let content = String::from_utf8_lossy(content);
     let lines: Vec<&str> = content.lines().collect();
+    let line_count = lines.len() as u32;
+
+    // Validate explicit line range against file length.
+    if let Some(start) = context.start_line {
+        if start > line_count {
+            return format!(
+                "{path} [error: requested range (lines {start}-{}) exceeds file length ({line_count} lines)]",
+                context.end_line.unwrap_or(start),
+            );
+        }
+    }
 
     if let Some(around_line) = context.around_line {
         return render_numbered_around_line_excerpt(
@@ -4489,6 +4500,7 @@ pub fn explore_result_view(
     related_files: &[(String, usize)],        // (path, count)
     enriched_symbols: &[(String, String, String, Option<String>, Vec<String>)],
     symbol_impls: &[(String, Vec<String>)],
+    symbol_deps: &[(String, Vec<String>)],
     depth: u32,
 ) -> String {
     let mut lines = vec![format!("── Exploring: {label} ──")];
@@ -4525,13 +4537,24 @@ pub fn explore_result_view(
         lines.push(String::new());
     }
 
-    // Depth 3: implementations
+    // Depth 3: implementations + type dependencies
     if depth >= 3 && !symbol_impls.is_empty() {
         lines.push("Implementations:".to_string());
         for (name, impls) in symbol_impls {
             lines.push(format!("  {name}:"));
             for imp in impls {
                 lines.push(format!("    -> {imp}"));
+            }
+        }
+        lines.push(String::new());
+    }
+
+    if depth >= 3 && !symbol_deps.is_empty() {
+        lines.push("Type dependencies:".to_string());
+        for (name, deps) in symbol_deps {
+            lines.push(format!("  {name}:"));
+            for dep in deps {
+                lines.push(format!("    -> {dep}"));
             }
         }
         lines.push(String::new());
