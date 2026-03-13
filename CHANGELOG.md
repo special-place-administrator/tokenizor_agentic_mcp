@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.4](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.13.3...v0.13.4) (2026-03-13)
+
+
+### Bug Fixes
+
+* re-trigger workflow after auto-merge for full automation ([2e73e1d](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/2e73e1dbcf110625c08cbd258a9b852590956b2f))
+
 ## [0.13.3](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.13.2...v0.13.3) (2026-03-13)
 
 
