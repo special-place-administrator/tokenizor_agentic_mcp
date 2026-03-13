@@ -884,11 +884,16 @@ pub fn file_content_from_indexed_file_with_context(
     context: search::ContentContext,
 ) -> String {
     if let Some(chunk_index) = context.chunk_index {
-        return render_numbered_chunk_excerpt(
-            file,
-            chunk_index,
-            context.max_lines.expect("chunked reads require max_lines"),
-        );
+        let max_lines = match context.max_lines {
+            Some(ml) => ml,
+            None => {
+                return format!(
+                    "{} [error: chunked read requires max_lines parameter]",
+                    file.relative_path
+                );
+            }
+        };
+        return render_numbered_chunk_excerpt(file, chunk_index, max_lines);
     }
 
     if let Some(around_symbol) = context.around_symbol.as_deref() {

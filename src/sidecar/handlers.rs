@@ -507,13 +507,17 @@ async fn handle_edit_impact(
 
     // Read file from disk and re-index.
     let abs_path = resolve_repo_root(&state)?.join(path);
-    let bytes = std::fs::read(&abs_path).unwrap_or_default();
-    let file_bytes_new = bytes.len() as u64;
-    let file_bytes = if file_bytes_new > 0 {
-        file_bytes_new
-    } else {
-        file_bytes_pre
+    let bytes = match std::fs::read(&abs_path) {
+        Ok(b) => b,
+        Err(_) => {
+            // File unreadable (locked, deleted, wrong path). Return the pre-edit
+            // snapshot as "no change" instead of overwriting the index with an
+            // empty parse — that would destroy all symbols for this file.
+            let text = format!("── Impact: {} ──\nFile not readable on disk; index preserved.", path);
+            return Ok(text);
+        }
     };
+    let file_bytes = (bytes.len() as u64).max(file_bytes_pre);
 
     let result = crate::parsing::process_file(path, &bytes, language);
     let post_symbols: Vec<SymbolSnapshot> = result
@@ -1730,16 +1734,51 @@ mod tests {
         };
 
         // The handler will try to read src/db.rs from disk (cwd). Since the file
-        // doesn't exist on disk in this test, it will use empty bytes — that's OK,
-        // the important thing is it returns a string response, not an error.
+        // doesn't exist on disk in this test, the handler should return Ok with a
+        // "not readable" message and preserve the index instead of destroying it.
         let result = impact_handler(State(state), Query(params)).await;
-        // Should return Ok with some text
         assert!(
             result.is_ok(),
             "impact_handler should return Ok even if file missing from disk"
         );
         let text = result.unwrap();
-        assert!(text.contains("tokens saved"), "should have footer");
+        assert!(
+            text.contains("not readable") || text.contains("index preserved"),
+            "should indicate file was unreadable and index preserved; got: {text}"
+        );
+    }
+
+    /// Proves that analyze_file_impact preserves the index when the file
+    /// cannot be read from disk (the critical regression fix).
+    #[tokio::test]
+    async fn test_impact_handler_edit_preserves_index_when_file_unreadable() {
+        let file = make_indexed_file(
+            "src/db.rs",
+            vec![make_symbol("connect", SymbolKind::Function, 1, 10)],
+            vec![],
+            ParseStatus::Parsed,
+        );
+        let state = make_state(vec![("src/db.rs", file)]);
+
+        let params = ImpactParams {
+            path: "src/db.rs".to_string(),
+            new_file: None,
+        };
+
+        // File doesn't exist on disk — impact should preserve existing index.
+        let result = impact_handler(State(state.clone()), Query(params)).await;
+        assert!(result.is_ok(), "should return Ok, got: {result:?}");
+
+        // Verify the index still has the original symbol.
+        let guard = state.index.read().unwrap();
+        let indexed = guard.get_file("src/db.rs").expect("file must still be in index");
+        assert_eq!(
+            indexed.symbols.len(),
+            1,
+            "index must retain original symbols; got {} symbols",
+            indexed.symbols.len()
+        );
+        assert_eq!(indexed.symbols[0].name, "connect");
     }
 
     // -----------------------------------------------------------------------
