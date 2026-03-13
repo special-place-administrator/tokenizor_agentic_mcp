@@ -51,10 +51,14 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh pr list --label "autorelease: pending" --json number --jq '.[0].number' | while read PR; do
-            echo "Auto-merging release PR #$PR"
-            gh pr merge "$PR" --merge
-          done
+          sleep 5
+          PR=$(gh pr list --label "autorelease: pending" --json number --jq '.[0].number // empty')
+          if [[ -z "$PR" ]]; then
+            echo "No pending release PR found — skipping auto-merge"
+            exit 0
+          fi
+          echo "Auto-merging release PR #$PR"
+          gh pr merge "$PR" --merge --delete-branch
 
       - id: context
         shell: bash
