@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.20.2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.20.1...v0.20.2) (2026-03-13)
+
+
+### Bug Fixes
+
+* address review findings — diff_symbols filter, search prefix matching, impact messaging, chunk line numbers ([44298df](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/44298df66c3b742f2736fcd33151884b2118cbe6))
+* find_dependents follows pub use re-export chains for Rust modules ([a48aee2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/a48aee2b7180dc0b669f72b8b94f4e36b0284e0a))
+* type-aware reference filtering reduces false positive warnings in replace_symbol_body ([b24dd0c](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/b24dd0cdcb5dbed44edb077959c48972563b8845))
+
 ## [0.20.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.20.0...v0.20.1) (2026-03-13)
 
 
