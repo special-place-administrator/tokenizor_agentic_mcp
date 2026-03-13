@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.18.0...v0.19.0) (2026-03-13)
+
+
+### Features
+
+* update README for 24 tools, add CLAUDE.md, rename prompts to tokenizor-* prefix ([949738f](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/949738f88ce47fa3ede4a5e919127787678017bb))
+
 ## [0.18.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.17.1...v0.18.0) (2026-03-13)
 
 
