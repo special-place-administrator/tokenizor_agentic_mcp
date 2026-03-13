@@ -494,6 +494,8 @@ pub struct TextSearchResult {
     pub label: String,
     pub total_matches: usize,
     pub files: Vec<TextFileMatches>,
+    /// Matches that were found but suppressed by noise policy (e.g., inside test modules).
+    pub suppressed_by_noise: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -863,6 +865,7 @@ where
 {
     // First pass: count matches per file for relevance ranking.
     let mut path_counts: Vec<(String, usize)> = Vec::new();
+    let mut suppressed_by_noise: usize = 0;
     for path in &candidate_paths {
         let file = match index.get_file(path) {
             Some(file) => file,
@@ -882,27 +885,27 @@ where
                 Vec::new()
             };
 
-        let count = content_str
-            .lines()
-            .enumerate()
-            .filter(|(line_idx, line)| {
-                let line = line.trim_end_matches('\r');
-                if !is_match(line) {
-                    return false;
+        let mut count = 0usize;
+        let mut suppressed = 0usize;
+        for (line_idx, line) in content_str.lines().enumerate() {
+            let line = line.trim_end_matches('\r');
+            if !is_match(line) {
+                continue;
+            }
+            // Skip matches inside Rust #[cfg(test)] modules.
+            if !test_ranges.is_empty() {
+                let line_num = (line_idx + 1) as u32;
+                if test_ranges
+                    .iter()
+                    .any(|&(start, end)| line_num >= start && line_num <= end)
+                {
+                    suppressed += 1;
+                    continue;
                 }
-                // Skip matches inside Rust #[cfg(test)] modules.
-                if !test_ranges.is_empty() {
-                    let line_num = (*line_idx + 1) as u32;
-                    if test_ranges
-                        .iter()
-                        .any(|&(start, end)| line_num >= start && line_num <= end)
-                    {
-                        return false;
-                    }
-                }
-                true
-            })
-            .count();
+            }
+            count += 1;
+        }
+        suppressed_by_noise += suppressed;
         if count > 0 {
             path_counts.push((path.clone(), count));
         }
@@ -998,6 +1001,7 @@ where
         label,
         total_matches,
         files,
+        suppressed_by_noise,
     }
 }
 

@@ -321,6 +321,12 @@ pub fn search_text_result_view(
     };
 
     if result.files.is_empty() {
+        if result.suppressed_by_noise > 0 {
+            return format!(
+                "No matches for {} in source code. {} match(es) found in test modules — set include_tests=true to include them.",
+                result.label, result.suppressed_by_noise
+            );
+        }
         return format!("No matches for {}", result.label);
     }
 
