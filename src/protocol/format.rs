@@ -316,8 +316,21 @@ pub fn search_text_result_view(
                 }
             }
         } else {
+            let mut last_symbol: Option<String> = None;
             for line_match in &file.matches {
-                lines.push(format!("  {}: {}", line_match.line_number, line_match.line));
+                if let Some(ref enc) = line_match.enclosing_symbol {
+                    if last_symbol.as_deref() != Some(enc.name.as_str()) {
+                        lines.push(format!(
+                            "  in {} {} (lines {}-{}):",
+                            enc.kind, enc.name, enc.line_range.0 + 1, enc.line_range.1 + 1
+                        ));
+                        last_symbol = Some(enc.name.clone());
+                    }
+                    lines.push(format!("    > {}: {}", line_match.line_number, line_match.line));
+                } else {
+                    last_symbol = None;
+                    lines.push(format!("  {}: {}", line_match.line_number, line_match.line));
+                }
             }
         }
     }

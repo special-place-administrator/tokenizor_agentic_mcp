@@ -4062,6 +4062,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_search_text_shows_enclosing_symbol() {
+        let sym = make_symbol("handle_request", SymbolKind::Function, 0, 2);
+        let content = b"fn handle_request() {\n    let db = connect();\n}\n";
+        let (key, file) = make_file("src/handler.rs", content, vec![sym]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server.search_text(Parameters(super::SearchTextInput {
+            query: Some("connect".to_string()),
+            terms: None, regex: None, path_prefix: None, language: None,
+            limit: None, max_per_file: None, include_generated: None,
+            include_tests: None, glob: None, exclude_glob: None,
+            context: None, case_sensitive: None, whole_word: None,
+        })).await;
+        assert!(result.contains("handle_request"),
+            "should show enclosing symbol name, got: {result}");
+        assert!(result.contains("in fn handle_request"),
+            "should show kind and name, got: {result}");
+    }
+
+    #[tokio::test]
     async fn test_inspect_match_line_zero_is_out_of_bounds() {
         let sym = make_symbol("foo", SymbolKind::Function, 0, 0);
         let (key, file) = make_file("src/lib.rs", b"fn foo() {}\n", vec![sym]);
