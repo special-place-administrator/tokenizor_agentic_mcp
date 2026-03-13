@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.14.0...v0.14.1) (2026-03-13)
+
+
+### Bug Fixes
+
+* retry PR label lookup with 60s timeout for auto-merge ([1ee07e6](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/1ee07e61c5bae54a6bdeac8949bcd4d7b9d07b0c))
+
 ## [0.14.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.13.4...v0.14.0) (2026-03-13)
 
 
