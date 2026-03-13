@@ -566,6 +566,10 @@ pub struct DiffSymbolsInput {
     pub path_prefix: Option<String>,
     /// Optional canonical language name such as `Rust`, `TypeScript`, `C#`, or `C++`.
     pub language: Option<String>,
+    /// When true, exclude non-source files (docs, configs, images, lock files).
+    /// Only files with a recognized programming language extension are included.
+    #[serde(default, deserialize_with = "lenient_bool")]
+    pub code_only: Option<bool>,
 }
 
 enum WhatChangedMode {
@@ -903,13 +907,6 @@ fn file_content_options_from_input(
         {
             return Err(
                 "Invalid get_file_content request: chunked reads (`chunk_index` + `max_lines`) cannot be combined with `start_line`, `end_line`, `around_line`, or `around_match`."
-                    .to_string(),
-            );
-        }
-
-        if ordinary_read_formatting_requested {
-            return Err(
-                "Invalid get_file_content request: `show_line_numbers` and `header` are only supported for full-file reads or explicit-range reads (`start_line`/`end_line`)."
                     .to_string(),
             );
         }
@@ -2153,10 +2150,11 @@ impl TokenizorServer {
     }
 
     /// Symbol-level diff between two git refs. Shows +added, -removed, ~modified symbols per changed
-    /// file. Use for code review to see which functions/classes changed.
+    /// file. Filter with path_prefix and/or language. Set code_only=true to exclude non-source files.
+    /// Use for code review to see which functions/classes changed.
     /// NOT for file-level change lists (use what_changed).
     #[tool(
-        description = "Symbol-level diff between two git refs. Shows +added, -removed, ~modified symbols per changed file. Use for code review to see which functions/classes changed. NOT for file-level change lists (use what_changed)."
+        description = "Symbol-level diff between two git refs. Shows +added, -removed, ~modified symbols per changed file. Filter with path_prefix and/or language. Set code_only=true to exclude non-source files. Use for code review to see which functions/classes changed. NOT for file-level change lists (use what_changed)."
     )]
     pub(crate) async fn diff_symbols(&self, params: Parameters<DiffSymbolsInput>) -> String {
         if let Some(result) = self.proxy_tool_call("diff_symbols", &params.0).await {
@@ -2192,6 +2190,7 @@ impl TokenizorServer {
             Ok(f) => f,
             Err(e) => return e,
         };
+        let code_only = params.0.code_only.unwrap_or(false);
         let changed_files: Vec<&str> = changed_files_owned
             .iter()
             .map(|s| s.as_str())
@@ -2205,6 +2204,12 @@ impl TokenizorServer {
                     let ext = p.rsplit('.').next().unwrap_or("");
                     if crate::domain::index::LanguageId::from_extension(ext).as_ref() != Some(lang)
                     {
+                        return false;
+                    }
+                }
+                if code_only && lang_filter.is_none() {
+                    let ext = p.rsplit('.').next().unwrap_or("");
+                    if crate::domain::index::LanguageId::from_extension(ext).is_none() {
                         return false;
                     }
                 }

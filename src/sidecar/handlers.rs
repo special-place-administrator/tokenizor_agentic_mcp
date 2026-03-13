@@ -604,6 +604,7 @@ async fn handle_edit_impact(
 
     if added.is_empty() && changed.is_empty() && removed.is_empty() {
         lines.push("No symbol changes detected.".to_string());
+        lines.push("Index already matches file on disk. If you just edited with Tokenizor's edit tools, the index was updated automatically — analyze_file_impact is for verifying external edits.".to_string());
     } else {
         for sym in &added {
             lines.push(format!("  [Added]   {} {}", sym.kind, sym.name));

@@ -1138,15 +1138,48 @@ impl LiveIndex {
         });
         basename_only_hits.dedup();
 
-        let strong_or_basename_set: HashSet<&str> = strong_hits
+        // Prefix matches on basenames (e.g., "orchestrat" matches "orchestrator.rs" and "orchestration.rs")
+        let basename_set: HashSet<&str> = strong_hits
             .iter()
             .chain(basename_only_hits.iter())
+            .map(String::as_str)
+            .collect();
+        let mut prefix_hits: Vec<String> = if basename_token.len() >= 3 {
+            self.all_files()
+                .map(|(path, _)| path.as_str())
+                .filter(|path| {
+                    let file_basename = std::path::Path::new(path)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+                    file_basename
+                        .to_ascii_lowercase()
+                        .starts_with(&basename_token.to_ascii_lowercase())
+                })
+                .filter(|path| !basename_set.contains(path))
+                .map(|path| path.to_string())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        prefix_hits.sort_by(|left, right| {
+            shared_len(right)
+                .cmp(&shared_len(left))
+                .then(left.len().cmp(&right.len()))
+                .then(left.cmp(right))
+        });
+        prefix_hits.dedup();
+
+        let strong_or_basename_or_prefix_set: HashSet<&str> = strong_hits
+            .iter()
+            .chain(basename_only_hits.iter())
+            .chain(prefix_hits.iter())
             .map(String::as_str)
             .collect();
         let mut loose_hits: Vec<String> = self
             .all_files()
             .map(|(path, _)| path.as_str())
-            .filter(|path| !strong_or_basename_set.contains(*path))
+            .filter(|path| !strong_or_basename_or_prefix_set.contains(*path))
             .filter(|path| {
                 let path_lower = path.to_ascii_lowercase();
                 tokens.iter().all(|token| path_lower.contains(token))
@@ -1161,7 +1194,8 @@ impl LiveIndex {
         });
         loose_hits.dedup();
 
-        let total_matches = strong_hits.len() + basename_only_hits.len() + loose_hits.len();
+        let total_matches =
+            strong_hits.len() + basename_only_hits.len() + prefix_hits.len() + loose_hits.len();
         if total_matches == 0 {
             return SearchFilesView::NotFound {
                 query: normalized_query,
@@ -1177,6 +1211,12 @@ impl LiveIndex {
         }));
         hits.extend(basename_only_hits.into_iter().map(|path| SearchFilesHit {
             tier: SearchFilesTier::Basename,
+            path,
+            coupling_score: None,
+            shared_commits: None,
+        }));
+        hits.extend(prefix_hits.into_iter().map(|path| SearchFilesHit {
+            tier: SearchFilesTier::LoosePath,
             path,
             coupling_score: None,
             shared_commits: None,
@@ -2780,6 +2820,47 @@ mod tests {
                 ],
             }
         );
+    }
+
+    #[test]
+    fn test_capture_search_files_view_prefix_matching() {
+        let index = make_index(
+            vec![
+                (
+                    "src/orchestrator.rs",
+                    make_indexed_file("src/orchestrator.rs", vec![], ParseStatus::Parsed),
+                ),
+                (
+                    "src/orchestration.rs",
+                    make_indexed_file("src/orchestration.rs", vec![], ParseStatus::Parsed),
+                ),
+                (
+                    "src/other.rs",
+                    make_indexed_file("src/other.rs", vec![], ParseStatus::Parsed),
+                ),
+            ],
+            false,
+        );
+
+        // "orchestrat" should find both orchestrator.rs and orchestration.rs via prefix matching.
+        let view = index.capture_search_files_view("orchestrat", 10, None);
+        if let SearchFilesView::Found { hits, .. } = view {
+            let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+            assert!(
+                paths.contains(&"src/orchestrator.rs"),
+                "expected orchestrator.rs in results: {paths:?}"
+            );
+            assert!(
+                paths.contains(&"src/orchestration.rs"),
+                "expected orchestration.rs in results: {paths:?}"
+            );
+            assert!(
+                !paths.contains(&"src/other.rs"),
+                "unexpected other.rs in results: {paths:?}"
+            );
+        } else {
+            panic!("expected found view for prefix query 'orchestrat'");
+        }
     }
 
     #[test]
