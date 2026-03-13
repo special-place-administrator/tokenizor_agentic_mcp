@@ -261,7 +261,7 @@ fn format_git_timestamp(secs: i64, offset_minutes: i32) -> String {
 
     // Simple UTC conversion — good enough for display.
     let days_since_epoch = adjusted / 86400;
-    let time_of_day = adjusted % 86400;
+    let time_of_day = adjusted.rem_euclid(86400);
     let hours = time_of_day / 3600;
     let minutes = (time_of_day % 3600) / 60;
     let seconds = time_of_day % 60;

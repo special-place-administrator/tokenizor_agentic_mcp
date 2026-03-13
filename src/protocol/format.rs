@@ -4777,41 +4777,45 @@ fn extract_symbol_signatures(content: &str) -> Vec<(String, String)> {
 
 /// Try to extract a declaration name from a line of code.
 pub(crate) fn extract_declaration_name(line: &str) -> Option<String> {
+    // Strip leading visibility modifier generically: pub, pub(crate), pub(super), pub(in path).
+    let stripped = if let Some(rest) = line.strip_prefix("pub") {
+        if let Some(after_paren) = rest.strip_prefix('(') {
+            // Skip balanced parens: pub(crate), pub(super), pub(in crate::foo)
+            if let Some(close) = after_paren.find(')') {
+                after_paren[close + 1..].trim_start()
+            } else {
+                rest.trim_start()
+            }
+        } else {
+            rest.trim_start()
+        }
+    } else if let Some(rest) = line.strip_prefix("export default ") {
+        rest
+    } else if let Some(rest) = line.strip_prefix("export ") {
+        rest
+    } else {
+        line
+    };
+
     let keywords = [
-        "pub async fn ",
-        "pub(crate) async fn ",
-        "pub(crate) fn ",
         "async fn ",
-        "pub fn ",
         "fn ",
-        "pub struct ",
         "struct ",
-        "pub enum ",
         "enum ",
-        "pub trait ",
         "trait ",
-        "pub type ",
         "type ",
-        "pub const ",
         "const ",
-        "pub static ",
         "static ",
         "class ",
         "interface ",
-        "export function ",
-        "export async function ",
-        "export class ",
-        "export interface ",
-        "export const ",
-        "export default function ",
         "function ",
-        "def ",
+        "async function ",
         "async def ",
+        "def ",
     ];
 
     for kw in &keywords {
-        if let Some(rest) = line.strip_prefix(kw) {
-            // Extract the name (up to first non-ident char)
+        if let Some(rest) = stripped.strip_prefix(kw) {
             let name: String = rest
                 .chars()
                 .take_while(|c| c.is_alphanumeric() || *c == '_')
