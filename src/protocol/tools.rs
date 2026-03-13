@@ -1141,9 +1141,7 @@ impl TokenizorServer {
                         start_byte,
                         end_byte,
                     } => format::code_slice_from_indexed_file(file.as_ref(), start_byte, end_byte),
-                    CapturedGetSymbolsEntry::FileNotFound { path } => {
-                        format::not_found_file(&path)
-                    }
+                    CapturedGetSymbolsEntry::FileNotFound { path } => format::not_found_file(&path),
                 })
                 .collect::<Vec<_>>()
                 .join("\n---\n");
@@ -1193,10 +1191,16 @@ impl TokenizorServer {
             }
             "tree" => {
                 // Browsable file tree (old get_file_tree behavior)
-                if let Some(result) = self.proxy_tool_call("get_file_tree", &serde_json::json!({
-                    "path": params.0.path,
-                    "depth": params.0.depth,
-                })).await {
+                if let Some(result) = self
+                    .proxy_tool_call(
+                        "get_file_tree",
+                        &serde_json::json!({
+                            "path": params.0.path,
+                            "depth": params.0.depth,
+                        }),
+                    )
+                    .await
+                {
                     return result;
                 }
                 let published = self.index.published_state();
@@ -1290,13 +1294,19 @@ impl TokenizorServer {
                 Some(p) => p.to_string(),
                 None => return "Error: bundle=true requires the 'path' parameter.".to_string(),
             };
-            if let Some(result) = self.proxy_tool_call("get_context_bundle", &serde_json::json!({
-                "path": path,
-                "name": params.0.name,
-                "kind": params.0.symbol_kind,
-                "symbol_line": params.0.symbol_line,
-                "verbosity": params.0.verbosity,
-            })).await {
+            if let Some(result) = self
+                .proxy_tool_call(
+                    "get_context_bundle",
+                    &serde_json::json!({
+                        "path": path,
+                        "name": params.0.name,
+                        "kind": params.0.symbol_kind,
+                        "symbol_line": params.0.symbol_line,
+                        "verbosity": params.0.verbosity,
+                    }),
+                )
+                .await
+            {
                 return result;
             }
             let (view, raw_chars) = {
@@ -1416,7 +1426,9 @@ impl TokenizorServer {
         };
         let mut result = match impact_tool_text(state, &impact).await {
             Ok(result) => result,
-            Err(StatusCode::NOT_FOUND) => return format!("File not found on disk: {}", params.0.path),
+            Err(StatusCode::NOT_FOUND) => {
+                return format!("File not found on disk: {}", params.0.path);
+            }
             Err(StatusCode::INTERNAL_SERVER_ERROR) => {
                 return "Impact analysis failed: internal error.".to_string();
             }
@@ -1433,7 +1445,9 @@ impl TokenizorServer {
                     match temporal.files.get(path) {
                         Some(history) => {
                             result.push_str("\n\n");
-                            result.push_str(&format::get_co_changes_result_view(path, history, limit));
+                            result.push_str(&format::get_co_changes_result_view(
+                                path, history, limit,
+                            ));
                         }
                         None => {
                             result.push_str("\n\nNo git co-change data found for this file.");
@@ -1442,7 +1456,9 @@ impl TokenizorServer {
                 }
                 crate::live_index::git_temporal::GitTemporalState::Pending
                 | crate::live_index::git_temporal::GitTemporalState::Computing => {
-                    result.push_str("\n\nGit temporal data is still loading. Co-changes unavailable.");
+                    result.push_str(
+                        "\n\nGit temporal data is still loading. Co-changes unavailable.",
+                    );
                 }
                 crate::live_index::git_temporal::GitTemporalState::Unavailable(ref reason) => {
                     result.push_str(&format!("\n\nGit temporal data unavailable: {reason}"));
@@ -1842,9 +1858,7 @@ impl TokenizorServer {
                         ) {
                             Ok(filtered) => format::what_changed_paths_result(
                                 &filtered,
-                                &format!(
-                                    "No changes detected relative to git ref '{git_ref}'."
-                                ),
+                                &format!("No changes detected relative to git ref '{git_ref}'."),
                             ),
                             Err(e) => e,
                         }
@@ -1900,11 +1914,14 @@ impl TokenizorServer {
         if mode == "implementations" {
             // Implementations mode (old find_implementations behavior)
             if let Some(result) = self
-                .proxy_tool_call("find_implementations", &serde_json::json!({
-                    "name": input.name,
-                    "direction": input.direction,
-                    "limit": input.limit,
-                }))
+                .proxy_tool_call(
+                    "find_implementations",
+                    &serde_json::json!({
+                        "name": input.name,
+                        "direction": input.direction,
+                        "limit": input.limit,
+                    }),
+                )
                 .await
             {
                 return result;
@@ -1978,9 +1995,6 @@ impl TokenizorServer {
             _ => format::find_dependents_result_view(&view, &input.path, &limits),
         }
     }
-
-
-
 
     /// Start here when you don't know where to look. Accepts a natural-language concept
     /// (e.g. 'error handling', 'authentication') and returns a unified overview of related symbols,
@@ -2069,7 +2083,6 @@ impl TokenizorServer {
 
         format::explore_result_view(&label, &symbol_hits, &text_hits, &related_files)
     }
-
 
     /// Symbol-level diff between two git refs. Shows +added, -removed, ~modified symbols per changed
     /// file. Use for code review to see which functions/classes changed.
@@ -2234,11 +2247,7 @@ impl TokenizorServer {
         &self,
         params: Parameters<edit::InsertSymbolInput>,
     ) -> String {
-        let position = params
-            .0
-            .position
-            .as_deref()
-            .unwrap_or("after");
+        let position = params.0.position.as_deref().unwrap_or("after");
         if position != "before" && position != "after" {
             return format!("Error: position must be 'before' or 'after', got '{position}'");
         }
@@ -2853,11 +2862,13 @@ mod tests {
     async fn test_get_repo_map_full_uses_project_name() {
         let (key, file) = make_file("src/main.rs", b"fn main() {}", vec![]);
         let server = make_server(make_live_index_ready(vec![(key, file)]));
-        let result = server.get_repo_map(Parameters(super::GetRepoMapInput {
-            detail: Some("full".to_string()),
-            path: None,
-            depth: None,
-        })).await;
+        let result = server
+            .get_repo_map(Parameters(super::GetRepoMapInput {
+                detail: Some("full".to_string()),
+                path: None,
+                depth: None,
+            }))
+            .await;
         assert!(
             result.contains("test_project"),
             "repo outline should use project_name, got: {result}"
@@ -2867,11 +2878,13 @@ mod tests {
     #[tokio::test]
     async fn test_get_repo_map_full_loading_guard_empty() {
         let server = make_server(make_live_index_empty());
-        let result = server.get_repo_map(Parameters(super::GetRepoMapInput {
-            detail: Some("full".to_string()),
-            path: None,
-            depth: None,
-        })).await;
+        let result = server
+            .get_repo_map(Parameters(super::GetRepoMapInput {
+                detail: Some("full".to_string()),
+                path: None,
+                depth: None,
+            }))
+            .await;
         assert_eq!(result, crate::protocol::format::empty_guard_message());
     }
 
@@ -2912,11 +2925,13 @@ mod tests {
         );
         let server = TokenizorServer::new_daemon_proxy(daemon_client);
 
-        let result = server.get_repo_map(Parameters(super::GetRepoMapInput {
-            detail: Some("full".to_string()),
-            path: None,
-            depth: None,
-        })).await;
+        let result = server
+            .get_repo_map(Parameters(super::GetRepoMapInput {
+                detail: Some("full".to_string()),
+                path: None,
+                depth: None,
+            }))
+            .await;
         assert!(
             result.contains("main.rs"),
             "remote repo outline should come from daemon project instance, got: {result}"
@@ -2931,11 +2946,13 @@ mod tests {
         let (key, file) = make_file("src/main.rs", b"fn main() {}", vec![sym]);
         let server = make_server(make_live_index_ready(vec![(key, file)]));
 
-        let result = server.get_repo_map(Parameters(super::GetRepoMapInput {
-            detail: None,
-            path: None,
-            depth: None,
-        })).await;
+        let result = server
+            .get_repo_map(Parameters(super::GetRepoMapInput {
+                detail: None,
+                path: None,
+                depth: None,
+            }))
+            .await;
 
         assert!(
             result.contains("Index: 1 files, 1 symbols"),
@@ -5661,7 +5678,8 @@ mod tests {
         // impact analysis uses the loading guard and returns early, so the co-changes append
         // won't be reached. The loading guard message is returned instead.
         assert!(
-            result.contains("still loading") || result.contains("unavailable")
+            result.contains("still loading")
+                || result.contains("unavailable")
                 || result == crate::protocol::format::empty_guard_message(),
             "expected loading/unavailable/guard message, got: {result}"
         );

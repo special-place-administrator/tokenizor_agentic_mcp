@@ -133,16 +133,22 @@ impl TokenizorServer {
     async fn render_resource_text(&self, request: ResourceRequest) -> Result<String, String> {
         let text = match request {
             ResourceRequest::RepoHealth => self.health().await,
-            ResourceRequest::RepoOutline => self.get_repo_map(Parameters(GetRepoMapInput {
-                detail: Some("full".to_string()),
-                path: None,
-                depth: None,
-            })).await,
-            ResourceRequest::RepoMap => self.get_repo_map(Parameters(GetRepoMapInput {
-                detail: None,
-                path: None,
-                depth: None,
-            })).await,
+            ResourceRequest::RepoOutline => {
+                self.get_repo_map(Parameters(GetRepoMapInput {
+                    detail: Some("full".to_string()),
+                    path: None,
+                    depth: None,
+                }))
+                .await
+            }
+            ResourceRequest::RepoMap => {
+                self.get_repo_map(Parameters(GetRepoMapInput {
+                    detail: None,
+                    path: None,
+                    depth: None,
+                }))
+                .await
+            }
             ResourceRequest::RepoChangesUncommitted => {
                 self.what_changed(Parameters(WhatChangedInput {
                     since: None,
@@ -188,8 +194,13 @@ impl TokenizorServer {
                 .await
             }
             ResourceRequest::SymbolDetail { path, name, kind } => {
-                self.get_symbol(Parameters(GetSymbolInput { path, name, kind, targets: None }))
-                    .await
+                self.get_symbol(Parameters(GetSymbolInput {
+                    path,
+                    name,
+                    kind,
+                    targets: None,
+                }))
+                .await
             }
             ResourceRequest::SymbolContext { name, file } => {
                 self.get_symbol_context(Parameters(GetSymbolContextInput {
