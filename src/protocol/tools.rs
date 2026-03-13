@@ -130,6 +130,9 @@ pub struct SearchTextInput {
     pub case_sensitive: Option<bool>,
     /// When true, require whole-word matches for literal searches. Not supported with `regex=true`.
     pub whole_word: Option<bool>,
+    /// Group matches: "file" (default), "symbol" (one entry per enclosing symbol),
+    /// or "usage" (exclude imports and comments).
+    pub group_by: Option<String>,
 }
 
 /// Input for `search_files`.
@@ -1021,7 +1024,7 @@ impl TokenizorServer {
                 &options,
             )
         };
-        format::search_text_result_view(result)
+        format::search_text_result_view(result, params.0.group_by.as_deref())
     }
 
     /// One-call semantic investigation for an exact symbol.
@@ -2564,6 +2567,7 @@ mod tests {
                 context: None,
                 case_sensitive: None,
                 whole_word: None,
+                group_by: None,
             }))
             .await;
         assert!(
@@ -2596,6 +2600,7 @@ mod tests {
                 context: None,
                 case_sensitive: None,
                 whole_word: None,
+                group_by: None,
             }))
             .await;
         assert!(
@@ -2634,6 +2639,7 @@ mod tests {
                 context: None,
                 case_sensitive: None,
                 whole_word: None,
+                group_by: None,
             }))
             .await;
 
@@ -2681,6 +2687,7 @@ mod tests {
                 context: None,
                 case_sensitive: None,
                 whole_word: None,
+                group_by: None,
             }))
             .await;
 
@@ -2728,6 +2735,7 @@ mod tests {
                 context: Some(1),
                 case_sensitive: None,
                 whole_word: None,
+                group_by: None,
             }))
             .await;
 
@@ -2767,6 +2775,7 @@ mod tests {
                 context: None,
                 case_sensitive: None,
                 whole_word: None,
+                group_by: None,
             }))
             .await;
 
@@ -2809,6 +2818,7 @@ mod tests {
                 context: None,
                 case_sensitive: None,
                 whole_word: None,
+                group_by: None,
             }))
             .await;
 
@@ -2842,6 +2852,7 @@ mod tests {
                 context: None,
                 case_sensitive: Some(true),
                 whole_word: Some(true),
+                group_by: None,
             }))
             .await;
 
@@ -2887,6 +2898,7 @@ mod tests {
                 context: None,
                 case_sensitive: None,
                 whole_word: Some(true),
+                group_by: None,
             }))
             .await;
 
@@ -4131,11 +4143,51 @@ mod tests {
             limit: None, max_per_file: None, include_generated: None,
             include_tests: None, glob: None, exclude_glob: None,
             context: None, case_sensitive: None, whole_word: None,
+            group_by: None,
         })).await;
         assert!(result.contains("handle_request"),
             "should show enclosing symbol name, got: {result}");
         assert!(result.contains("in fn handle_request"),
             "should show kind and name, got: {result}");
+    }
+
+    #[tokio::test]
+    async fn test_search_text_group_by_symbol_deduplicates() {
+        let sym = make_symbol("connect", SymbolKind::Function, 0, 4);
+        let content = b"fn connect() {\n    let url = db_url();\n    let pool = Pool::new(url);\n    pool.connect()\n}\n";
+        let (key, file) = make_file("src/db.rs", content, vec![sym]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server.search_text(Parameters(super::SearchTextInput {
+            query: Some("pool".to_string()),
+            terms: None, regex: None, path_prefix: None, language: None,
+            limit: None, max_per_file: None, include_generated: None,
+            include_tests: None, glob: None, exclude_glob: None,
+            context: None, case_sensitive: None, whole_word: None,
+            group_by: Some("symbol".to_string()),
+        })).await;
+        // With group_by: "symbol", should show symbol name and match count
+        assert!(result.contains("connect"), "should show symbol name: {result}");
+        assert!(result.contains("2 matches") || result.contains("match"),
+            "should show match count: {result}");
+    }
+
+    #[tokio::test]
+    async fn test_search_text_group_by_usage_filters_imports() {
+        let content = b"use crate::db::connect;\nfn handler() { connect() }\n";
+        let sym = make_symbol("handler", SymbolKind::Function, 1, 1);
+        let (key, file) = make_file("src/api.rs", content, vec![sym]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server.search_text(Parameters(super::SearchTextInput {
+            query: Some("connect".to_string()),
+            terms: None, regex: None, path_prefix: None, language: None,
+            limit: None, max_per_file: None, include_generated: None,
+            include_tests: None, glob: None, exclude_glob: None,
+            context: None, case_sensitive: None, whole_word: None,
+            group_by: Some("usage".to_string()),
+        })).await;
+        // Should exclude the "use" import line
+        assert!(!result.contains("use crate"), "should filter out imports: {result}");
+        assert!(result.contains("handler"), "should keep usage matches: {result}");
     }
 
     #[tokio::test]

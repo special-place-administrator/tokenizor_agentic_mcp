@@ -263,11 +263,12 @@ pub fn search_text_result_with_options(
     regex: bool,
 ) -> String {
     let result = search::search_text(index, query, terms, regex);
-    search_text_result_view(result)
+    search_text_result_view(result, None)
 }
 
 pub fn search_text_result_view(
     result: Result<search::TextSearchResult, search::TextSearchError>,
+    group_by: Option<&str>,
 ) -> String {
     let result = match result {
         Ok(result) => result,
@@ -304,6 +305,7 @@ pub fn search_text_result_view(
     for file in &result.files {
         lines.push(file.path.clone());
         if let Some(rendered_lines) = &file.rendered_lines {
+            // Context mode: don't apply grouping — context windows don't compose well with it
             for rendered_line in rendered_lines {
                 match rendered_line {
                     search::TextDisplayLine::Separator => lines.push("  ...".to_string()),
@@ -316,20 +318,96 @@ pub fn search_text_result_view(
                 }
             }
         } else {
-            let mut last_symbol: Option<String> = None;
-            for line_match in &file.matches {
-                if let Some(ref enc) = line_match.enclosing_symbol {
-                    if last_symbol.as_deref() != Some(enc.name.as_str()) {
-                        lines.push(format!(
-                            "  in {} {} (lines {}-{}):",
-                            enc.kind, enc.name, enc.line_range.0 + 1, enc.line_range.1 + 1
-                        ));
-                        last_symbol = Some(enc.name.clone());
+            match group_by {
+                Some("symbol") => {
+                    // One entry per unique enclosing symbol, showing match count
+                    // Preserve insertion order by tracking symbol names in order
+                    let mut symbol_order: Vec<String> = Vec::new();
+                    let mut symbol_counts: std::collections::HashMap<String, (usize, String, u32, u32)> =
+                        std::collections::HashMap::new();
+                    let mut no_symbol_count = 0usize;
+                    for line_match in &file.matches {
+                        if let Some(ref enc) = line_match.enclosing_symbol {
+                            let key = enc.name.clone();
+                            if !symbol_counts.contains_key(&key) {
+                                symbol_order.push(key.clone());
+                                symbol_counts.insert(
+                                    key,
+                                    (1, enc.kind.clone(), enc.line_range.0 + 1, enc.line_range.1 + 1),
+                                );
+                            } else {
+                                symbol_counts.get_mut(&enc.name).unwrap().0 += 1;
+                            }
+                        } else {
+                            no_symbol_count += 1;
+                        }
                     }
-                    lines.push(format!("    > {}: {}", line_match.line_number, line_match.line));
-                } else {
-                    last_symbol = None;
-                    lines.push(format!("  {}: {}", line_match.line_number, line_match.line));
+                    for sym_name in &symbol_order {
+                        if let Some((count, kind, start, end)) = symbol_counts.get(sym_name) {
+                            let match_word = if *count == 1 { "match" } else { "matches" };
+                            lines.push(format!(
+                                "  {} {} (lines {}-{}): {} {}",
+                                kind, sym_name, start, end, count, match_word
+                            ));
+                        }
+                    }
+                    if no_symbol_count > 0 {
+                        let match_word = if no_symbol_count == 1 { "match" } else { "matches" };
+                        lines.push(format!("  (top-level): {} {}", no_symbol_count, match_word));
+                    }
+                }
+                Some("usage") => {
+                    // Filter out lines that look like imports or comments
+                    let mut last_symbol: Option<String> = None;
+                    for line_match in &file.matches {
+                        let trimmed = line_match.line.trim();
+                        let is_import_or_comment = trimmed.starts_with("use ")
+                            || trimmed.starts_with("import ")
+                            || trimmed.starts_with("from ")
+                            || trimmed.starts_with("require(")
+                            || trimmed.starts_with("#include")
+                            || trimmed.starts_with("//")
+                            || trimmed.starts_with('#')
+                            || trimmed.starts_with("/*")
+                            || trimmed.starts_with('*')
+                            || trimmed.starts_with("--")
+                            || line_match.line.contains("require(");
+                        if is_import_or_comment {
+                            continue;
+                        }
+                        if let Some(ref enc) = line_match.enclosing_symbol {
+                            if last_symbol.as_deref() != Some(enc.name.as_str()) {
+                                lines.push(format!(
+                                    "  in {} {} (lines {}-{}):",
+                                    enc.kind, enc.name, enc.line_range.0 + 1, enc.line_range.1 + 1
+                                ));
+                                last_symbol = Some(enc.name.clone());
+                            }
+                            lines.push(format!("    > {}: {}", line_match.line_number, line_match.line));
+                        } else {
+                            last_symbol = None;
+                            lines.push(format!("  {}: {}", line_match.line_number, line_match.line));
+                        }
+                    }
+                }
+                // None or Some("file") — default behavior
+                _ => {
+                    let mut last_symbol: Option<String> = None;
+                    for line_match in &file.matches {
+                        if let Some(ref enc) = line_match.enclosing_symbol {
+                            if last_symbol.as_deref() != Some(enc.name.as_str()) {
+                                lines.push(format!(
+                                    "  in {} {} (lines {}-{}):",
+                                    enc.kind, enc.name, enc.line_range.0 + 1, enc.line_range.1 + 1
+                                ));
+                                last_symbol = Some(enc.name.clone());
+                            }
+                            lines.push(format!("    > {}: {}", line_match.line_number, line_match.line));
+                        } else {
+                            last_symbol = None;
+                            lines.push(format!("  {}: {}", line_match.line_number, line_match.line));
+                        }
+                    }
                 }
             }
         }
@@ -2288,7 +2366,7 @@ mod tests {
 
         let live_result = search_text_result(&index, "let");
         let captured_result =
-            search_text_result_view(search::search_text(&index, Some("let"), None, false));
+            search_text_result_view(search::search_text(&index, Some("let"), None, false), None);
 
         assert_eq!(captured_result, live_result);
     }
@@ -2371,7 +2449,7 @@ mod tests {
             },
         );
 
-        let rendered = search_text_result_view(result);
+        let rendered = search_text_result_view(result, None);
 
         assert!(
             rendered.contains("src/lib.rs"),
