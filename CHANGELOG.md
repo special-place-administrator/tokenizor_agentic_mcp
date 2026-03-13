@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.20.0...v0.20.1) (2026-03-13)
+
+
+### Bug Fixes
+
+* disable git2 SSH/HTTPS features to remove OpenSSL dependency ([0167936](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/0167936069c2481cdbb07fb4e4bb5acdbd483131))
+
 ## [0.20.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.19.0...v0.20.0) (2026-03-13)
 
 
