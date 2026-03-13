@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.11.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.10.0...v0.11.0) (2026-03-13)
+
+
+### Features
+
+* complete Phase B - implement trace_symbol tool ([3869941](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/3869941d08a243f65b9ffc18673caac63b22f410))
+* complete Phase C - implement inspect_match and locality ranking ([8d0dff9](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/8d0dff9b781fddc03bd7fbaa9c04058042b142b1))
+* start Phase B - implement trace_symbol tool and add handoff summary ([dd3af33](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/dd3af336acb024ada2b76d51d5ea35428e751671))
+
+
+### Bug Fixes
+
+* improve context_bundle output quality and symbol_context guidance ([45eb6e4](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/45eb6e412bd1abf76d3430f761def6f319a3384d))
+* improve file watcher burst handling and evict idle trackers ([442d240](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/442d24031d71607e4d84d47e32d70a65f2ec5a4c))
+* resolve 6 confirmed bugs across watcher, daemon, trigram, discovery ([a50b723](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/a50b7232519cd640aa9140f1e0e6c032fac43eeb))
+
 ## [0.10.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.9.1...v0.10.0) (2026-03-12)
 
 
