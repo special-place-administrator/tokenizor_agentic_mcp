@@ -1,396 +1,228 @@
 # Tokenizor MCP
 
-Rust-native MCP server for same-machine code indexing, retrieval, prompts, and resources.
+A code-native MCP server that replaces raw file scanning with structured, symbol-aware code intelligence. Built in Rust with tree-sitter, it gives AI coding agents fast access to symbols, references, dependencies, git history, and impact analysis — all through a single MCP connection.
 
-The executable shipped by npm is `tokenizor-mcp`. In this repository, the same CLI can be run with `cargo run -- ...`.
+```bash
+npm install -g tokenizor-mcp
+```
 
-## What This Is Supposed To Be
+That's it. The installer downloads the platform binary, auto-detects your CLI agents (Claude Code, Codex, Gemini CLI), registers the MCP server, installs hooks, and auto-allows all tools. No manual configuration needed.
 
-Tokenizor is being built first as an agent-acceleration layer for coding work.
+## Why Tokenizor
 
-The main goal is to let an MCP client stay inside a fast, trustworthy, code-aware working loop for as much of a session as possible:
+AI coding agents spend most of their token budget on orientation — reading files, grepping for patterns, and figuring out what code is where. Tokenizor replaces that with structured tools that understand code as symbols, references, and dependency graphs rather than lines of text.
 
-- less raw file scanning
-- faster path and symbol resolution
-- better impact analysis after edits
-- stronger session continuity and context recovery
-- lower token waste on repeated codebase exploration
+The result:
+- **Fewer tool calls** — one `get_context_bundle` replaces 3–5 sequential file reads
+- **Lower token cost** — structured responses are 50–90% smaller than raw file content (savings shown on every response)
+- **Better accuracy** — symbol-aware search finds the right code faster than text matching
+- **Git intelligence** — churn scores, ownership, and co-change coupling inform which files matter most
 
-The direct user benefit is faster turnaround and lower token cost. The direct agent benefit is broader, faster, and more reliable use of the codebase while working. The current implementation is not at the final target yet, but that is the direction the project is intentionally optimizing toward.
+## Tools (26)
 
-## Current Reality
+### Orientation — start a session
 
-Tokenizor is already useful today as a local, code-first MCP. The current implementation provides:
+| Tool | Purpose |
+|------|---------|
+| `health` | Index status, file counts, load time, watcher state |
+| `get_repo_map` | Compact project overview — file counts, language breakdown, directory structure |
+| `get_repo_outline` | Full symbol outline of the entire indexed project |
+| `get_file_tree` | Browsable source tree with symbol counts per file and directory |
+| `explore` | Concept-driven exploration — ask "how does authentication work?" and get a unified overview of related symbols, patterns, and files |
 
-- a stdio MCP server for local clients
-- a local daemon mode for shared project/session state across concurrent terminals
-- tree-sitter-based symbol extraction across a broad set of programming languages
-- hook and sidecar enrichment for Claude Code
-- MCP tools, resources, and prompts for Claude Code, Codex, Gemini CLI, and other stdio MCP clients
-- local snapshot persistence and file watching for supported source files
+### Reading code
 
-At the time of this README rewrite, `cargo test` is green in this repository.
+| Tool | Purpose |
+|------|---------|
+| `get_file_content` | Read files with line ranges, `around_line`, `around_match`, `around_symbol`, or chunked paging |
+| `get_file_outline` | Symbol outline for a single file |
+| `get_file_context` | Enriched file summary — imports, exports, symbol outline, references, git activity (churn, ownership, co-change coupling) |
+| `get_symbol` | Look up a single symbol by name with fuzzy-match suggestions on miss |
+| `get_symbols` | Batch symbol lookup or byte-range code slices |
+| `get_symbol_context` | Deep context for a symbol — definition, callers, callees, type dependencies |
+| `get_context_bundle` | One-call context package — symbol body + all referenced type definitions, resolved recursively to depth 2 |
 
-## What Works Today
+### Searching
 
-### Runtime and setup
+| Tool | Purpose |
+|------|---------|
+| `search_symbols` | Find symbols by name substring, filtered by kind/language/path |
+| `search_text` | Full-text search with enclosing symbol context, `group_by` (symbol/usage), `follow_refs` for inline callers |
+| `search_files` | Ranked file path discovery with optional `changed_with` for git co-change coupling |
+| `resolve_path` | Exact path resolution from filenames and partial hints |
 
-- Local same-machine use
-- MCP over stdio
-- Local daemon mode via `tokenizor-mcp daemon`
-- Automatic client setup for Claude Code, Codex, and Gemini CLI via `tokenizor-mcp init`
-- Automatic hook registration for Claude Code
-- Auto-allow of all Tokenizor tools during Claude Code and Codex init (no permission prompts)
-- Local snapshot persistence at `.tokenizor/index.bin`
-- File watching and incremental re-indexing for supported source files
-- Background git temporal analysis — computes churn, ownership, and co-change metrics after index load
+### References and dependencies
 
-### Search and navigation gains
+| Tool | Purpose |
+|------|---------|
+| `find_references` | Grouped reference navigation with enclosing-symbol annotations |
+| `find_dependents` | Module-aware import graph — which files depend on this one. Supports Mermaid and Graphviz output |
+| `find_implementations` | Trait/interface implementation mapping — bidirectional search across 8 languages |
+| `trace_symbol` | One-call semantic investigation — definition, callers, callees, implementations, type dependencies |
+| `inspect_match` | Deep-dive a search_text match line — shows full symbol context with callers and type dependencies |
 
-- `search_files` for ranked path discovery with optional `changed_with` parameter for git temporal co-change coupling (finds files that frequently change together)
-- `resolve_path` for exact path resolution from filenames and partial hints
-- `search_symbols` with `kind`, `path_prefix`, `language`, `limit`, `include_generated`, and `include_tests`
-- `search_text` with literal, OR-term, and regex search plus `path_prefix`, `language`, `limit`, `max_per_file`, `glob`, `exclude_glob`, symmetric `context`, `case_sensitive`, `whole_word`, generated/test suppression, and relevance-ranked results (files sorted by match count rather than alphabetically); results show enclosing symbol context for each match; `group_by` parameter supports `"symbol"` (one summary line per symbol) and `"usage"` (filters out imports/comments to show only substantive usage sites); `follow_refs` enriches results with caller information for each matched symbol
-- `get_file_content` with full-file reads, explicit line ranges, optional `show_line_numbers` and `header` for full-file or explicit-range reads, `around_line`, first-match `around_match`, exact-path `around_symbol`, and exact-path line-oriented chunked reads via `chunk_index` plus `max_lines`; error messages show valid parameter combinations for the attempted mode
-- exact-selector reference navigation through `find_references`, `get_symbol_context`, and `get_context_bundle` using `path`, symbol kind, and symbol line; `find_references` supports `limit` and `max_per_file` for bounded output; `get_context_bundle` automatically resolves type dependencies — custom types referenced in the symbol's signature and body are included with their full definitions, recursively up to depth 2 (e.g. if a function takes `UserConfig` which contains an `Address` field, both type bodies are returned in a single call)
-- `get_file_context` with enriched import/export summaries — shows grouped import sources with symbol counts ("Imports from N sources") and grouped consumers with reference counts ("Used by M files"), alongside the symbol outline and key references; also includes a **Git activity** section with exponential-decay churn score (14-day half-life, rank-normalized 0.0–1.0 with visual bar), last commit summary, ownership distribution (top contributors by commit share), and Jaccard co-change coupling (files that frequently change together)
-- `find_dependents` with module- and namespace-aware attribution, `limit`/`max_per_file` output bounds, and optional `format` parameter for Mermaid flowchart or Graphviz DOT graph output
-- `find_implementations` for trait/interface implementation mapping — given a trait name returns all implementors, given a type name returns all traits it implements; bidirectional search with `direction` parameter; supports Rust (`impl Trait for Struct`), TypeScript/Java (`implements`), C# (base list), Python (class inheritance), C++, Ruby, PHP, Swift
-- `trace_symbol` for one-call semantic investigation of an exact symbol — returns definition, callers, callees, trait implementations, and type dependencies in a single response
-- `inspect_match` for deep-diving a specific search_text match — shows the match in full symbol context with callers and type dependencies, replacing the manual read-after-search pattern
-- `explore` for concept-driven codebase exploration — accepts a natural-language question (e.g. "how does authentication work?") and runs combined symbol + text searches using a built-in concept map, returning a unified overview
-- prompt-submit hook routing that can use file hints, basename/extensionless aliases, module aliases, qualified symbol aliases, and `:line` hints to choose the right file or symbol more reliably
+### Git intelligence
 
-### MCP surface implemented today
+| Tool | Purpose |
+|------|---------|
+| `what_changed` | Files changed since a timestamp, git ref, or uncommitted |
+| `analyze_file_impact` | Re-read a file from disk, update the index, and report symbol-level impact |
+| `get_co_changes` | Git temporal coupling — co-changing files ranked by Jaccard coefficient, churn scores, ownership |
+| `diff_symbols` | Symbol-level diff between git refs — added, removed, and modified symbols for code review |
 
-Current tools:
+### Indexing
 
-- `health`
-- `index_folder`
-- `get_file_outline`
-- `get_repo_outline`
-- `get_repo_map`
-- `get_file_context`
-- `get_symbol_context`
-- `analyze_file_impact`
-- `search_symbols`
-- `search_text`
-- `search_files`
-- `resolve_path`
-- `get_symbol`
-- `get_symbols`
-- `get_file_content`
-- `find_references`
-- `find_dependents`
-- `find_implementations`
-- `get_file_tree`
-- `get_context_bundle`
-- `what_changed`
-- `trace_symbol`
-- `inspect_match`
-- `explore`
+| Tool | Purpose |
+|------|---------|
+| `index_folder` | Reload the index from a directory path |
 
-Current prompts:
+### Token savings
 
-- `code-review`
-- `architecture-map`
-- `failure-triage`
+Structured tool responses include a footer showing estimated tokens saved compared to raw file reads. This happens automatically on `get_file_outline`, `get_file_context`, `get_symbol_context`, and `get_context_bundle`.
 
-Current static resources:
+## Prompts
 
+- `code-review` — structured review prompt for a file or symbol
+- `architecture-map` — high-level architecture analysis
+- `failure-triage` — systematic failure investigation
+
+## Resources
+
+Static resources:
 - `tokenizor://repo/health`
 - `tokenizor://repo/outline`
 - `tokenizor://repo/map`
 - `tokenizor://repo/changes/uncommitted`
 
-Current resource templates:
-
+Resource templates:
 - `tokenizor://file/context?path={path}&max_tokens={max_tokens}`
 - `tokenizor://file/content?path={path}&start_line={start_line}&end_line={end_line}&around_line={around_line}&around_match={around_match}&context_lines={context_lines}&show_line_numbers={show_line_numbers}&header={header}`
 - `tokenizor://symbol/detail?path={path}&name={name}&kind={kind}`
 - `tokenizor://symbol/context?name={name}&file={file}`
 
-Resources cover common read patterns; tools handle the full parameter space including symbolic reads, chunked paging, and exact-selector disambiguation.
+## Supported Languages
 
-### Supported languages
-
-Current language extractors exist for:
-
-- Rust
-- Python
-- JavaScript
-- TypeScript
-- Go
-- Java
-- C
-- C++
-- C#
-- Ruby
-- PHP
-- Swift
-- Perl
-- Kotlin
-- Dart
-- Elixir
-
-## Roadmap
-
-Near-term items not yet in the runtime:
-
-- a lightweight non-code text lane for JSON, YAML, TOML, Markdown, logs, and similar plain-text files
-- transparent hook-based enrichment for Codex
-- `chunk_count_hint` for `get_file_content`
-
-Longer-term goals tracked in `.planning/milestones/`.
-
-## Current Limitations
-
-- indexing is code-first; non-code text retrieval is limited
-- file content chunking is deterministic line-oriented paging, not embedding-based retrieval
+tree-sitter extractors for: Rust, Python, JavaScript, TypeScript, Go, Java, C, C++, C#, Ruby, PHP, Swift, Perl, Kotlin, Dart, Elixir.
 
 ## Installation
 
-Prerequisite for the npm package: Node.js 18 or newer.
+Prerequisite: Node.js 18+.
 
-Supported prebuilt npm binaries:
-
-- Windows x64
-- Linux x64
-- macOS arm64
-- macOS x64
-
-Install globally:
+Prebuilt binaries for: Windows x64, Linux x64, macOS arm64, macOS x64.
 
 ```bash
 npm install -g tokenizor-mcp
 ```
 
-The npm installer downloads the platform binary to `~/.tokenizor/bin/tokenizor-mcp` or `~/.tokenizor/bin/tokenizor-mcp.exe`.
+The installer downloads the platform binary to `~/.tokenizor/bin/`. Set `TOKENIZOR_HOME` to override this location.
 
-If `TOKENIZOR_HOME` is set, the npm wrapper and installer use `$TOKENIZOR_HOME/bin` instead of the default home path.
+Updates work the same way — `npm install -g tokenizor-mcp` replaces the binary. If the binary is locked (active session), it stages a `.pending` update that applies on next launch.
 
-Update the npm install the same way:
+Auto-init runs after every install/update: detects Claude Code (`~/.claude`), Codex (`~/.codex`), and Gemini CLI (`~/.gemini`), registers the MCP server, installs hooks, and auto-allows all Tokenizor tools.
 
-```bash
-npm install -g tokenizor-mcp
-```
+If your platform isn't listed, build from source instead.
 
-Current updater behavior:
+## Client Setup
 
-- The installer proactively stops tokenizor-mcp daemon processes before updating. The stdio MCP process (if serving an active Claude Code session) is left running to avoid disrupting the session.
-- On Windows, the npm installer first tries to replace the installed binary in place.
-- If the installed Tokenizor binary is still locked (active MCP session), the installer stages `tokenizor-mcp.pending.exe` and the wrapper applies it on the next successful launch.
-- On every launch, the npm wrapper checks that the installed binary version matches the wrapper package version and reruns the installer automatically if the binary is missing or mismatched.
-- On every launch, the client also refuses to reuse a recorded daemon unless its reported version and executable path match the current binary; incompatible daemons are replaced automatically.
-
-Automatic client initialization:
-
-- After a successful install or update, the installer auto-detects installed CLI agents (Claude Code, Codex, Gemini CLI) and runs `init` automatically — no manual `tokenizor-mcp init` needed.
-- When an update is staged as `.pending` (active MCP session), auto-init runs on the next launch after the pending binary is applied.
-- Existing hooks and MCP registrations are updated in place; non-Tokenizor entries are preserved.
-
-Release, publish, and recovery procedure lives in `docs/release-process.md`.
-Canonical release tags use plain `vX.Y.Z`.
-
-If your platform is not in the list above, build from source instead.
-
-## CLI
-
-Default invocation starts the stdio MCP server.
-
-Subcommands currently exposed by the CLI:
-
-- `init`
-- `daemon`
-- `hook`
-
-Current `hook` subcommands:
-
-- `read`
-- `edit`
-- `write`
-- `grep`
-- `session-start`
-- `prompt-submit`
-
-## Client Initialization
-
-Client initialization runs automatically during `npm install -g tokenizor-mcp`. To re-run manually:
+Auto-configured during install. To re-run manually:
 
 ```bash
-tokenizor-mcp init
+tokenizor-mcp init                  # auto-detect clients
+tokenizor-mcp init --client claude  # Claude Code only
+tokenizor-mcp init --client codex   # Codex only
+tokenizor-mcp init --client gemini  # Gemini CLI only
+tokenizor-mcp init --client all     # all clients
 ```
-
-Current client targets:
-
-```bash
-tokenizor-mcp init --client claude
-tokenizor-mcp init --client codex
-tokenizor-mcp init --client gemini
-tokenizor-mcp init --client all
-```
-
-`init` records the absolute path of the executable that is currently running. Run it from the installed binary you intend to keep using.
-
-`init` also creates or reuses the project-local `.tokenizor` directory in the current working directory.
 
 ### Claude Code
 
-`tokenizor-mcp init --client claude` updates:
-
-- `~/.claude.json`
-- `~/.claude/settings.json`
-- `~/.claude/CLAUDE.md`
-
-The Claude setup installs:
-
-- MCP server registration
-- hook entries for `read`, `edit`, `write`, `grep`, `session-start`, and `prompt-submit`
-- a bounded Tokenizor guidance block in `~/.claude/CLAUDE.md`
+Updates `~/.claude.json`, `~/.claude/settings.json`, `~/.claude/CLAUDE.md`. Installs MCP server registration, hook entries (`read`, `edit`, `write`, `grep`, `session-start`, `prompt-submit`), guidance block, and auto-allows all 26 Tokenizor tools.
 
 ### Codex
 
-`tokenizor-mcp init --client codex` updates:
-
-- `~/.codex/config.toml`
-- `~/.codex/AGENTS.md`
-
-The Codex setup writes or updates:
-
-- `[mcp_servers.tokenizor]`
-- `startup_timeout_sec = 30`
-- `tool_timeout_sec = 120`
-- `project_doc_fallback_filenames` to ensure `CLAUDE.md` is included
-- a bounded Tokenizor guidance block in `~/.codex/AGENTS.md`
-
-Codex currently uses MCP tools, resources, prompts, and AGENTS guidance, but it does not yet get the automatic transparent hook enrichment path that Claude Code gets.
+Updates `~/.codex/config.toml`, `~/.codex/AGENTS.md`. Installs MCP server config with timeouts, allowed tools list, and guidance block.
 
 ### Gemini CLI
 
-`tokenizor-mcp init --client gemini` updates:
-
-- `~/.gemini/settings.json`
-- `~/.gemini/GEMINI.md`
-
-The Gemini setup writes or updates:
-
-- MCP server registration in Gemini's `mcpServers` config
-- a bounded Tokenizor guidance block in `~/.gemini/GEMINI.md`
-
-Gemini CLI auto-detection: the npm installer detects `~/.gemini` and includes Gemini in automatic init.
+Updates `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`. Installs MCP server registration and guidance block.
 
 ## Runtime Model
 
-### Stdio startup
+### Startup
 
-When the stdio server starts:
+1. If `TOKENIZOR_AUTO_INDEX` is not `false`, Tokenizor discovers a project root
+2. Tries to connect to or start a local daemon for shared state across terminals
+3. Falls back to local in-process mode if daemon connection fails
+4. Starts with an empty index if no project root is found
 
-1. If `TOKENIZOR_AUTO_INDEX` is not `false`, Tokenizor tries to discover a project root.
-2. If a project root is found, Tokenizor tries to connect to or start a local daemon-backed session for that project.
-3. If daemon connection fails, Tokenizor falls back to local in-process mode.
-4. If auto-indexing is disabled or no project root is found, Tokenizor starts with an empty index.
-
-### Daemon resilience
-
-If the daemon becomes unreachable during a session (killed, crashed, or updated):
-
-1. The next tool call detects the connection failure and attempts to reconnect — spawning a new daemon and opening a fresh session automatically.
-2. If reconnection succeeds, the tool call completes normally with a brief delay.
-3. If reconnection fails, the MCP server enters degraded mode: it loads a local in-process index from disk and serves all subsequent tool calls locally for the remainder of the session.
-4. Once in degraded mode, no further reconnect attempts are made to avoid reconnection storms.
-
-### Local daemon
-
-Start the local daemon with:
+### Daemon mode
 
 ```bash
 tokenizor-mcp daemon
 ```
 
-Current daemon behavior:
+The daemon binds to local loopback, tracks projects by canonical root, supports multiple concurrent sessions, and persists metadata (`daemon.port`, `daemon.pid`) under `TOKENIZOR_HOME`.
 
-- binds to local loopback
-- tracks projects by canonical project root
-- tracks multiple sessions per project
-- serves shared project state across concurrent terminals and clients
-- persists daemon metadata under the Tokenizor home directory
+If the daemon becomes unreachable mid-session, the next tool call automatically reconnects or falls back to local in-process mode. Once in degraded mode, no further reconnect attempts are made.
 
-Current daemon metadata files:
+### Hooks and sidecar
 
-- `daemon.port`
-- `daemon.pid`
-
-`TOKENIZOR_HOME` overrides the default Tokenizor home directory used for daemon metadata.
-
-### Local sidecar files
-
-Hook and sidecar coordination uses project-local files under `.tokenizor`:
-
-- `sidecar.port`
-- `sidecar.pid`
-- `sidecar.session`
+Claude Code hook integration uses project-local files under `.tokenizor/` (`sidecar.port`, `sidecar.pid`, `sidecar.session`). Hooks intercept read, edit, write, grep, session-start, and prompt-submit events to enrich responses transparently.
 
 ### Persistence
 
-The local runtime can load and save a serialized index snapshot at `.tokenizor/index.bin`.
+Index snapshots persist at `.tokenizor/index.bin` for fast restarts.
+
+### Parameter handling
+
+All tool parameters accept both native JSON types and stringified values (`"true"` for booleans, `"5"` for numbers) for compatibility with MCP clients that stringify parameters.
 
 ## Environment Variables
 
-| Variable | Default | Current effect |
-| --- | --- | --- |
-| `TOKENIZOR_AUTO_INDEX` | `true` | Enables project discovery and startup indexing unless set to `false`. |
-| `TOKENIZOR_CB_THRESHOLD` | `20` | Sets the parse-failure circuit-breaker threshold as a percentage. |
-| `TOKENIZOR_SIDECAR_BIND` | `127.0.0.1` | Sets the sidecar bind host for local in-process mode. |
-| `TOKENIZOR_HOME` | `~/.tokenizor` | Overrides the Tokenizor home directory used by daemon metadata and the npm-managed binary location (`$TOKENIZOR_HOME/bin`). |
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `TOKENIZOR_AUTO_INDEX` | `true` | Enables project discovery and startup indexing |
+| `TOKENIZOR_CB_THRESHOLD` | `20` | Parse-failure circuit-breaker threshold (percentage) |
+| `TOKENIZOR_SIDECAR_BIND` | `127.0.0.1` | Sidecar bind host for local in-process mode |
+| `TOKENIZOR_HOME` | `~/.tokenizor` | Home directory for daemon metadata and npm-managed binary |
+
+## Roadmap
+
+Near-term:
+- Non-code text lane for JSON, YAML, TOML, Markdown, logs
+- Transparent hook-based enrichment for Codex
+- `chunk_count_hint` for `get_file_content`
+
+Longer-term goals tracked in `.planning/milestones/`.
 
 ## Build From Source
-
-Rust toolchain required.
-
-Build and test:
 
 ```bash
 cargo build --release
 cargo test
 ```
 
-The Cargo package name in this repository is `tokenizor_agentic_mcp`.
+The Cargo package name is `tokenizor_agentic_mcp`.
 
 ## Developer Setup
 
-Developer setup scripts now use the current `init` flow instead of printing legacy manual config.
-
-Windows:
-
 ```powershell
+# Windows
 .\setup.bat --client all
-```
 
-Unix:
-
-```bash
+# Unix
 bash scripts/setup.sh --client all
 ```
 
 ## Release Process
 
-GitHub releases are now managed through `release-please` plus GitHub Actions.
-
-Operational details live in [docs/release-process.md](docs/release-process.md).
-
-Fresh-terminal operator entrypoint:
+Managed through `release-please` + GitHub Actions. Details in [docs/release-process.md](docs/release-process.md).
 
 ```bash
-python execution/release_ops.py guide
-```
-
-Quick checks:
-
-```bash
-python execution/release_ops.py status
-python execution/release_ops.py preflight
-python execution/version_sync.py check
-python execution/version_sync.py current
+python execution/release_ops.py guide     # interactive guide
+python execution/release_ops.py status    # current state
+python execution/release_ops.py preflight # pre-release checks
+python execution/version_sync.py check    # version consistency
 ```
 
 ## License
