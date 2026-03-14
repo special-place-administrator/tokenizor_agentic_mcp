@@ -256,7 +256,8 @@ pub(crate) fn build_edit_within(
         }
     };
 
-    let new_content = apply_splice(file_content, sym.byte_range, new_body.as_bytes());
+    let effective_range = (sym.effective_start(), sym.byte_range.1);
+    let new_content = apply_splice(file_content, effective_range, new_body.as_bytes());
     Ok((new_content, count))
 }
 
@@ -1615,5 +1616,31 @@ mod tests {
             use_pos < doc_pos,
             "insert should go above doc comments (use_pos={use_pos}, doc_pos={doc_pos})"
         );
+    }
+
+    #[test]
+    fn test_build_edit_within_no_doc_duplication() {
+        // "/// Doc comment\n" = 16 bytes (0..16)
+        // "pub fn foo() {}\n" = 16 bytes (16..32)
+        let content = b"/// Doc comment\npub fn foo() {}\n";
+        let sym = SymbolRecord {
+            name: "foo".to_string(),
+            kind: SymbolKind::Function,
+            depth: 0,
+            sort_order: 0,
+            byte_range: (16, 32),
+            line_range: (1, 1),
+            doc_byte_range: Some((0, 16)),
+        };
+        let (result, count) = build_edit_within(content, &sym, "foo", "bar", false).unwrap();
+        let result_str = String::from_utf8(result).unwrap();
+        assert_eq!(count, 1);
+        // Doc comment should appear exactly once, not duplicated
+        assert_eq!(
+            result_str.matches("/// Doc comment").count(),
+            1,
+            "doc comment should not be duplicated: {result_str}"
+        );
+        assert!(result_str.contains("pub fn bar()"), "edit should apply");
     }
 }

@@ -50,7 +50,7 @@ pub(super) fn scan_doc_range(
 
     let mut earliest_start: Option<u32> = None;
     let mut latest_end: Option<u32> = None;
-    let mut next_start_row = node.start_position().row;
+    let mut next_start_byte = node.start_byte();
     let mut sibling_opt = node.prev_sibling();
 
     while let Some(sibling) = sibling_opt {
@@ -63,11 +63,19 @@ pub(super) fn scan_doc_range(
             break;
         }
 
-        // Blank line check: gap > 1 line means detached.
-        // Use start_position().row because some grammars include trailing
-        // newlines in the node span, inflating end_position().row.
-        let sibling_start_row = sibling.start_position().row;
-        if next_start_row > sibling_start_row + 1 {
+        // Blank line check: strip trailing whitespace from the sibling's
+        // span to find the content end, then count newlines between it and
+        // the next item's start. 2+ newlines means a blank line.
+        // This handles both single-line comments (where some grammars include
+        // trailing newlines in the span) and multi-line block comments correctly.
+        let mut content_end = sibling.end_byte();
+        while content_end > sibling.start_byte()
+            && source.as_bytes()[content_end - 1].is_ascii_whitespace()
+        {
+            content_end -= 1;
+        }
+        let between = &source.as_bytes()[content_end..next_start_byte];
+        if between.iter().filter(|&&b| b == b'\n').count() >= 2 {
             break;
         }
 
@@ -93,7 +101,7 @@ pub(super) fn scan_doc_range(
             latest_end = Some(eb);
         }
 
-        next_start_row = sibling.start_position().row;
+        next_start_byte = sibling.start_byte();
         sibling_opt = sibling.prev_sibling();
     }
 
@@ -476,5 +484,28 @@ mod tests {
         let doc_range = class_sym.doc_byte_range.expect("should have Javadoc range");
         let doc_text = &source[doc_range.0 as usize..doc_range.1 as usize];
         assert!(doc_text.contains("/** Javadoc */"), "missing javadoc text");
+    }
+
+    #[test]
+    fn test_scan_doc_range_multiline_block_comment() {
+        // Multi-line Javadoc spanning 3 rows should be captured
+        let source = "/**\n * Javadoc\n */\nclass Foo {}\n";
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
+        parser.set_language(&lang).expect("set java grammar");
+        let tree = parser.parse(source, None).expect("parse");
+        let symbols = extract_symbols(&tree.root_node(), source, &crate::domain::LanguageId::Java);
+        let class_sym = symbols
+            .iter()
+            .find(|s| s.name == "Foo")
+            .expect("should find Foo");
+        let doc_range = class_sym
+            .doc_byte_range
+            .expect("multi-line block comment should be captured");
+        let doc_text = &source[doc_range.0 as usize..doc_range.1 as usize];
+        assert!(
+            doc_text.contains("Javadoc"),
+            "multi-line block comment text missing"
+        );
     }
 }
