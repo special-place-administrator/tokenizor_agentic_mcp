@@ -50,6 +50,7 @@ fn make_rust_file_with_symbols(path: &str, symbols: Vec<(&str, SymbolKind)>) -> 
                 sort_order: i as u32,
                 byte_range: (i as u32 * 20, i as u32 * 20 + 15),
                 line_range: (line, line + 1),
+                doc_byte_range: None,
             }
         })
         .collect();

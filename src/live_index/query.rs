@@ -2452,6 +2452,7 @@ mod tests {
             sort_order: 0,
             byte_range: (0, 10),
             line_range: (0, 1),
+            doc_byte_range: None,
         }
     }
 
@@ -2582,6 +2583,7 @@ mod tests {
             sort_order: 0,
             byte_range: (0, 10),
             line_range: (line, line),
+            doc_byte_range: None,
         }
     }
 
@@ -2598,6 +2600,7 @@ mod tests {
             sort_order: 0,
             byte_range,
             line_range: (line, line),
+            doc_byte_range: None,
         }
     }
 
@@ -3080,6 +3083,7 @@ mod tests {
                 sort_order: 0,
                 byte_range: (0, 18),
                 line_range: (0, 0),
+                doc_byte_range: None,
             }],
         );
         let importer = make_file_with_refs_and_content(
@@ -3097,6 +3101,7 @@ mod tests {
                 sort_order: 0,
                 byte_range: (15, 38),
                 line_range: (1, 1),
+                doc_byte_range: None,
             }],
         );
         let index = make_index(vec![("src/db.rs", target), ("src/app.rs", importer)], false);
@@ -3123,6 +3128,7 @@ mod tests {
                 sort_order: 0,
                 byte_range: (0, 14),
                 line_range: (0, 0),
+                doc_byte_range: None,
             }],
         );
         let caller = make_file_with_refs_and_content(
@@ -3137,6 +3143,7 @@ mod tests {
                 sort_order: 0,
                 byte_range: (0, 28),
                 line_range: (0, 2),
+                doc_byte_range: None,
             }],
         );
         let index = make_index(vec![("src/lib.rs", target), ("src/app.rs", caller)], false);
@@ -3176,6 +3183,7 @@ mod tests {
                     sort_order: 0,
                     byte_range: (0, 30),
                     line_range: (0, 2),
+                    doc_byte_range: None,
                 },
                 SymbolRecord {
                     name: "helper".to_string(),
@@ -3184,6 +3192,7 @@ mod tests {
                     sort_order: 1,
                     byte_range: (31, 45),
                     line_range: (3, 3),
+                    doc_byte_range: None,
                 },
             ],
         );
@@ -3215,6 +3224,7 @@ mod tests {
                 sort_order: 0,
                 byte_range: (0, 52),
                 line_range: (0, 3),
+                doc_byte_range: None,
             }],
         );
         let index = make_index(vec![("src/db.rs", target), ("src/app.rs", caller)], false);
@@ -4152,6 +4162,7 @@ mod tests {
                 sort_order: 0,
                 byte_range: (0, 10),
                 line_range: (0, 0),
+                doc_byte_range: None,
             }],
         );
         let dependent = make_file_with_refs_and_content(
@@ -4224,6 +4235,7 @@ namespace CeRegistry.Api.Controllers {
                 sort_order: 0,
                 byte_range: (0, 10),
                 line_range: (0, 0),
+                doc_byte_range: None,
             }],
         );
         let dependent = make_file_with_refs_and_content(
@@ -4275,6 +4287,7 @@ namespace CeRegistry.Api.Controllers {
                 sort_order: 0,
                 byte_range: (0, 10),
                 line_range: (0, 0),
+                doc_byte_range: None,
             }],
         );
         let dependent = make_file_with_refs_and_content(
@@ -4336,6 +4349,7 @@ public class PacketsController {
                 sort_order: 0,
                 byte_range: (0, 10),
                 line_range: (0, 0),
+                doc_byte_range: None,
             }],
         );
         let dependent = make_file_with_refs_and_content(
@@ -4353,6 +4367,7 @@ public class PacketsController {
                 sort_order: 0,
                 byte_range: (0, 10),
                 line_range: (0, 0),
+                doc_byte_range: None,
             }],
         );
         let index = make_index(
@@ -4392,6 +4407,7 @@ public class PacketsController {
                 sort_order: 0,
                 byte_range: (0, 38),
                 line_range: (0, 0),
+                doc_byte_range: None,
             }],
         );
 
@@ -4480,6 +4496,7 @@ public class PacketsController {
                 sort_order: 0,
                 byte_range: (0, 35),
                 line_range: (0, 0),
+                doc_byte_range: None,
             }],
         );
 
@@ -4555,6 +4572,7 @@ public class PacketsController {
                 sort_order: 0,
                 byte_range: (0, 20),
                 line_range: (0, 0),
+                doc_byte_range: None,
             }],
         );
 
@@ -4711,6 +4729,7 @@ public class PacketsController {
                     sort_order: 0,
                     byte_range: (0, 500),
                     line_range: (0, 4),
+                    doc_byte_range: None,
                 },
                 SymbolRecord {
                     name: "UploadAsync".to_string(),
@@ -4719,6 +4738,7 @@ public class PacketsController {
                     sort_order: 1,
                     byte_range: (50, 400),
                     line_range: (1, 3),
+                    doc_byte_range: None,
                 },
             ],
         );
@@ -4800,6 +4820,7 @@ public class PacketsController {
                     sort_order: 0,
                     byte_range: (0, 40),
                     line_range: (0, 0),
+                    doc_byte_range: None,
                 },
                 SymbolRecord {
                     name: "other".to_string(),
@@ -4808,6 +4829,7 @@ public class PacketsController {
                     sort_order: 1,
                     byte_range: (41, 65),
                     line_range: (1, 1),
+                    doc_byte_range: None,
                 },
             ],
         );
@@ -4833,6 +4855,7 @@ public class PacketsController {
                 sort_order: 0,
                 byte_range: (0, config_body.len() as u32),
                 line_range: (0, 2),
+                doc_byte_range: None,
             }],
         );
         let index = make_index(vec![("src/config.rs", config_file)], false);
@@ -4868,6 +4891,7 @@ public class PacketsController {
                 sort_order: 0,
                 byte_range: (0, config_body.len() as u32),
                 line_range: (0, 1),
+                doc_byte_range: None,
             }],
         );
         let addr_file = make_file_with_refs_and_content(
@@ -4882,6 +4906,7 @@ public class PacketsController {
                 sort_order: 0,
                 byte_range: (0, addr_body.len() as u32),
                 line_range: (0, 1),
+                doc_byte_range: None,
             }],
         );
         let index = make_index(
@@ -4934,6 +4959,7 @@ public class PacketsController {
                         sort_order: 0,
                         byte_range: (0, leaked_body.len() as u32),
                         line_range: (0, 0),
+                        doc_byte_range: None,
                     }],
                 );
                 (leaked_path, f)

@@ -1076,6 +1076,7 @@ mod tests {
             sort_order: 0,
             byte_range: (0, 0),
             line_range: (line, line),
+            doc_byte_range: None,
         }
     }
 

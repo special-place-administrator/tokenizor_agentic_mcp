@@ -67,6 +67,7 @@ pub(super) fn push_symbol(
             node.start_position().row as u32,
             node.end_position().row as u32,
         ),
+        doc_byte_range: None,
     });
     *sort_order += 1;
 }

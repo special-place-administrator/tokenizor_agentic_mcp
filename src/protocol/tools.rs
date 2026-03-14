@@ -2665,6 +2665,7 @@ mod tests {
             sort_order: 0,
             byte_range: (0, 10),
             line_range: (line_start, line_end),
+            doc_byte_range: None,
         }
     }
 
@@ -5053,6 +5054,7 @@ mod tests {
             sort_order: 0,
             byte_range: (0, content.len() as u32),
             line_range: (0, 5),
+            doc_byte_range: None,
         };
         let (key, file) = make_file("src/error.rs", content, vec![sym]);
         let server = make_server(make_live_index_ready(vec![(key, file)]));

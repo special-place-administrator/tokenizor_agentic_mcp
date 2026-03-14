@@ -899,6 +899,7 @@ mod tests {
             sort_order: 0,
             byte_range: (0, 10),
             line_range: (0, 1),
+            doc_byte_range: None,
         }
     }
 

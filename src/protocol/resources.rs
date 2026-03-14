@@ -407,6 +407,7 @@ mod tests {
                 1,
                 content.iter().filter(|&&byte| byte == b'\n').count() as u32 + 1,
             ),
+            doc_byte_range: None,
         };
         let file = IndexedFile {
             relative_path: path.to_string(),

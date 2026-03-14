@@ -2421,6 +2421,7 @@ mod tests {
             sort_order: 0,
             byte_range: (0, 10),
             line_range: (line_start, line_end),
+            doc_byte_range: None,
         }
     }
 
@@ -2440,6 +2441,7 @@ mod tests {
             sort_order: 0,
             byte_range: (byte_start, byte_end),
             line_range: (line_start, line_end),
+            doc_byte_range: None,
         }
     }
 

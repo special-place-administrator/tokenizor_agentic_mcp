@@ -1007,6 +1007,7 @@ mod tests {
             sort_order: 0,
             byte_range,
             line_range: (line_start, line_start + 2),
+            doc_byte_range: None,
         }
     }
 
@@ -1405,6 +1406,7 @@ mod tests {
                 sort_order: 0,
                 byte_range: (0, 100),
                 line_range: (0, 10),
+                doc_byte_range: None,
             },
             SymbolRecord {
                 name: "display".to_string(),
@@ -1413,6 +1415,7 @@ mod tests {
                 sort_order: 1,
                 byte_range: (20, 80),
                 line_range: (2, 8),
+                doc_byte_range: None,
             },
         ]);
         let method = &file.symbols[1];
