@@ -296,7 +296,8 @@ pub struct LiveIndex {
     /// Snapshot reconciliation status for snapshot-restored indices.
     pub(crate) snapshot_verify_state: SnapshotVerifyState,
     /// Repo-level reverse index: reference name -> all locations in the index.
-    /// Rebuilt synchronously after every mutation (update_file, add_file, remove_file, reload).
+    /// Updated incrementally on single-file mutations (update_file, remove_file);
+    /// rebuilt from scratch on bulk operations (load, reload, snapshot restore).
     pub(crate) reverse_index: HashMap<String, Vec<ReferenceLocation>>,
     /// Secondary path index: lowercase basename -> sorted matching relative paths.
     pub(crate) files_by_basename: HashMap<String, Vec<String>>,
@@ -727,11 +728,12 @@ impl LiveIndex {
             self.remove_path_indices_for_path(&path);
         }
         self.trigram_index.update_file(&path, &file.content);
+        self.remove_reverse_index_for_path(&path);
         self.files.insert(path.clone(), Arc::new(file));
+        self.insert_reverse_index_for_path(&path);
         self.insert_path_indices_for_path(&path);
         self.is_empty = false;
         self.loaded_at_system = SystemTime::now();
-        self.rebuild_reverse_index();
     }
 
     /// Insert a new file into the index (alias for `update_file`).
@@ -748,17 +750,49 @@ impl LiveIndex {
     /// If the path is not present, this is a no-op (no timestamp update).
     /// If the path is found and removed, `loaded_at_system` is updated.
     pub fn remove_file(&mut self, path: &str) {
+        self.remove_reverse_index_for_path(path);
         if self.files.remove(path).is_some() {
             self.trigram_index.remove_file(path);
             self.remove_path_indices_for_path(path);
             self.loaded_at_system = SystemTime::now();
-            self.rebuild_reverse_index();
+        }
+    }
+
+    /// Remove reverse index entries for a single file path.
+    /// Must be called BEFORE removing the file from `self.files`.
+    fn remove_reverse_index_for_path(&mut self, path: &str) {
+        if let Some(file) = self.files.get(path) {
+            let names: Vec<String> = file.references.iter().map(|r| r.name.clone()).collect();
+            for name in names {
+                if let Some(locs) = self.reverse_index.get_mut(&name) {
+                    locs.retain(|loc| loc.file_path != path);
+                    if locs.is_empty() {
+                        self.reverse_index.remove(&name);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Insert reverse index entries for a single file path.
+    /// Must be called AFTER inserting the file into `self.files`.
+    fn insert_reverse_index_for_path(&mut self, path: &str) {
+        if let Some(file) = self.files.get(path) {
+            for (reference_idx, reference) in file.references.iter().enumerate() {
+                self.reverse_index
+                    .entry(reference.name.clone())
+                    .or_default()
+                    .push(ReferenceLocation {
+                        file_path: path.to_string(),
+                        reference_idx: reference_idx as u32,
+                    });
+            }
         }
     }
 
     /// Rebuild `reverse_index` from scratch by iterating all files' references.
     ///
-    /// Called synchronously after every mutation to keep the index consistent.
+    /// Used by bulk operations: `load()`, `reload()`, and snapshot restore.
     /// Maps reference name -> Vec of ReferenceLocation (file + index into references vec).
     pub(crate) fn rebuild_reverse_index(&mut self) {
         let mut idx: HashMap<String, Vec<ReferenceLocation>> = HashMap::new();
@@ -1768,6 +1802,165 @@ mod tests {
         assert!(
             index.reverse_index.is_empty(),
             "fresh index should have empty reverse index"
+        );
+    }
+
+    #[test]
+    fn test_incremental_reverse_index_matches_full_rebuild() {
+        let mut index = make_empty_live_index();
+
+        // Add two files with overlapping references
+        let refs_a = vec![
+            make_ref("shared_fn", ReferenceKind::Call, 1),
+            make_ref("only_a", ReferenceKind::Call, 5),
+        ];
+        let refs_b = vec![
+            make_ref("shared_fn", ReferenceKind::Call, 2),
+            make_ref("only_b", ReferenceKind::Call, 8),
+        ];
+        index.add_file(
+            "a.rs".to_string(),
+            make_indexed_file_with_refs("a.rs", refs_a),
+        );
+        index.add_file(
+            "b.rs".to_string(),
+            make_indexed_file_with_refs("b.rs", refs_b),
+        );
+
+        // Update a.rs with new references (triggers incremental update)
+        let refs_a_new = vec![
+            make_ref("shared_fn", ReferenceKind::Call, 1),
+            make_ref("replaced_a", ReferenceKind::Call, 10),
+        ];
+        index.update_file(
+            "a.rs".to_string(),
+            make_indexed_file_with_refs("a.rs", refs_a_new),
+        );
+
+        // Snapshot the incremental result
+        let incremental: HashMap<String, Vec<(String, u32)>> = index
+            .reverse_index
+            .iter()
+            .map(|(k, v)| {
+                let mut locs: Vec<(String, u32)> = v
+                    .iter()
+                    .map(|l| (l.file_path.clone(), l.reference_idx))
+                    .collect();
+                locs.sort();
+                (k.clone(), locs)
+            })
+            .collect();
+
+        // Now do a full rebuild and compare
+        index.rebuild_reverse_index();
+        let full_rebuild: HashMap<String, Vec<(String, u32)>> = index
+            .reverse_index
+            .iter()
+            .map(|(k, v)| {
+                let mut locs: Vec<(String, u32)> = v
+                    .iter()
+                    .map(|l| (l.file_path.clone(), l.reference_idx))
+                    .collect();
+                locs.sort();
+                (k.clone(), locs)
+            })
+            .collect();
+
+        assert_eq!(
+            incremental, full_rebuild,
+            "incremental update should produce same result as full rebuild"
+        );
+
+        // Verify specific expectations
+        assert!(
+            !index.reverse_index.contains_key("only_a"),
+            "only_a should be gone after update"
+        );
+        assert!(
+            index.reverse_index.contains_key("replaced_a"),
+            "replaced_a should be present"
+        );
+        assert!(
+            index.reverse_index.contains_key("only_b"),
+            "only_b should still be present from b.rs"
+        );
+        let shared = index.reverse_index.get("shared_fn").unwrap();
+        assert_eq!(shared.len(), 2, "shared_fn still referenced in both files");
+    }
+
+    #[test]
+    fn test_incremental_reverse_index_remove() {
+        let mut index = make_empty_live_index();
+
+        let refs_a = vec![
+            make_ref("common", ReferenceKind::Call, 1),
+            make_ref("unique_a", ReferenceKind::Call, 3),
+        ];
+        let refs_b = vec![
+            make_ref("common", ReferenceKind::Call, 2),
+            make_ref("unique_b", ReferenceKind::Call, 4),
+        ];
+        index.add_file(
+            "a.rs".to_string(),
+            make_indexed_file_with_refs("a.rs", refs_a),
+        );
+        index.add_file(
+            "b.rs".to_string(),
+            make_indexed_file_with_refs("b.rs", refs_b),
+        );
+
+        // Remove a.rs
+        index.remove_file("a.rs");
+
+        // unique_a should be gone entirely
+        assert!(
+            !index.reverse_index.contains_key("unique_a"),
+            "unique_a should be removed with a.rs"
+        );
+        // unique_b should remain
+        assert!(
+            index.reverse_index.contains_key("unique_b"),
+            "unique_b should survive"
+        );
+        // common should only have b.rs
+        let common_locs = index
+            .reverse_index
+            .get("common")
+            .expect("common should still exist from b.rs");
+        assert_eq!(common_locs.len(), 1);
+        assert_eq!(common_locs[0].file_path, "b.rs");
+
+        // Verify incremental matches full rebuild
+        let incremental: HashMap<String, Vec<(String, u32)>> = index
+            .reverse_index
+            .iter()
+            .map(|(k, v)| {
+                let mut locs: Vec<(String, u32)> = v
+                    .iter()
+                    .map(|l| (l.file_path.clone(), l.reference_idx))
+                    .collect();
+                locs.sort();
+                (k.clone(), locs)
+            })
+            .collect();
+
+        index.rebuild_reverse_index();
+        let full_rebuild: HashMap<String, Vec<(String, u32)>> = index
+            .reverse_index
+            .iter()
+            .map(|(k, v)| {
+                let mut locs: Vec<(String, u32)> = v
+                    .iter()
+                    .map(|l| (l.file_path.clone(), l.reference_idx))
+                    .collect();
+                locs.sort();
+                (k.clone(), locs)
+            })
+            .collect();
+
+        assert_eq!(
+            incremental, full_rebuild,
+            "incremental remove should match full rebuild"
         );
     }
 }
