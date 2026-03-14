@@ -763,6 +763,17 @@ fn search_text_options_from_input(
     })
 }
 
+/// Attempt to fix double-escaped regex character classes (e.g., `\\s` -> `\s`).
+/// Returns `Some(fixed)` if the pattern contains likely double-escaped sequences,
+/// `None` otherwise.
+fn fix_common_double_escapes(pattern: &str) -> Option<String> {
+    let re = regex::Regex::new(r"\\\\([sdwbntSDWB])").unwrap();
+    if !re.is_match(pattern) {
+        return None;
+    }
+    Some(re.replace_all(pattern, r"\$1").to_string())
+}
+
 fn enrich_with_callers(
     index: &crate::live_index::LiveIndex,
     result: &mut search::TextSearchResult,
@@ -1525,6 +1536,8 @@ impl TokenizorServer {
             Ok(options) => options,
             Err(message) => return message,
         };
+        let is_regex = params.0.regex.unwrap_or(false);
+        let original_query = params.0.query.clone();
         let result = {
             let guard = self.index.read().expect("lock poisoned");
             loading_guard!(guard);
@@ -1532,7 +1545,7 @@ impl TokenizorServer {
                 &guard,
                 params.0.query.as_deref(),
                 params.0.terms.as_deref(),
-                params.0.regex.unwrap_or(false),
+                is_regex,
                 &options,
             );
             // Enrich with callers if follow_refs is set
@@ -1544,6 +1557,56 @@ impl TokenizorServer {
             }
             r
         };
+
+        // Auto-correct double-escaped regex patterns: if regex=true and the
+        // result is InvalidRegex or Ok-but-empty, try fixing common
+        // double-escaped character classes (\\s → \s, \\d → \d, etc.).
+        if is_regex {
+            let should_retry = match &result {
+                Err(search::TextSearchError::InvalidRegex { .. }) => true,
+                Ok(r) if r.files.is_empty() => true,
+                _ => false,
+            };
+            if should_retry {
+                if let Some(ref query) = original_query {
+                    if let Some(fixed) = fix_common_double_escapes(query) {
+                        let retry_result = {
+                            let guard = self.index.read().expect("lock poisoned");
+                            loading_guard!(guard);
+                            let mut r = search::search_text_with_options(
+                                &guard,
+                                Some(fixed.as_str()),
+                                params.0.terms.as_deref(),
+                                true,
+                                &options,
+                            );
+                            if params.0.follow_refs.unwrap_or(false) {
+                                if let Ok(ref mut text_result) = r {
+                                    let limit = params.0.follow_refs_limit.unwrap_or(3) as usize;
+                                    enrich_with_callers(&guard, text_result, limit);
+                                }
+                            }
+                            r
+                        };
+                        // Use the retry result if it actually produced matches
+                        if let Ok(ref retry_ok) = retry_result {
+                            if !retry_ok.files.is_empty() {
+                                let mut output = format::search_text_result_view(
+                                    retry_result,
+                                    params.0.group_by.as_deref(),
+                                );
+                                output.push_str(&format!(
+                                    "\n(auto-corrected double-escaped regex: `{}` → `{}`)",
+                                    query, fixed
+                                ));
+                                return output;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         format::search_text_result_view(result, params.0.group_by.as_deref())
     }
 
@@ -4156,6 +4219,44 @@ mod tests {
         assert!(
             result.contains("whole_word is not supported when `regex=true`"),
             "expected regex/whole_word rejection, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_text_auto_corrects_double_escaped_regex() {
+        let (key, file) = make_file("src/handler.rs", b"fn handle_request() {}\n", vec![]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+
+        // Use a double-escaped \s (arrives as \\s in the JSON string)
+        let result = server
+            .search_text(Parameters(super::SearchTextInput {
+                query: Some(r"fn\\s+handle_".to_string()),
+                terms: None,
+                regex: Some(true),
+                path_prefix: None,
+                language: None,
+                limit: None,
+                max_per_file: None,
+                include_generated: None,
+                include_tests: None,
+                glob: None,
+                exclude_glob: None,
+                context: None,
+                case_sensitive: None,
+                whole_word: None,
+                group_by: None,
+                follow_refs: None,
+                follow_refs_limit: None,
+            }))
+            .await;
+
+        assert!(
+            result.contains("handle_request"),
+            "should find match after auto-correcting double-escaped regex, got: {result}"
+        );
+        assert!(
+            result.contains("auto-corrected"),
+            "should include auto-correction note, got: {result}"
         );
     }
 
