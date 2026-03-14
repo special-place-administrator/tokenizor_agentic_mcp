@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.23.2...v0.24.0) (2026-03-14)
+
+
+### Features
+
+* add tooling preference guide and challenge line to README ([8cd028c](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/8cd028cd320d62b75af84da1614955f630d0a07d))
+
 ## [0.23.2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.23.1...v0.23.2) (2026-03-14)
 
 
