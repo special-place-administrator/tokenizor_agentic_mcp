@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.3](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.22.2...v0.22.3) (2026-03-14)
+
+
+### Bug Fixes
+
+* filter explore noise from CONCEPT_MAP self-matching and generic terms ([8addfaa](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/8addfaaa4646144458ea1c71b1a9fa1de7728826))
+
 ## [0.22.2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.22.1...v0.22.2) (2026-03-14)
 
 
