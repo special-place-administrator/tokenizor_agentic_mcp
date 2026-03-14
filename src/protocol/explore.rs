@@ -23,7 +23,7 @@ pub const CONCEPT_MAP: &[(&str, ConceptPattern)] = &[
         "file watching",
         ConceptPattern {
             label: "File Watching",
-            symbol_queries: &["watcher", "notify", "debounce", "event"],
+            symbol_queries: &["watcher", "notify", "debounce", "event", "burst"],
             text_queries: &["notify::Event", "DebouncedEvent", "file_event", "inotify"],
             kind_filters: &[],
         },
@@ -186,7 +186,7 @@ pub const CONCEPT_MAP: &[(&str, ConceptPattern)] = &[
         "watcher",
         ConceptPattern {
             label: "File Watching",
-            symbol_queries: &["watcher", "notify", "debounce", "event"],
+            symbol_queries: &["watcher", "notify", "debounce", "event", "burst"],
             text_queries: &["notify::Event", "DebouncedEvent", "file_event", "inotify"],
             kind_filters: &[],
         },
