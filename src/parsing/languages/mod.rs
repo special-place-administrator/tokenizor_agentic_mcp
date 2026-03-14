@@ -409,4 +409,72 @@ mod tests {
             "should contain second doc line"
         );
     }
+
+    // --- extract_symbols integration tests ---
+
+    #[test]
+    fn test_extract_symbols_rust_populates_doc_range() {
+        // "/// My function\n" = 16 bytes (0..16)
+        // "/// Does stuff\n"  = 15 bytes (16..31)
+        // "pub fn foo() {}\n" = 16 bytes (31..47)
+        let source = "/// My function\n/// Does stuff\npub fn foo() {}\n";
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        parser.set_language(&lang).expect("set rust grammar");
+        let tree = parser.parse(source, None).expect("parse");
+        let symbols = extract_symbols(&tree.root_node(), source, &crate::domain::LanguageId::Rust);
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "foo");
+        let doc_range = symbols[0]
+            .doc_byte_range
+            .expect("should have doc_byte_range");
+        let doc_text = &source[doc_range.0 as usize..doc_range.1 as usize];
+        assert!(
+            doc_text.contains("/// My function"),
+            "missing first doc line"
+        );
+        assert!(
+            doc_text.contains("/// Does stuff"),
+            "missing second doc line"
+        );
+    }
+
+    #[test]
+    fn test_extract_symbols_python_no_doc_range() {
+        // Python # comments are never doc comments.
+        let source = "# A comment\ndef foo():\n    pass\n";
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
+        parser.set_language(&lang).expect("set python grammar");
+        let tree = parser.parse(source, None).expect("parse");
+        let symbols = extract_symbols(
+            &tree.root_node(),
+            source,
+            &crate::domain::LanguageId::Python,
+        );
+        assert_eq!(symbols.len(), 1);
+        assert!(
+            symbols[0].doc_byte_range.is_none(),
+            "Python # comment should not be detected as doc"
+        );
+    }
+
+    #[test]
+    fn test_extract_symbols_java_javadoc() {
+        // "/** Javadoc */\n" = 15 bytes (0..15)
+        // "class Foo {}\n"   = 13 bytes (15..28)
+        let source = "/** Javadoc */\nclass Foo {}\n";
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
+        parser.set_language(&lang).expect("set java grammar");
+        let tree = parser.parse(source, None).expect("parse");
+        let symbols = extract_symbols(&tree.root_node(), source, &crate::domain::LanguageId::Java);
+        let class_sym = symbols
+            .iter()
+            .find(|s| s.name == "Foo")
+            .expect("should find Foo");
+        let doc_range = class_sym.doc_byte_range.expect("should have Javadoc range");
+        let doc_text = &source[doc_range.0 as usize..doc_range.1 as usize];
+        assert!(doc_text.contains("/** Javadoc */"), "missing javadoc text");
+    }
 }
