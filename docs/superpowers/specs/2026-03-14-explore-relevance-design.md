@@ -18,17 +18,23 @@ Root causes:
 
 ### 1. Module-path boosting
 
-Add a Phase 0 to the explore handler, before symbol and text search:
+Add a Phase 0 to the explore handler, before symbol and text search. **Phase 0 runs unconditionally** — both for concept matches and fallback queries. For concept matches, Phase 0 uses the remainder terms (if any). For fallback queries, it uses all terms.
 
-For each query term, scan indexed file paths for segments matching the term (e.g., "watcher" matches `src/watcher/mod.rs`, `src/watcher/burst.rs`). For each matching file, inject all its symbols into `match_counts` with weight +2 (vs +1 for normal symbol/text matches).
+For each query term, scan indexed file paths for path segments matching the term. Matching rules:
+- **Exact segment match** (e.g., "watcher" == "watcher" in `src/watcher/mod.rs`): inject symbols with weight **+2**
+- **Substring segment match** (e.g., "watch" in "watcher"): inject symbols with weight **+1**
 
-This means:
-- A symbol from `src/watcher/mod.rs` gets +2 from module boosting for "watcher"
-- A symbol named `FileWatcher` from symbol search gets +1
+This two-tier weighting prevents common directory names like "test" or "src" from overwhelming results — a query for "test" would give +2 to `tests/` symbols but only +1 to `src/testing_utils.rs` symbols, and the per-directory cap (below) limits total injection.
+
+**Per-directory cap:** Inject at most `limit` symbols per matched directory to prevent a large directory (e.g., `tests/` with 174 symbols) from flooding `match_counts`. Within the cap, prefer symbols that already have matches from other phases (i.e., inject all, but the cap prevents extreme cases).
+
+Effective ranking:
+- A symbol from `src/watcher/mod.rs` gets +2 from exact module match for "watcher"
+- A symbol named `FileWatcher` elsewhere from symbol search gets +1
 - A symbol hitting both (e.g., `WatcherInfo` in `src/watcher/mod.rs`) gets +3
 - Regular "file" matches get +1 each, losing to the +2/+3 module-boosted results
 
-**Path matching:** Split the file path on `/` and `\`, check if any segment contains the query term (case-insensitive substring). This catches `src/watcher/mod.rs` for "watcher" and `src/error.rs` for "error".
+**Path matching:** Split the file path on `/` and `\`, compare each segment against the query term (case-insensitive). Exact match = +2, substring match = +1.
 
 **Performance:** Iterating all file paths is O(files × terms). With 326 files and 3 terms, this is ~1000 string comparisons — negligible.
 
@@ -43,20 +49,27 @@ pub fn match_concept(query: &str) -> Option<&'static ConceptPattern>
 
 New signature:
 ```rust
-pub fn match_concept(query: &str) -> Option<(&'static ConceptPattern, Vec<String>)>
+pub fn match_concept(query: &str) -> Option<(&'static str, &'static ConceptPattern)>
 ```
 
-The returned `Vec<String>` contains query words that aren't part of the matched concept key. Example:
-- Query: "error handling in the watcher"
-- Concept match: "error handling"
-- Remainder: ["watcher"] (filtered through a stopword list — see below)
+Returns the matched key and its pattern. The caller computes remainder terms from the query minus the matched key. This keeps `match_concept` a pure lookup with no allocation.
 
-**Stopword filtering for remainder terms:** The current `fallback_terms` only filters words < 2 chars. Remainder terms need stricter filtering to avoid noise from common English words. Add a stopword set: `{"a", "an", "the", "in", "on", "of", "for", "to", "and", "or", "is", "it", "my", "at", "by", "do", "no", "so", "up", "if"}`. Apply this filter when computing remainder terms (not in `fallback_terms` itself, to avoid breaking existing fallback behavior).
+**Remainder computation (in the explore handler, not in match_concept):**
+1. Remove the matched key's words from the query
+2. Apply stopword filter + length filter (>= 3 chars)
+3. Stopword set: `{"a", "an", "the", "in", "on", "of", "for", "to", "and", "or", "is", "it", "my", "at", "by", "do", "no", "so", "up", "if", "with", "from", "this", "that"}`
+
+Example:
+- Query: "error handling in the watcher"
+- Concept match key: "error handling"
+- Query minus key words: ["in", "the", "watcher"]
+- After stopword + length filter: ["watcher"]
 
 In the `explore` handler, when a concept matches:
 1. Run concept's curated `symbol_queries` and `text_queries` into `match_counts` (existing behavior)
-2. If remainder is non-empty, run remainder terms through the full fallback path (module boosting + symbol search + text search with enclosing symbol injection) into the same `match_counts`
-3. Sort and truncate as normal
+2. Compute remainder terms from query minus concept key
+3. If remainder is non-empty, run remainder through the full fallback path (module boosting + symbol search + text search with enclosing symbol injection) into the same `match_counts`
+4. Sort and truncate as normal
 
 This means "error handling in the watcher" produces results from BOTH the error-handling concept (curated queries for Error, Result, unwrap) AND the watcher fallback (module boost for `src/watcher/`, symbol/text search for "watcher"). Symbols matching both rank highest.
 
@@ -135,7 +148,7 @@ Also add aliases so both "file watching" and "watcher" match:
 
 **Key matching precision:** Short concept keys like "cli" and "api" risk substring collisions ("public**cli**ent" matches "cli", "c**api**tal" matches "api"). Fix:
 1. Sort `CONCEPT_MAP` entries by key length descending so longer, more specific keys match first ("authentication" before "api", "command line" before "cli")
-2. Use word-boundary matching instead of `contains`: split the query into words and check if the concept key appears as a contiguous subsequence of words. "cli tools" matches "cli", but "publiclient" does not.
+2. Use word-boundary matching: split both the query and the concept key on `split_whitespace()`, then check if the key's words appear as a contiguous subsequence of the query's words. "cli tools" matches "cli", but "clinical" does not. "error handling" matches as a 2-word subsequence in "error handling in the watcher". Underscore-separated terms are programming identifiers, not natural language — `split_whitespace()` is sufficient.
 
 **Call site updates for `match_concept` signature change:** 1 production call site (`tools.rs` explore handler) and 3 test call sites (`explore.rs` tests) need updating to destructure the new return type.
 
