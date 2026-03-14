@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.23.1...v0.23.2) (2026-03-14)
+
+
+### Bug Fixes
+
+* Gemini CLI init writes correct timeout (120000ms) and trust setting ([b8616eb](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/b8616eb1f5621872e050940b6756c9a04e707668))
+
 ## [0.23.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.23.0...v0.23.1) (2026-03-14)
 
 
