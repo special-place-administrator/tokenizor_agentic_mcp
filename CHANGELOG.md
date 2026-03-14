@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.22.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.21.3...v0.22.0) (2026-03-14)
+
+
+### Features
+
+* add module-path boosting to explore (Phase 0) ([2f7dac0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/2f7dac03d228beb673c16c418d78815a5e145619))
+* concept+remainder merging in explore ([c6e93bd](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/c6e93bd04ea9035a9c3a9ab279539f9ebb8ba1d1))
+* expand CONCEPT_MAP and add word-boundary matching ([f94e07d](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/f94e07dc29cb51f2055cf05ebea91946f02f1f1a))
+
 ## [0.21.3](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.21.2...v0.21.3) (2026-03-14)
 
 
