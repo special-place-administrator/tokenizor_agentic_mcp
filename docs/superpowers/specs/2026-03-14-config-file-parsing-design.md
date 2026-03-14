@@ -30,7 +30,7 @@ Update `from_extension()`:
 - `.toml` → Toml
 - `.yaml`, `.yml` → Yaml
 - `.md` → Markdown
-- `.env` → Env
+- `.env` → Env (note: `from_extension` extracts text after the last dot, so `.env` yields `"env"`. Dotenv variants like `.env.local`, `.env.production` yield `"local"`/`"production"` and are **out of scope for v1**. A future enhancement could match by filename prefix instead of extension.)
 
 ### SymbolKind (src/domain/index.rs)
 
@@ -45,7 +45,7 @@ Reuse existing `Variable` kind for `.env` entries.
 
 ### FileClassification (src/domain/index.rs)
 
-Add `Config` variant alongside `Source`/`Test`/`Generated` to distinguish config files from source when needed.
+`FileClassification` is a struct with fields `class: FileClass`, `is_generated: bool`, `is_test: bool`, `is_vendor: bool`. `FileClass` is an enum with `Code`, `Text`, `Binary`. Add `is_config: bool` field to the struct to distinguish config files from source when needed. Config files get `FileClass::Text` with `is_config: true`.
 
 ## Extractor Architecture
 
@@ -68,15 +68,15 @@ pub fn extract_config_symbols(content: &[u8], language: LanguageId) -> Vec<Symbo
 
 ### Integration point: src/parsing/mod.rs
 
-In `parse_source`: if the language is a config type, call `extract_config_symbols` instead of the tree-sitter pipeline. No tree-sitter parser is created for config files.
+In the public entry points `process_file` / `process_file_with_classification` (not the private `parse_source`): if the language is a config type, call `extract_config_symbols` instead of entering the tree-sitter pipeline. This branch must happen before `parse_source` is called, since `parse_source` immediately creates a tree-sitter `Parser`.
 
 ### Byte Range Strategy
 
 | Format | Parser | Byte range covers |
 |--------|--------|-------------------|
 | JSON | `serde_json` + manual byte offset tracking | Key start to value end (including quotes/braces) |
-| TOML | `toml_edit` (preserves spans via `Item::span()`) | Key-value pair including inline comment |
-| YAML | `serde_yaml` + line-based offset calculation | Key-value line(s) |
+| TOML | `toml_edit` (spans via `Item::span()` → `Option<Range<usize>>`, handle `None`) | Key-value pair including inline comment |
+| YAML | `serde_yml` + line-based offset calculation | Key-value line(s) |
 | Markdown | Regex line scan for `^#{1,6} ` | Header line to next same-or-higher-level header |
 | .env | Line scan for `KEY=value` | Full line |
 
@@ -128,7 +128,7 @@ Expected to work since they operate on byte ranges, not language-specific logic:
 
 - `replace_symbol_body` — resolves symbol, splices bytes, rewrites file. LLM is responsible for valid replacement content (e.g. proper JSON syntax).
 - `edit_within_symbol` — scoped find-and-replace within byte range.
-- `delete_symbol` — removes byte range. Note: deleting a JSON key may leave trailing commas. Acceptable for v1.
+- `delete_symbol` — removes byte range. **Known limitation**: deleting a JSON key may leave trailing commas, producing invalid JSON. The tool output should warn the user about this. Acceptable for v1; a future enhancement could add JSON-aware comma cleanup.
 
 ### PreToolUse Hook Update
 
@@ -140,7 +140,7 @@ After shipping, update `is_non_source_path` in `src/cli/hook.rs` to remove `.jso
 |-------|--------|---------|
 | `serde_json` | Already in deps | JSON parsing |
 | `toml_edit` | Already in deps | TOML parsing with span preservation |
-| `serde_yaml` | **New** (~50KB) | YAML parsing |
+| `serde_yml` | **New** (~50KB) | YAML parsing (`serde_yaml` is deprecated; `serde_yml` is the maintained successor) |
 
 No new deps for Markdown or .env (regex/line scan).
 
@@ -152,7 +152,7 @@ Per extractor:
 - **JSON**: nested objects → correct dot-paths, byte ranges. Depth limit at 6. Array indexing `[0]`..`[19]`, cap at 20.
 - **TOML**: tables, inline tables, arrays of tables.
 - **YAML**: mappings, sequences, multi-line values.
-- **Markdown**: ATX headers levels 1-6, nesting, consecutive headers, frontmatter skip.
+- **Markdown**: ATX headers levels 1-6, nesting, consecutive headers. Frontmatter (lines between opening and closing `---`) is ignored entirely — not parsed as YAML, not emitted as symbols.
 - **.env**: KEY=value, quoted values, comments, blank lines, no-value keys.
 
 ### Integration tests (tests/config_files.rs)
@@ -162,11 +162,12 @@ Per extractor:
 - `get_file_context` on TOML file returns structured outline.
 - `replace_symbol_body` on YAML key writes correct file.
 - File watcher picks up config file changes.
+- **Update existing test**: `test_discover_files_ignores_json_md_toml` in `src/discovery/mod.rs` explicitly asserts these files are NOT discovered. This test must be updated to expect discovery of config files.
 
 ### Edge cases
 
 - Empty files → zero symbols, no crash.
-- Malformed JSON/TOML/YAML → `ParseStatus::Failed`, zero symbols, fail-open.
+- Malformed JSON/TOML/YAML → `FileOutcome::Failed { error }`, zero symbols, fail-open.
 - Deeply nested (>6 levels) → symbols stop at depth 6.
 - Large arrays (>20 items) → capped.
 - Binary files with `.json` extension → detect and skip.
@@ -184,4 +185,5 @@ No concern. Config files are tiny compared to source code. A project with 50 con
 - [ ] File watcher re-indexes config files on change
 - [ ] PreToolUse hook intercepts config files after this ships
 - [ ] All edit tools work on config file symbols (byte-range accuracy)
-- [ ] Malformed files fail-open with ParseStatus::Failed, zero symbols
+- [ ] Malformed files fail-open with FileOutcome::Failed, zero symbols
+- [ ] Existing discovery test updated to expect config file discovery
