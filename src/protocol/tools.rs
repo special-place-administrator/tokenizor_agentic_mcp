@@ -2109,6 +2109,48 @@ impl TokenizorServer {
         // Phase 1: Symbol search — over-fetch and count term matches per symbol
         let mut match_counts: std::collections::HashMap<(String, String, String), usize> =
             std::collections::HashMap::new();
+
+        // Phase 0: Module-path boosting — symbols from files whose path segment
+        // matches a query term get a weight boost. +2 for exact segment match,
+        // +1 for substring segment match. Per-directory cap of `limit` symbols.
+        for term in &symbol_queries {
+            let term_lower = term.to_ascii_lowercase();
+            for (file_path, file) in guard.all_files() {
+                let segments: Vec<&str> = file_path.split(&['/', '\\'][..]).collect();
+                let best_match = segments
+                    .iter()
+                    .filter_map(|seg| {
+                        let seg_lower = seg.to_ascii_lowercase();
+                        let seg_stem = seg_lower
+                            .strip_suffix(".rs")
+                            .or_else(|| seg_lower.strip_suffix(".py"))
+                            .or_else(|| seg_lower.strip_suffix(".ts"))
+                            .or_else(|| seg_lower.strip_suffix(".js"))
+                            .or_else(|| seg_lower.strip_suffix(".go"))
+                            .unwrap_or(&seg_lower);
+                        if seg_stem == term_lower {
+                            Some(2usize)
+                        } else if seg_stem.contains(&*term_lower) {
+                            Some(1usize)
+                        } else {
+                            None
+                        }
+                    })
+                    .max();
+                if let Some(weight) = best_match {
+                    let mut injected = 0;
+                    for sym in &file.symbols {
+                        if injected >= limit {
+                            break;
+                        }
+                        let entry = (sym.name.clone(), sym.kind.to_string(), file_path.clone());
+                        *match_counts.entry(entry).or_default() += weight;
+                        injected += 1;
+                    }
+                }
+            }
+        }
+
         for sq in &symbol_queries {
             let result = search::search_symbols(&guard, sq, None, limit * 3);
             for hit in &result.hits {
@@ -5209,6 +5251,33 @@ mod tests {
         assert!(
             result.contains("BurstTracker"),
             "BurstTracker should appear via enclosing-symbol injection from debounce text hit, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_explore_module_path_boosting() {
+        let content = b"pub struct WatcherInfo {\n    debounce_ms: u64,\n}\n";
+        let watcher_sym = SymbolRecord {
+            name: "WatcherInfo".to_string(),
+            kind: SymbolKind::Struct,
+            depth: 0,
+            sort_order: 0,
+            byte_range: (0, content.len() as u32),
+            line_range: (0, 2),
+            doc_byte_range: None,
+        };
+        let (key, file) = make_file("src/watcher/mod.rs", content, vec![watcher_sym]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server
+            .explore(Parameters(super::ExploreInput {
+                query: "watcher".to_string(),
+                limit: Some(10),
+                depth: None,
+            }))
+            .await;
+        assert!(
+            result.contains("WatcherInfo"),
+            "WatcherInfo should appear via module-path boosting: {result}"
         );
     }
 
