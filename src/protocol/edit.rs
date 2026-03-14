@@ -1553,4 +1553,67 @@ mod tests {
         );
         assert_eq!(refs.len(), 2);
     }
+
+    // -- doc-aware build_delete and build_insert_before --
+
+    #[test]
+    fn test_build_delete_includes_doc_comments() {
+        // "/// Doc line 1\n" = 15 bytes (0..15)
+        // "/// Doc line 2\n" = 15 bytes (15..30)
+        // "pub fn foo() {}\n" = 16 bytes (30..46)
+        // "\n"               =  1 byte  (46..47)
+        // "fn bar() {}\n"    = 12 bytes (47..59)
+        let content = b"/// Doc line 1\n/// Doc line 2\npub fn foo() {}\n\nfn bar() {}\n";
+        let sym = SymbolRecord {
+            name: "foo".to_string(),
+            kind: SymbolKind::Function,
+            depth: 0,
+            sort_order: 0,
+            byte_range: (30, 46),
+            line_range: (2, 2),
+            doc_byte_range: Some((0, 30)),
+        };
+        let result = build_delete(content, &sym);
+        let result_str = String::from_utf8(result).unwrap();
+        assert!(
+            !result_str.contains("/// Doc line 1"),
+            "doc comments should be deleted"
+        );
+        assert!(
+            !result_str.contains("pub fn foo"),
+            "function body should be deleted"
+        );
+        assert!(
+            result_str.contains("fn bar()"),
+            "other function should remain"
+        );
+    }
+
+    #[test]
+    fn test_build_insert_before_goes_above_doc_comments() {
+        // "/// Doc for foo\n" = 16 bytes (0..16)
+        // "pub fn foo() {}\n" = 16 bytes (16..32)
+        let content = b"/// Doc for foo\npub fn foo() {}\n";
+        let sym = SymbolRecord {
+            name: "foo".to_string(),
+            kind: SymbolKind::Function,
+            depth: 0,
+            sort_order: 0,
+            byte_range: (16, 32),
+            line_range: (1, 1),
+            doc_byte_range: Some((0, 16)),
+        };
+        let result = build_insert_before(content, &sym, "use std::io;");
+        let result_str = String::from_utf8(result).unwrap();
+        let use_pos = result_str
+            .find("use std::io;")
+            .expect("inserted content missing");
+        let doc_pos = result_str
+            .find("/// Doc for foo")
+            .expect("doc comment missing");
+        assert!(
+            use_pos < doc_pos,
+            "insert should go above doc comments (use_pos={use_pos}, doc_pos={doc_pos})"
+        );
+    }
 }
