@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.22.0...v0.22.1) (2026-03-14)
+
+
+### Bug Fixes
+
+* add 'burst' to file watching concept symbol_queries ([930d8e8](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/930d8e87b053af0c1035e6518ca8b0c3ea46b1ee))
+
 ## [0.22.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.21.3...v0.22.0) (2026-03-14)
 
 
