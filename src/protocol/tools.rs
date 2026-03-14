@@ -2298,8 +2298,8 @@ impl TokenizorServer {
         };
         let old_bytes = (sym.byte_range.1 - sym.byte_range.0) as usize;
         // Splice at line start and apply indentation — same approach as insert tools.
-        let sym_start = sym.byte_range.0 as usize;
-        let line_start = file.content[..sym_start]
+        let effective = sym.effective_start() as usize;
+        let line_start = file.content[..effective]
             .iter()
             .rposition(|&b| b == b'\n')
             .map(|p| p + 1)

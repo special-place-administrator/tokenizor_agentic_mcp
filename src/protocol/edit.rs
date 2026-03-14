@@ -131,7 +131,7 @@ pub(crate) fn build_insert_before(
     sym: &SymbolRecord,
     new_code: &str,
 ) -> Vec<u8> {
-    let sym_start = sym.byte_range.0 as usize;
+    let sym_start = sym.effective_start() as usize;
     let line_start = file_content[..sym_start]
         .iter()
         .rposition(|&b| b == b'\n')
@@ -173,7 +173,7 @@ pub(crate) fn build_insert_after(
 pub(crate) fn build_delete(file_content: &[u8], sym: &SymbolRecord) -> Vec<u8> {
     // Extend to start of line (include leading whitespace).
     let start = {
-        let s = sym.byte_range.0 as usize;
+        let s = sym.effective_start() as usize;
         file_content[..s]
             .iter()
             .rposition(|&b| b == b'\n')
@@ -229,7 +229,7 @@ pub(crate) fn build_edit_within(
     new_text: &str,
     replace_all: bool,
 ) -> Result<(Vec<u8>, usize), String> {
-    let sym_start = sym.byte_range.0 as usize;
+    let sym_start = sym.effective_start() as usize;
     let sym_end = sym.byte_range.1 as usize;
     let body = &file_content[sym_start..sym_end];
     let body_str =
@@ -418,9 +418,13 @@ pub(crate) fn execute_batch_edit(
     for (path, indices) in &by_file {
         for i in 0..indices.len() {
             for j in (i + 1)..indices.len() {
-                let (a, b) = (
-                    resolved[indices[i]].sym.byte_range,
-                    resolved[indices[j]].sym.byte_range,
+                let a = (
+                    resolved[indices[i]].sym.effective_start(),
+                    resolved[indices[i]].sym.byte_range.1,
+                );
+                let b = (
+                    resolved[indices[j]].sym.effective_start(),
+                    resolved[indices[j]].sym.byte_range.1,
                 );
                 if a.0 < b.1 && b.0 < a.1 {
                     return Err(format!(
@@ -443,9 +447,8 @@ pub(crate) fn execute_batch_edit(
         indices.sort_by(|&a, &b| {
             resolved[b]
                 .sym
-                .byte_range
-                .0
-                .cmp(&resolved[a].sym.byte_range.0)
+                .effective_start()
+                .cmp(&resolved[a].sym.effective_start())
         });
     }
 
@@ -469,8 +472,8 @@ pub(crate) fn execute_batch_edit(
             match &edit.operation {
                 EditOperation::Replace { new_body } => {
                     let old_bytes = (r.sym.byte_range.1 - r.sym.byte_range.0) as usize;
-                    let sym_start = r.sym.byte_range.0 as usize;
-                    let line_start = content[..sym_start]
+                    let effective = r.sym.effective_start() as usize;
+                    let line_start = content[..effective]
                         .iter()
                         .rposition(|&b| b == b'\n')
                         .map(|p| p + 1)
