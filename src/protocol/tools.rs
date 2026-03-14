@@ -2102,22 +2102,18 @@ impl TokenizorServer {
                 (format!("'{}'", params.0.query), terms.clone(), terms)
             };
 
-        // Collect symbol matches
-        let mut symbol_hits: Vec<(String, String, String)> = Vec::new(); // (name, kind, path)
+        // Phase 1: Symbol search — over-fetch and count term matches per symbol
+        let mut match_counts: std::collections::HashMap<(String, String, String), usize> =
+            std::collections::HashMap::new();
         for sq in &symbol_queries {
-            let result = search::search_symbols(&guard, sq, None, limit);
+            let result = search::search_symbols(&guard, sq, None, limit * 3);
             for hit in &result.hits {
-                if symbol_hits.len() >= limit {
-                    break;
-                }
                 let entry = (hit.name.clone(), hit.kind.clone(), hit.path.clone());
-                if !symbol_hits.contains(&entry) {
-                    symbol_hits.push(entry);
-                }
+                *match_counts.entry(entry).or_default() += 1;
             }
         }
 
-        // Collect text pattern matches
+        // Phase 2: Text search — collect text hits and inject enclosing symbols into match_counts
         let mut text_hits: Vec<(String, String, usize)> = Vec::new(); // (path, line, line_number)
         for tq in &text_queries {
             let options = search::TextSearchOptions {
@@ -2129,17 +2125,25 @@ impl TokenizorServer {
             if let Ok(r) = result {
                 for file in &r.files {
                     for m in &file.matches {
-                        if text_hits.len() >= limit {
-                            break;
+                        if text_hits.len() < limit && !format::is_noise_line(&m.line) {
+                            text_hits.push((file.path.clone(), m.line.clone(), m.line_number));
                         }
-                        if format::is_noise_line(&m.line) {
-                            continue;
+                        // Inject enclosing symbol into match_counts
+                        if let Some(ref enc) = m.enclosing_symbol {
+                            let entry = (enc.name.clone(), enc.kind.clone(), file.path.clone());
+                            *match_counts.entry(entry).or_default() += 1;
                         }
-                        text_hits.push((file.path.clone(), m.line.clone(), m.line_number));
                     }
                 }
             }
         }
+
+        // Phase 3: Sort by match count descending, truncate to limit
+        let mut ranked: Vec<_> = match_counts.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.0.cmp(&b.0.0)));
+        ranked.truncate(limit);
+        let symbol_hits: Vec<(String, String, String)> =
+            ranked.into_iter().map(|(k, _)| k).collect();
 
         // Count files by symbol/text presence
         let mut file_counts: std::collections::HashMap<String, usize> =
@@ -5169,6 +5173,36 @@ mod tests {
         assert!(
             result.contains("pub enum Error"),
             "depth 2 should show signature, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_explore_multi_term_scoring_injects_enclosing_symbol() {
+        // BurstTracker contains "debounce" in its body; it won't match the symbol search for
+        // "debounce" (name mismatch) but the text search will find the word and inject the
+        // enclosing symbol into match_counts, so it should appear in results.
+        let content = b"pub struct BurstTracker {\n    debounce: u32,\n    burst_count: u32,\n}\n";
+        let burst_tracker = SymbolRecord {
+            name: "BurstTracker".to_string(),
+            kind: SymbolKind::Struct,
+            depth: 0,
+            sort_order: 0,
+            byte_range: (0, content.len() as u32),
+            line_range: (0, 3),
+            doc_byte_range: None,
+        };
+        let (key, file) = make_file("src/watcher.rs", content, vec![burst_tracker]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server
+            .explore(Parameters(super::ExploreInput {
+                query: "watcher debounce".to_string(),
+                limit: Some(10),
+                depth: None,
+            }))
+            .await;
+        assert!(
+            result.contains("BurstTracker"),
+            "BurstTracker should appear via enclosing-symbol injection from debounce text hit, got: {result}"
         );
     }
 
