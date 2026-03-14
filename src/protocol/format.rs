@@ -1115,6 +1115,11 @@ fn render_file_content_bytes(
     }
 
     if let Some(around_line) = context.around_line {
+        if around_line > line_count {
+            return format!(
+                "{path} [error: around_line={around_line} exceeds file length ({line_count} lines)]",
+            );
+        }
         return render_numbered_around_line_excerpt(
             &lines,
             around_line,
@@ -4755,6 +4760,13 @@ pub fn diff_symbols_result_view(
     lines.push(format!(
         "Summary: +{total_added} added, -{total_removed} removed, ~{total_modified} modified"
     ));
+    let files_with_symbol_changes = total_added + total_removed + total_modified;
+    if files_with_symbol_changes == 0 && !changed_files.is_empty() {
+        lines.push(format!(
+            "Note: {} file(s) changed but no symbol boundaries were affected (changes in comments, whitespace, or non-symbol code).",
+            changed_files.len()
+        ));
+    }
 
     lines.join("\n")
 }

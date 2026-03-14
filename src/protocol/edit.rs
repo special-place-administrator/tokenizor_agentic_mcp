@@ -566,6 +566,9 @@ pub struct BatchRenameInput {
     pub symbol_line: Option<u32>,
     /// New name for the symbol.
     pub new_name: String,
+    /// When true, show what would change without writing any files.
+    #[serde(default, deserialize_with = "super::tools::lenient_bool")]
+    pub dry_run: Option<bool>,
 }
 
 /// Rename a symbol and all its references across the project.
@@ -620,6 +623,24 @@ pub(crate) fn execute_batch_rename(
     for ranges in by_file.values_mut() {
         ranges.sort_by(|a, b| b.0.cmp(&a.0));
         ranges.dedup();
+    }
+
+    // Dry run: return preview without writing.
+    if input.dry_run.unwrap_or(false) {
+        let total_sites: usize = by_file.values().map(|r| r.len()).sum();
+        let mut lines = vec![format!(
+            "Dry run: `{}` → `{}` — {} site(s) across {} file(s)",
+            input.name,
+            input.new_name,
+            total_sites,
+            by_file.len(),
+        )];
+        let mut sorted_files: Vec<_> = by_file.iter().collect();
+        sorted_files.sort_by_key(|(p, _)| (*p).clone());
+        for (path, ranges) in sorted_files {
+            lines.push(format!("  {} ({} site(s))", path, ranges.len()));
+        }
+        return Ok(lines.join("\n"));
     }
 
     // Phase 4: Apply renames, write, reindex.
@@ -845,6 +866,7 @@ pub(crate) fn detect_stale_references(
     old_signature: &str,
     new_signature: &str,
     parent_type: Option<&str>,
+    source_language: Option<&crate::domain::LanguageId>,
 ) -> Vec<(String, u32, Option<String>)> {
     if old_signature == new_signature {
         return Vec::new();
@@ -864,6 +886,18 @@ pub(crate) fn detect_stale_references(
 
     refs.into_iter()
         .filter(|(ref_path, _)| *ref_path != path)
+        .filter(|(ref_path, _)| {
+            // Skip references in files of a different language to reduce false positives
+            // (e.g., Rust `add` flagging Python's `add`).
+            if let Some(lang) = source_language {
+                if let Some(ref_file) = guard.get_file(ref_path) {
+                    if ref_file.language != *lang {
+                        return false;
+                    }
+                }
+            }
+            true
+        })
         .filter(|(ref_path, _)| {
             // If we have a parent type filter, only keep refs in files that also mention it.
             match &type_files {
@@ -1513,6 +1547,7 @@ mod tests {
             "fn display(&self) {",
             "fn display(&self, verbose: bool) {",
             Some("Widget"),
+            None,
         );
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].0, "src/a.rs");
@@ -1556,6 +1591,7 @@ mod tests {
             "display",
             "fn display() {",
             "fn display(verbose: bool) {",
+            None,
             None,
         );
         assert_eq!(refs.len(), 2);

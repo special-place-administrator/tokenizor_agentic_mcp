@@ -42,7 +42,9 @@ pub(crate) fn lenient_u32<'de, D: Deserializer<'de>>(
 }
 
 /// Deserialize a `bool` from either a JSON boolean or a stringified boolean like `"true"`.
-fn lenient_bool<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
+pub(crate) fn lenient_bool<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum BoolOrStr {
@@ -2399,6 +2401,7 @@ impl TokenizorServer {
             &old_sig,
             &new_sig,
             parent_type.as_deref(),
+            Some(&file.language),
         );
         let mut result = edit_format::format_replace(
             &params.0.path,
@@ -6360,6 +6363,7 @@ mod tests {
             kind: None,
             symbol_line: None,
             new_name: "new_name".to_string(),
+            dry_run: None,
         };
         let result = server.batch_rename(Parameters(input)).await;
         assert!(result.contains("Renamed"), "result: {result}");
