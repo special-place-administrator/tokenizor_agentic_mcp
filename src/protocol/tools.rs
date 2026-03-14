@@ -1167,7 +1167,25 @@ impl TokenizorServer {
                     return message;
                 }
                 let view = self.index.published_repo_outline();
-                format::repo_outline_view(&view, &self.project_name)
+                if let Some(ref path) = params.0.path {
+                    // Filter outline to files under the given path prefix
+                    let filtered_files: Vec<_> = view
+                        .files
+                        .iter()
+                        .filter(|fo| fo.relative_path.starts_with(path.as_str()))
+                        .cloned()
+                        .collect();
+                    let filtered_symbols: usize =
+                        filtered_files.iter().map(|f| f.symbol_count).sum();
+                    let filtered_view = crate::live_index::query::RepoOutlineView {
+                        total_files: filtered_files.len(),
+                        total_symbols: filtered_symbols,
+                        files: filtered_files,
+                    };
+                    format::repo_outline_view(&filtered_view, &self.project_name)
+                } else {
+                    format::repo_outline_view(&view, &self.project_name)
+                }
             }
             "tree" => {
                 // Browsable file tree (old get_file_tree behavior)

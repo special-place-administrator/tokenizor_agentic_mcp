@@ -739,6 +739,7 @@ pub struct ReferenceFileView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FindReferencesView {
     pub total_refs: usize,
+    pub total_files: usize,
     pub files: Vec<ReferenceFileView>,
 }
 
@@ -1550,8 +1551,14 @@ impl LiveIndex {
             built += 1;
         }
 
+        let total_files = refs
+            .iter()
+            .map(|(f, _)| *f)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
         FindReferencesView {
             total_refs: refs.len(),
+            total_files,
             files: by_file
                 .into_iter()
                 .map(|(file_path, hits)| ReferenceFileView { file_path, hits })

@@ -1516,9 +1516,15 @@ pub fn find_references_result_view(
     }
 
     let total = view.total_refs;
-    let total_files = view.files.len();
-    let shown_files = total_files.min(limits.max_files);
-    let mut lines = vec![format!("{total} references in {total_files} files")];
+    let total_files = view.total_files;
+    let shown_files = view.files.len().min(limits.max_files);
+    let mut lines = if shown_files < total_files {
+        vec![format!(
+            "{total} references across {total_files} files (showing {shown_files})"
+        )]
+    } else {
+        vec![format!("{total} references in {total_files} files")]
+    };
     lines.push(String::new()); // blank line
 
     let mut total_emitted = 0usize;
@@ -1579,12 +1585,19 @@ pub fn find_references_compact_view(
         return format!("No references found for \"{name}\"");
     }
 
-    let total_files = view.files.len();
-    let shown_files = total_files.min(limits.max_files);
-    let mut lines = vec![format!(
-        "{} references to \"{}\" in {} files",
-        view.total_refs, name, total_files
-    )];
+    let total_files = view.total_files;
+    let shown_files = view.files.len().min(limits.max_files);
+    let mut lines = if shown_files < total_files {
+        vec![format!(
+            "{} references to \"{}\" across {} files (showing {})",
+            view.total_refs, name, total_files, shown_files
+        )]
+    } else {
+        vec![format!(
+            "{} references to \"{}\" in {} files",
+            view.total_refs, name, total_files
+        )]
+    };
 
     let mut total_emitted = 0usize;
     for file in view.files.iter().take(limits.max_files) {
