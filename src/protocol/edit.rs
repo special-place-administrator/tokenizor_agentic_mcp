@@ -124,8 +124,10 @@ pub(crate) fn apply_indentation(text: &str, indent: &[u8]) -> Vec<u8> {
 // Insert helpers
 // ---------------------------------------------------------------------------
 
-/// Build the bytes to insert before a symbol: indented content + blank line + existing content.
+/// Build the bytes to insert before a symbol: indented content + separator + existing content.
 /// Splices at the start of the line (before existing indentation) so indentation isn't doubled.
+/// Uses `\n\n` when the target symbol has no doc comments (visual separation between definitions),
+/// and `\n` when doc comments are present (keeps doc comment tight against its symbol).
 pub(crate) fn build_insert_before(
     file_content: &[u8],
     sym: &SymbolRecord,
@@ -140,9 +142,12 @@ pub(crate) fn build_insert_before(
     let indent = detect_indentation(file_content, sym.byte_range.0);
     let indented = apply_indentation(new_code, &indent);
     let mut insertion = indented;
-    // Single newline: the content is placed immediately before the symbol's line.
-    // Using \n\n would create an unwanted blank line between e.g. a doc comment and the symbol.
-    insertion.extend_from_slice(b"\n");
+    let separator = if sym.doc_byte_range.is_some() {
+        b"\n" as &[u8]
+    } else {
+        b"\n\n"
+    };
+    insertion.extend_from_slice(separator);
     apply_splice(file_content, (line_start, line_start), &insertion)
 }
 
@@ -1134,8 +1139,9 @@ mod tests {
         let sym = make_test_symbol("existing", SymbolKind::Function, (4, 20), 1);
         let result = build_insert_before(content, &sym, "fn new_fn() {}");
         let text = std::str::from_utf8(&result).unwrap();
+        // No doc comment on the symbol → expect \n\n separator for visual separation.
         assert!(
-            text.starts_with("    fn new_fn() {}\n    fn existing"),
+            text.starts_with("    fn new_fn() {}\n\n    fn existing"),
             "got: {text}"
         );
     }
@@ -1615,6 +1621,26 @@ mod tests {
         assert!(
             use_pos < doc_pos,
             "insert should go above doc comments (use_pos={use_pos}, doc_pos={doc_pos})"
+        );
+    }
+
+    #[test]
+    fn test_build_insert_before_double_newline_without_doc_comments() {
+        let content = b"struct Point { x: f64 }\n";
+        let sym = SymbolRecord {
+            name: "Point".to_string(),
+            kind: SymbolKind::Struct,
+            depth: 0,
+            sort_order: 0,
+            byte_range: (0, 23),
+            line_range: (0, 0),
+            doc_byte_range: None,
+        };
+        let result = build_insert_before(content, &sym, "struct Point3D { x: f64 }");
+        let result_str = String::from_utf8(result).unwrap();
+        assert!(
+            result_str.contains("Point3D { x: f64 }\n\nstruct Point"),
+            "should have \\n\\n separator when no doc comment: {result_str}"
         );
     }
 
