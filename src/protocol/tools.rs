@@ -2017,6 +2017,8 @@ impl TokenizorServer {
         if let Some(result) = self.proxy_tool_call("find_references", &params.0).await {
             return result;
         }
+        let limits =
+            format::OutputLimits::new(input.limit.unwrap_or(20), input.max_per_file.unwrap_or(10));
         let result = {
             let guard = self.index.read().expect("lock poisoned");
             loading_guard!(guard);
@@ -2027,13 +2029,16 @@ impl TokenizorServer {
                     input.symbol_kind.as_deref(),
                     input.symbol_line,
                     input.kind.as_deref(),
+                    limits.total_hits,
                 )
             } else {
-                Ok(guard.capture_find_references_view(&input.name, input.kind.as_deref()))
+                Ok(guard.capture_find_references_view(
+                    &input.name,
+                    input.kind.as_deref(),
+                    limits.total_hits,
+                ))
             }
         };
-        let limits =
-            format::OutputLimits::new(input.limit.unwrap_or(20), input.max_per_file.unwrap_or(10));
         match result {
             Ok(view) if input.compact.unwrap_or(false) => {
                 format::find_references_compact_view(&view, &input.name, &limits)

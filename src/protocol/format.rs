@@ -9,6 +9,8 @@ pub struct OutputLimits {
     pub max_files: usize,
     /// Maximum number of reference/hit lines per file.
     pub max_per_file: usize,
+    /// Maximum total hits across all files (max_files * max_per_file).
+    pub total_hits: usize,
 }
 
 impl OutputLimits {
@@ -16,6 +18,7 @@ impl OutputLimits {
         Self {
             max_files: max_files.min(100) as usize,
             max_per_file: max_per_file.min(50) as usize,
+            total_hits: (max_files.min(100) * max_per_file.min(50)) as usize,
         }
     }
 }
@@ -25,6 +28,7 @@ impl Default for OutputLimits {
         Self {
             max_files: 20,
             max_per_file: 10,
+            total_hits: 200,
         }
     }
 }
@@ -1497,8 +1501,9 @@ fn not_found_symbol_names(relative_path: &str, symbol_names: &[String], name: &s
 /// kind_filter: "call" | "import" | "type_usage" | "all" | None (all)
 /// Output format matches CONTEXT.md decision AD-6 (compact human-readable).
 pub fn find_references_result(index: &LiveIndex, name: &str, kind_filter: Option<&str>) -> String {
-    let view = index.capture_find_references_view(name, kind_filter);
-    find_references_result_view(&view, name, &OutputLimits::default())
+    let limits = OutputLimits::default();
+    let view = index.capture_find_references_view(name, kind_filter, limits.total_hits);
+    find_references_result_view(&view, name, &limits)
 }
 
 pub fn find_references_result_view(
@@ -1516,12 +1521,16 @@ pub fn find_references_result_view(
     let mut lines = vec![format!("{total} references in {total_files} files")];
     lines.push(String::new()); // blank line
 
+    let mut total_emitted = 0usize;
     for file in view.files.iter().take(limits.max_files) {
+        if total_emitted >= limits.total_hits {
+            break;
+        }
         lines.push(file.file_path.clone());
         let mut hit_count = 0usize;
         let mut truncated_hits = 0usize;
         for hit in &file.hits {
-            if hit_count >= limits.max_per_file {
+            if hit_count >= limits.max_per_file || total_emitted >= limits.total_hits {
                 truncated_hits += 1;
                 continue;
             }
@@ -1540,6 +1549,7 @@ pub fn find_references_result_view(
                 }
             }
             hit_count += 1;
+            total_emitted += 1;
         }
         if truncated_hits > 0 {
             lines.push(format!("  ... and {truncated_hits} more references"));
@@ -1576,12 +1586,16 @@ pub fn find_references_compact_view(
         view.total_refs, name, total_files
     )];
 
+    let mut total_emitted = 0usize;
     for file in view.files.iter().take(limits.max_files) {
+        if total_emitted >= limits.total_hits {
+            break;
+        }
         lines.push(file.file_path.clone());
         let mut hit_count = 0usize;
         let mut truncated_hits = 0usize;
         for hit in &file.hits {
-            if hit_count >= limits.max_per_file {
+            if hit_count >= limits.max_per_file || total_emitted >= limits.total_hits {
                 truncated_hits += 1;
                 continue;
             }
@@ -1592,6 +1606,7 @@ pub fn find_references_compact_view(
                 }
             }
             hit_count += 1;
+            total_emitted += 1;
         }
         if truncated_hits > 0 {
             lines.push(format!("  ... and {truncated_hits} more"));
@@ -3670,13 +3685,121 @@ mod tests {
         let index = make_index_with_reverse(vec![(key, file)]);
 
         let live_result = find_references_result(&index, "process", None);
+        let limits = OutputLimits::default();
         let captured_result = find_references_result_view(
-            &index.capture_find_references_view("process", None),
+            &index.capture_find_references_view("process", None, limits.total_hits),
             "process",
-            &OutputLimits::default(),
+            &limits,
         );
 
         assert_eq!(captured_result, live_result);
+    }
+
+    #[test]
+    fn test_find_references_result_view_total_limit_caps_across_files() {
+        // 3 files, each with 10 references → 30 total, but total_limit=15
+        let mut all_files = Vec::new();
+        for i in 0..3 {
+            let path = format!("src/file_{i}.rs");
+            let content = b"fn f() {}\nfn g() {}\nfn h() {}\n";
+            let refs: Vec<ReferenceRecord> = (0..10)
+                .map(|j| make_ref("target", ReferenceKind::Call, (j % 3) + 1, None))
+                .collect();
+            let (key, file) = make_file_with_refs(&path, content, vec![], refs);
+            all_files.push((key, file));
+        }
+        let index = make_index_with_reverse(all_files);
+        let view = index.capture_find_references_view("target", None, 200);
+
+        // Without total_hits limit, all 30 refs would be shown (max_per_file is high)
+        let unlimited = OutputLimits {
+            max_files: 100,
+            max_per_file: 100,
+            total_hits: usize::MAX,
+        };
+        let unlimited_result = find_references_result_view(&view, "target", &unlimited);
+        assert!(
+            !unlimited_result.contains("more references"),
+            "unlimited should show all refs"
+        );
+
+        // With total_hits=15, only 15 refs should be emitted
+        let limits = OutputLimits {
+            max_files: 100,
+            max_per_file: 100,
+            total_hits: 15,
+        };
+        let result = find_references_result_view(&view, "target", &limits);
+
+        // file_0 gets 10 hits, file_1 gets 5 hits before total_limit reached,
+        // file_1 has 5 truncated, file_2 is skipped entirely
+        assert!(
+            result.contains("... and 5 more references"),
+            "file_1 should show 5 truncated hits, got:\n{result}"
+        );
+        // file_2 should not appear (total_limit already reached before it)
+        assert!(
+            !result.contains("src/file_2.rs"),
+            "file_2 should be skipped, got:\n{result}"
+        );
+    }
+
+    #[test]
+    fn test_find_references_result_view_per_file_limit_within_total() {
+        // 1 file with 20 references, max_per_file=5, total_hits=100
+        let content = b"fn a() {}\nfn b() {}\nfn c() {}\n";
+        let refs: Vec<ReferenceRecord> = (0..20)
+            .map(|j| make_ref("target", ReferenceKind::Call, (j % 3) + 1, None))
+            .collect();
+        let (key, file) = make_file_with_refs("src/lib.rs", content, vec![], refs);
+        let index = make_index_with_reverse(vec![(key, file)]);
+        let view = index.capture_find_references_view("target", None, 200);
+
+        let limits = OutputLimits {
+            max_files: 100,
+            max_per_file: 5,
+            total_hits: 100,
+        };
+        let result = find_references_result_view(&view, "target", &limits);
+
+        // Should show 5 refs and truncate 15
+        assert!(
+            result.contains("... and 15 more references"),
+            "expected per-file truncation, got:\n{result}"
+        );
+    }
+
+    #[test]
+    fn test_find_references_compact_view_total_limit_caps_across_files() {
+        let mut all_files = Vec::new();
+        for i in 0..3 {
+            let path = format!("src/file_{i}.rs");
+            let content = b"fn f() {}\nfn g() {}\nfn h() {}\n";
+            let refs: Vec<ReferenceRecord> = (0..10)
+                .map(|j| make_ref("target", ReferenceKind::Call, (j % 3) + 1, None))
+                .collect();
+            let (key, file) = make_file_with_refs(&path, content, vec![], refs);
+            all_files.push((key, file));
+        }
+        let index = make_index_with_reverse(all_files);
+        let view = index.capture_find_references_view("target", None, 200);
+
+        let limits = OutputLimits {
+            max_files: 100,
+            max_per_file: 100,
+            total_hits: 15,
+        };
+        let result = find_references_compact_view(&view, "target", &limits);
+
+        // file_0 gets 10 hits, file_1 gets 5 hits, file_1 truncates 5, file_2 skipped
+        assert!(
+            result.contains("... and 5 more"),
+            "file_1 should show 5 truncated in compact view, got:\n{result}"
+        );
+        assert!(
+            !result.contains("src/file_2.rs"),
+            "file_2 should be skipped in compact view, got:\n{result}"
+        );
     }
 
     // ─── find_dependents_result tests ─────────────────────────────────────

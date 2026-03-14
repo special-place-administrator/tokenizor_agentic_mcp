@@ -1341,10 +1341,11 @@ impl LiveIndex {
         &self,
         name: &str,
         kind_filter: Option<&str>,
+        total_limit: usize,
     ) -> FindReferencesView {
         let kind_enum = parse_reference_kind_filter(kind_filter);
         let refs = self.find_references_for_name(name, kind_enum, false);
-        self.build_find_references_view(&refs)
+        self.build_find_references_view(&refs, total_limit)
     }
 
     /// Find all implementations of a trait/interface, or all traits a type implements.
@@ -1405,11 +1406,12 @@ impl LiveIndex {
         symbol_kind: Option<&str>,
         symbol_line: Option<u32>,
         kind_filter: Option<&str>,
+        total_limit: usize,
     ) -> Result<FindReferencesView, String> {
         let kind_enum = parse_reference_kind_filter(kind_filter);
         let refs =
             self.find_exact_references_for_symbol(path, name, symbol_kind, symbol_line, kind_enum)?;
-        Ok(self.build_find_references_view(&refs))
+        Ok(self.build_find_references_view(&refs, total_limit))
     }
 
     pub fn find_exact_references_for_symbol<'a>(
@@ -1489,11 +1491,19 @@ impl LiveIndex {
         refs
     }
 
-    fn build_find_references_view(&self, refs: &[(&str, &ReferenceRecord)]) -> FindReferencesView {
+    fn build_find_references_view(
+        &self,
+        refs: &[(&str, &ReferenceRecord)],
+        total_limit: usize,
+    ) -> FindReferencesView {
         let mut by_file: std::collections::BTreeMap<String, Vec<ReferenceHitView>> =
             std::collections::BTreeMap::new();
 
+        let mut built = 0usize;
         for (file_path, reference) in refs {
+            if built >= total_limit {
+                break;
+            }
             let Some(file) = self.get_file(file_path) else {
                 continue;
             };
@@ -1537,6 +1547,7 @@ impl LiveIndex {
                 .entry((*file_path).to_string())
                 .or_default()
                 .push(ReferenceHitView { context_lines });
+            built += 1;
         }
 
         FindReferencesView {
@@ -3148,7 +3159,7 @@ mod tests {
         );
         let index = make_index(vec![("src/lib.rs", target), ("src/app.rs", caller)], false);
 
-        let view = index.capture_find_references_view("process", Some("call"));
+        let view = index.capture_find_references_view("process", Some("call"), 200);
 
         assert_eq!(view.total_refs, 1);
         assert_eq!(view.files.len(), 1);
@@ -3922,6 +3933,7 @@ mod tests {
                 Some("fn"),
                 Some(1),
                 Some("call"),
+                200,
             )
             .expect("exact selector should resolve");
 
@@ -3951,6 +3963,7 @@ mod tests {
                 Some("fn"),
                 None,
                 Some("call"),
+                200,
             )
             .expect_err("selector without line should be ambiguous");
 
