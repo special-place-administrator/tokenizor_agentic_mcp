@@ -2073,6 +2073,26 @@ impl TokenizorServer {
         }
     }
 
+    /// Extract query terms that aren't part of the matched concept key,
+    /// filtering out stopwords and short words.
+    fn compute_remainder_terms(query: &str, concept_key: &str) -> Vec<String> {
+        const STOPWORDS: &[&str] = &[
+            "a", "an", "the", "in", "on", "of", "for", "to", "and", "or", "is", "it", "my", "at",
+            "by", "do", "no", "so", "up", "if", "with", "from", "this", "that",
+        ];
+        let key_words: Vec<&str> = concept_key.split_whitespace().collect();
+        query
+            .split_whitespace()
+            .filter(|w| {
+                let lower = w.to_ascii_lowercase();
+                !key_words.iter().any(|kw| kw.eq_ignore_ascii_case(w))
+                    && !STOPWORDS.contains(&lower.as_str())
+                    && lower.len() >= 3
+            })
+            .map(|w| w.to_ascii_lowercase())
+            .collect()
+    }
+
     /// Start here when you don't know where to look. Accepts a natural-language concept
     /// and returns related symbols, patterns, and files. Set depth=2 for signatures and
     /// dependents of top symbols (~1500 tokens). Set depth=3 for implementations and type
@@ -2091,20 +2111,33 @@ impl TokenizorServer {
 
         let concept = super::explore::match_concept(&params.0.query);
 
-        let (label, symbol_queries, text_queries): (String, Vec<String>, Vec<String>) =
-            if let Some((_key, c)) = concept {
-                (
-                    c.label.to_string(),
-                    c.symbol_queries.iter().map(|s| s.to_string()).collect(),
-                    c.text_queries.iter().map(|s| s.to_string()).collect(),
-                )
-            } else {
-                let terms = super::explore::fallback_terms(&params.0.query);
-                if terms.is_empty() {
-                    return "Explore requires a non-empty query.".to_string();
-                }
-                (format!("'{}'", params.0.query), terms.clone(), terms)
-            };
+        let (label, symbol_queries, text_queries, remainder_terms) = if let Some((key, c)) = concept
+        {
+            let remainder = Self::compute_remainder_terms(&params.0.query, key);
+            (
+                c.label.to_string(),
+                c.symbol_queries
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>(),
+                c.text_queries
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>(),
+                remainder,
+            )
+        } else {
+            let terms = super::explore::fallback_terms(&params.0.query);
+            if terms.is_empty() {
+                return "Explore requires a non-empty query.".to_string();
+            }
+            (
+                format!("'{}'", params.0.query),
+                terms.clone(),
+                terms,
+                vec![],
+            )
+        };
 
         // Phase 1: Symbol search — over-fetch and count term matches per symbol
         let mut match_counts: std::collections::HashMap<(String, String, String), usize> =
@@ -2113,7 +2146,14 @@ impl TokenizorServer {
         // Phase 0: Module-path boosting — symbols from files whose path segment
         // matches a query term get a weight boost. +2 for exact segment match,
         // +1 for substring segment match. Per-directory cap of `limit` symbols.
-        for term in &symbol_queries {
+        // For concept+remainder queries, boost on remainder terms only so path-scoping
+        // is driven by the narrowing terms (e.g., "watcher" in "error handling in the watcher").
+        let boost_terms = if remainder_terms.is_empty() {
+            symbol_queries.clone()
+        } else {
+            remainder_terms.clone()
+        };
+        for term in &boost_terms {
             let term_lower = term.to_ascii_lowercase();
             for (file_path, file) in guard.all_files() {
                 let segments: Vec<&str> = file_path.split(&['/', '\\'][..]).collect();
@@ -2151,7 +2191,14 @@ impl TokenizorServer {
             }
         }
 
-        for sq in &symbol_queries {
+        // Merge remainder terms into symbol/text queries for Phases 1-2 so that compound
+        // queries like "error handling in the watcher" search concept queries AND "watcher".
+        let mut all_symbol_queries = symbol_queries.clone();
+        all_symbol_queries.extend(remainder_terms.iter().cloned());
+        let mut all_text_queries = text_queries.clone();
+        all_text_queries.extend(remainder_terms.iter().cloned());
+
+        for sq in &all_symbol_queries {
             let result = search::search_symbols(&guard, sq, None, limit * 3);
             for hit in &result.hits {
                 let entry = (hit.name.clone(), hit.kind.clone(), hit.path.clone());
@@ -2161,7 +2208,7 @@ impl TokenizorServer {
 
         // Phase 2: Text search — collect text hits and inject enclosing symbols into match_counts
         let mut text_hits: Vec<(String, String, usize)> = Vec::new(); // (path, line, line_number)
-        for tq in &text_queries {
+        for tq in &all_text_queries {
             let options = search::TextSearchOptions {
                 total_limit: limit.min(50),
                 max_per_file: limit, // need enough matches per file for enclosing symbol extraction
@@ -5278,6 +5325,60 @@ mod tests {
         assert!(
             result.contains("WatcherInfo"),
             "WatcherInfo should appear via module-path boosting: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_explore_concept_plus_remainder() {
+        let content = b"pub fn handle_watcher_error() {}\n";
+        let sym = SymbolRecord {
+            name: "handle_watcher_error".to_string(),
+            kind: SymbolKind::Function,
+            depth: 0,
+            sort_order: 0,
+            byte_range: (0, content.len() as u32),
+            line_range: (0, 0),
+            doc_byte_range: None,
+        };
+        let (key, file) = make_file("src/watcher/errors.rs", content, vec![sym]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server
+            .explore(Parameters(super::ExploreInput {
+                query: "error handling in the watcher".to_string(),
+                limit: Some(10),
+                depth: None,
+            }))
+            .await;
+        assert!(
+            result.contains("handle_watcher_error") || result.contains("watcher"),
+            "concept+remainder should surface watcher results: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_explore_exact_concept_no_remainder() {
+        let content = b"pub enum TokenizorError {}\n";
+        let sym = SymbolRecord {
+            name: "TokenizorError".to_string(),
+            kind: SymbolKind::Enum,
+            depth: 0,
+            sort_order: 0,
+            byte_range: (0, content.len() as u32),
+            line_range: (0, 0),
+            doc_byte_range: None,
+        };
+        let (key, file) = make_file("src/error.rs", content, vec![sym]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server
+            .explore(Parameters(super::ExploreInput {
+                query: "error handling".to_string(),
+                limit: Some(10),
+                depth: None,
+            }))
+            .await;
+        assert!(
+            result.contains("TokenizorError"),
+            "exact concept should find error symbols: {result}"
         );
     }
 
