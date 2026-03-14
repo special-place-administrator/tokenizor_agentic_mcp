@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.24.0...v0.25.0) (2026-03-14)
+
+
+### Features
+
+* PreToolUse hook intercepts Grep/Read/Glob/Edit with Tokenizor suggestions ([1c78000](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/1c780008662d9fb1c5cf1d7e573df64e04a23807))
+
 ## [0.24.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.23.2...v0.24.0) (2026-03-14)
 
 
