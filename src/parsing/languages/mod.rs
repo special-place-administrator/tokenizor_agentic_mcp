@@ -19,6 +19,87 @@ use tree_sitter::Node;
 
 use crate::domain::{LanguageId, SymbolKind, SymbolRecord};
 
+/// Per-language configuration for detecting doc comments.
+pub(super) struct DocCommentSpec {
+    /// Tree-sitter node type names that could be doc comments.
+    pub comment_node_types: &'static [&'static str],
+    /// Text prefixes that distinguish doc from regular comments.
+    /// `None` = all comments of matching node types are doc comments.
+    pub doc_prefixes: Option<&'static [&'static str]>,
+    /// Optional custom check for non-comment doc patterns (e.g., Elixir `@doc`).
+    pub custom_doc_check: Option<fn(&Node, &str) -> bool>,
+}
+
+/// Spec for languages with no doc comment detection (Python, Dart).
+pub(super) const NO_DOC_SPEC: DocCommentSpec = DocCommentSpec {
+    comment_node_types: &[],
+    doc_prefixes: None,
+    custom_doc_check: None,
+};
+
+/// Walk backward through `node`'s preceding siblings to find attached doc comments.
+/// Returns `Some((earliest_start_byte, latest_end_byte))` or `None`.
+pub(super) fn scan_doc_range(
+    node: &Node,
+    source: &str,
+    spec: &DocCommentSpec,
+) -> Option<(u32, u32)> {
+    if spec.comment_node_types.is_empty() && spec.custom_doc_check.is_none() {
+        return None;
+    }
+
+    let mut earliest_start: Option<u32> = None;
+    let mut latest_end: Option<u32> = None;
+    let mut next_start_row = node.start_position().row;
+    let mut sibling_opt = node.prev_sibling();
+
+    while let Some(sibling) = sibling_opt {
+        let is_comment_node = spec.comment_node_types.contains(&sibling.kind());
+        let is_custom_doc = spec
+            .custom_doc_check
+            .map_or(false, |check| check(&sibling, source));
+
+        if !is_comment_node && !is_custom_doc {
+            break;
+        }
+
+        // Blank line check: gap > 1 line means detached.
+        // Use start_position().row because some grammars include trailing
+        // newlines in the node span, inflating end_position().row.
+        let sibling_start_row = sibling.start_position().row;
+        if next_start_row > sibling_start_row + 1 {
+            break;
+        }
+
+        // If doc_prefixes is set, check the text prefix.
+        if is_comment_node {
+            if let Some(prefixes) = spec.doc_prefixes {
+                let text_start = sibling.start_byte();
+                let text_end = sibling.end_byte();
+                if text_end <= source.len() {
+                    let text = &source[text_start..text_end];
+                    let trimmed = text.trim_start();
+                    if !prefixes.iter().any(|p| trimmed.starts_with(p)) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let sb = sibling.start_byte() as u32;
+        let eb = sibling.end_byte() as u32;
+        earliest_start = Some(earliest_start.map_or(sb, |prev| prev.min(sb)));
+        if latest_end.is_none() {
+            latest_end = Some(eb);
+        }
+
+        next_start_row = sibling.start_position().row;
+        sibling_opt = sibling.prev_sibling();
+    }
+
+    earliest_start.map(|start| (start, latest_end.unwrap()))
+}
+
 type WalkNodeFn = fn(&Node, &str, u32, &mut u32, &mut Vec<SymbolRecord>);
 
 pub fn extract_symbols(node: &Node, source: &str, language: &LanguageId) -> Vec<SymbolRecord> {
@@ -196,5 +277,101 @@ mod tests {
         let found = find_first_named_child(&item, source, &["type_identifier", "identifier"]);
 
         assert_eq!(found.as_deref(), Some("Example"));
+    }
+
+    // --- scan_doc_range tests ---
+
+    fn parse_go(source: &str) -> tree_sitter::Tree {
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_go::LANGUAGE.into();
+        parser.set_language(&lang).expect("set go grammar");
+        parser.parse(source, None).expect("parse go source")
+    }
+
+    const RUST_DOC_SPEC: DocCommentSpec = DocCommentSpec {
+        comment_node_types: &["line_comment", "block_comment"],
+        doc_prefixes: Some(&["///", "//!", "/**", "/*!"]),
+        custom_doc_check: None,
+    };
+
+    const GO_DOC_SPEC: DocCommentSpec = DocCommentSpec {
+        comment_node_types: &["comment"],
+        doc_prefixes: None,
+        custom_doc_check: None,
+    };
+
+    #[test]
+    fn test_scan_doc_range_rust_doc_comments() {
+        let source = "/// Doc line 1\n/// Doc line 2\npub fn foo() {}\n";
+        let tree = parse_rust(source);
+        let root = tree.root_node();
+        let function = first_named_descendant(&root, "function_item");
+
+        let range = scan_doc_range(&function, source, &RUST_DOC_SPEC);
+
+        assert!(range.is_some(), "expected doc range for /// comments");
+        let (start, end) = range.unwrap();
+        let doc_text = &source[start as usize..end as usize];
+        assert!(doc_text.contains("Doc line 1"), "should contain first doc line");
+        assert!(doc_text.contains("Doc line 2"), "should contain second doc line");
+    }
+
+    #[test]
+    fn test_scan_doc_range_regular_comment_not_captured() {
+        let source = "// Regular comment\npub fn foo() {}\n";
+        let tree = parse_rust(source);
+        let root = tree.root_node();
+        let function = first_named_descendant(&root, "function_item");
+
+        let range = scan_doc_range(&function, source, &RUST_DOC_SPEC);
+
+        assert!(range.is_none(), "regular // comment should not be captured as doc");
+    }
+
+    #[test]
+    fn test_scan_doc_range_blank_line_stops_scan() {
+        let source = "/// Detached doc\n\n/// Attached doc\npub fn foo() {}\n";
+        let tree = parse_rust(source);
+        let root = tree.root_node();
+        let function = first_named_descendant(&root, "function_item");
+
+        let range = scan_doc_range(&function, source, &RUST_DOC_SPEC);
+
+        assert!(range.is_some(), "expected doc range for attached comment");
+        let (start, end) = range.unwrap();
+        let doc_text = &source[start as usize..end as usize];
+        assert!(doc_text.contains("Attached doc"), "should contain attached doc");
+        assert!(!doc_text.contains("Detached doc"), "should NOT contain detached doc");
+    }
+
+    #[test]
+    fn test_scan_doc_range_no_doc_spec_returns_none() {
+        let source = "/// Doc comment\npub fn foo() {}\n";
+        let tree = parse_rust(source);
+        let root = tree.root_node();
+        let function = first_named_descendant(&root, "function_item");
+
+        let range = scan_doc_range(&function, source, &NO_DOC_SPEC);
+
+        assert!(range.is_none(), "NO_DOC_SPEC should always return None");
+    }
+
+    #[test]
+    fn test_scan_doc_range_all_adjacent_comments_go_style() {
+        let source = "// Package doc\n// More doc\nfunc Foo() {}\n";
+        let tree = parse_go(source);
+        let root = tree.root_node();
+        let function = root
+            .children(&mut root.walk())
+            .find(|child| child.kind() == "function_declaration")
+            .expect("expected function_declaration");
+
+        let range = scan_doc_range(&function, source, &GO_DOC_SPEC);
+
+        assert!(range.is_some(), "expected doc range for Go comments");
+        let (start, end) = range.unwrap();
+        let doc_text = &source[start as usize..end as usize];
+        assert!(doc_text.contains("Package doc"), "should contain first doc line");
+        assert!(doc_text.contains("More doc"), "should contain second doc line");
     }
 }
