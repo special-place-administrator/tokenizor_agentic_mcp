@@ -229,6 +229,7 @@ pub fn merge_tokenizor_hooks(settings: &mut Value, binary_path: &str) {
 
     // Build fresh tokenizor entries.
     let post_tool_use_entries = build_post_tool_use_entries(binary_path);
+    let pre_tool_use_entries = build_pre_tool_use_entries(binary_path);
     let session_start_entries = build_session_start_entries(binary_path);
     let user_prompt_submit_entries = build_user_prompt_submit_entries(binary_path);
 
@@ -237,6 +238,7 @@ pub fn merge_tokenizor_hooks(settings: &mut Value, binary_path: &str) {
             .as_object_mut()
             .expect("hooks is an object");
         merge_event_entries(hooks, "PostToolUse", post_tool_use_entries);
+        merge_event_entries(hooks, "PreToolUse", pre_tool_use_entries);
         merge_event_entries(hooks, "SessionStart", session_start_entries);
         merge_event_entries(hooks, "UserPromptSubmit", user_prompt_submit_entries);
     }
@@ -253,6 +255,29 @@ fn build_post_tool_use_entries(binary_path: &str) -> Vec<Value> {
         "matcher": "Read|Edit|Write|Grep",
         "hooks": [{"type": "command", "command": format!("{binary_path} hook"), "timeout": 5}]
     })]
+}
+
+fn build_pre_tool_use_entries(binary_path: &str) -> Vec<Value> {
+    // One entry per tool so matchers are specific. The pre-tool handler reads
+    // the tool_name from stdin and outputs a suggestion — no sidecar needed.
+    vec![
+        json!({
+            "matcher": "Grep",
+            "hooks": [{"type": "command", "command": format!("{binary_path} hook pre-tool"), "timeout": 2}]
+        }),
+        json!({
+            "matcher": "Read",
+            "hooks": [{"type": "command", "command": format!("{binary_path} hook pre-tool"), "timeout": 2}]
+        }),
+        json!({
+            "matcher": "Glob",
+            "hooks": [{"type": "command", "command": format!("{binary_path} hook pre-tool"), "timeout": 2}]
+        }),
+        json!({
+            "matcher": "Edit",
+            "hooks": [{"type": "command", "command": format!("{binary_path} hook pre-tool"), "timeout": 2}]
+        }),
+    ]
 }
 
 fn build_session_start_entries(binary_path: &str) -> Vec<Value> {

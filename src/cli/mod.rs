@@ -68,6 +68,9 @@ pub enum HookSubcommand {
     /// UserPromptSubmit hook — injects targeted context from file/symbol hints in the prompt
     #[command(name = "prompt-submit")]
     PromptSubmit,
+    /// PreToolUse hook — suggests Tokenizor alternatives before built-in tools execute
+    #[command(name = "pre-tool")]
+    PreTool,
 }
 
 #[cfg(test)]
@@ -123,6 +126,18 @@ mod tests {
                 subcommand: Some(HookSubcommand::PromptSubmit),
             }) => {}
             _ => panic!("expected prompt-submit hook command"),
+        }
+    }
+
+    #[test]
+    fn test_hook_pre_tool_command_parses() {
+        let cli = Cli::parse_from(["tokenizor", "hook", "pre-tool"]);
+
+        match cli.command {
+            Some(Commands::Hook {
+                subcommand: Some(HookSubcommand::PreTool),
+            }) => {}
+            _ => panic!("expected pre-tool hook command"),
         }
     }
 }

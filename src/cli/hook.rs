@@ -61,6 +61,19 @@ pub fn run_hook(subcommand: Option<&HookSubcommand>) -> anyhow::Result<()> {
     // For explicit subcommands the payload may be empty or absent — that's fine.
     let input = parse_stdin_input();
 
+    // PreTool is a special case: no sidecar call needed, just output a
+    // tool-preference suggestion based on the tool_name from stdin.
+    if matches!(subcommand, Some(HookSubcommand::PreTool)) {
+        let suggestion = pre_tool_suggestion(&input);
+        if !suggestion.is_empty() {
+            println!(
+                "{}",
+                success_json("PreToolUse", &json_escape(&suggestion))
+            );
+        }
+        return Ok(());
+    }
+
     // Resolve the effective subcommand: explicit takes priority; otherwise
     // derive from the stdin tool_name.
     let resolved = if let Some(sub) = subcommand {
@@ -161,8 +174,64 @@ pub fn event_name_for(subcommand: &HookSubcommand) -> &'static str {
     match subcommand {
         HookSubcommand::SessionStart => "SessionStart",
         HookSubcommand::PromptSubmit => "UserPromptSubmit",
+        HookSubcommand::PreTool => "PreToolUse",
         _ => "PostToolUse",
     }
+}
+
+/// Returns a tool-preference suggestion for the given tool, or empty string if
+/// no suggestion applies (e.g. non-source files, unknown tools).
+///
+/// This is the core of the PreToolUse interception: it tells the model which
+/// Tokenizor tool to use instead of the built-in tool it's about to call.
+fn pre_tool_suggestion(input: &HookInput) -> String {
+    let tool = input.tool_name.as_deref().unwrap_or("");
+    let file_path = input
+        .tool_input
+        .as_ref()
+        .and_then(|ti| ti.file_path.as_deref())
+        .unwrap_or("");
+
+    // Don't intercept reads of non-source files (docs, configs, etc.)
+    if tool == "Read" && is_non_source_path(file_path) {
+        return String::new();
+    }
+
+    match tool {
+        "Grep" => "Tokenizor MCP is connected. Prefer search_text (full-text with symbol context) or search_symbols (by name/kind) over Grep for source code searches.".to_string(),
+        "Read" => "Tokenizor MCP is connected. Prefer get_file_context (outline + imports + consumers) or get_symbol/get_symbol_context (targeted symbol lookup) over Read for source code inspection.".to_string(),
+        "Glob" => "Tokenizor MCP is connected. Prefer search_files (ranked path discovery) or get_repo_map (repository overview) over Glob for finding source files.".to_string(),
+        "Edit" => "Tokenizor MCP is connected. Prefer replace_symbol_body, edit_within_symbol, or batch_edit over Edit for source code modifications — they resolve by symbol name, auto-indent, and re-index atomically.".to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Returns true for paths that are clearly non-source (docs, configs, etc.)
+/// where direct file reads are appropriate and Tokenizor shouldn't intercept.
+fn is_non_source_path(path: &str) -> bool {
+    let p = path.replace('\\', "/").to_lowercase();
+
+    // Non-source file extensions
+    let non_source_exts = [
+        ".md", ".txt", ".json", ".toml", ".yaml", ".yml", ".xml", ".csv",
+        ".lock", ".env", ".gitignore", ".dockerignore", ".editorconfig",
+        ".prettierrc", ".eslintrc", ".ini", ".cfg", ".conf", ".html",
+        ".css", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".ico",
+    ];
+    if non_source_exts.iter().any(|ext| p.ends_with(ext)) {
+        return true;
+    }
+
+    // Non-source directories
+    let non_source_dirs = [
+        "/docs/", "/doc/", "/.github/", "/.planning/", "/.claude/",
+        "/.gemini/", "/.codex/", "/node_modules/", "/.git/",
+    ];
+    if non_source_dirs.iter().any(|dir| p.contains(dir)) {
+        return true;
+    }
+
+    false
 }
 
 /// Maps a resolved subcommand + stdin input to `(path, query_string)`.
@@ -228,6 +297,9 @@ pub(crate) fn endpoint_for(
             };
             ("/prompt-context", query)
         }
+        // PreTool is handled before endpoint_for is called; this arm is
+        // unreachable but required for exhaustiveness.
+        Some(HookSubcommand::PreTool) => ("/health", String::new()),
         // Unknown tool_name → fail-open: route to a no-op that returns empty.
         None => ("/health", String::new()),
     }
@@ -711,6 +783,102 @@ mod tests {
             ..Default::default()
         };
         assert!(resolve_subcommand_from_input(&input).is_none());
+    }
+
+    // --- helpers ---
+
+    // --- pre_tool_suggestion ---
+
+    #[test]
+    fn test_pre_tool_suggestion_grep_suggests_search_text() {
+        let input = HookInput {
+            tool_name: Some("Grep".to_string()),
+            ..Default::default()
+        };
+        let s = pre_tool_suggestion(&input);
+        assert!(s.contains("search_text"), "should suggest search_text: {s}");
+    }
+
+    #[test]
+    fn test_pre_tool_suggestion_read_source_suggests_get_file_context() {
+        let input = HookInput {
+            tool_name: Some("Read".to_string()),
+            tool_input: Some(HookToolInput {
+                file_path: Some("src/main.rs".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let s = pre_tool_suggestion(&input);
+        assert!(
+            s.contains("get_file_context"),
+            "should suggest get_file_context for source: {s}"
+        );
+    }
+
+    #[test]
+    fn test_pre_tool_suggestion_read_markdown_is_empty() {
+        let input = HookInput {
+            tool_name: Some("Read".to_string()),
+            tool_input: Some(HookToolInput {
+                file_path: Some("docs/README.md".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let s = pre_tool_suggestion(&input);
+        assert!(s.is_empty(), "should not suggest for .md files: {s}");
+    }
+
+    #[test]
+    fn test_pre_tool_suggestion_glob_suggests_search_files() {
+        let input = HookInput {
+            tool_name: Some("Glob".to_string()),
+            ..Default::default()
+        };
+        let s = pre_tool_suggestion(&input);
+        assert!(
+            s.contains("search_files"),
+            "should suggest search_files: {s}"
+        );
+    }
+
+    #[test]
+    fn test_pre_tool_suggestion_edit_suggests_replace_symbol_body() {
+        let input = HookInput {
+            tool_name: Some("Edit".to_string()),
+            ..Default::default()
+        };
+        let s = pre_tool_suggestion(&input);
+        assert!(
+            s.contains("replace_symbol_body"),
+            "should suggest replace_symbol_body: {s}"
+        );
+    }
+
+    #[test]
+    fn test_pre_tool_suggestion_unknown_tool_is_empty() {
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            ..Default::default()
+        };
+        let s = pre_tool_suggestion(&input);
+        assert!(s.is_empty(), "should not suggest for unknown tools: {s}");
+    }
+
+    #[test]
+    fn test_is_non_source_path_detects_config_files() {
+        assert!(is_non_source_path("package.json"));
+        assert!(is_non_source_path("Cargo.toml"));
+        assert!(is_non_source_path("README.md"));
+        assert!(is_non_source_path(".env"));
+    }
+
+    #[test]
+    fn test_is_non_source_path_allows_source_files() {
+        assert!(!is_non_source_path("src/main.rs"));
+        assert!(!is_non_source_path("tests/test_foo.py"));
+        assert!(!is_non_source_path("lib/parser.js"));
     }
 
     // --- helpers ---
