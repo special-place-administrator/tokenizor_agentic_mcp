@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.3](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.21.2...v0.21.3) (2026-03-14)
+
+
+### Bug Fixes
+
+* around_line error, diff note, language-scoped warnings, dry-run ([a6a5f70](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/a6a5f701fc1bfb56f7e13cb01f732383e101950a))
+
 ## [0.21.2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.21.1...v0.21.2) (2026-03-14)
 
 
