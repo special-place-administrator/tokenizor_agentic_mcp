@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.22.1...v0.22.2) (2026-03-14)
+
+
+### Bug Fixes
+
+* non-blocking cold-start indexing for faster MCP discovery ([acb8743](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/acb874307fc01eaf162cf76de4cba2dc1e942ba8))
+
 ## [0.22.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.22.0...v0.22.1) (2026-03-14)
 
 
