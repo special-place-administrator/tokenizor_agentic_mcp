@@ -10,3 +10,4 @@ npm/*.tgz
 .serena/
 spacetime/tokenizor/target/
 __pycache__/
+.worktrees/
