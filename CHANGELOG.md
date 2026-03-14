@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.26.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.25.0...v0.26.0) (2026-03-14)
+
+
+### Features
+
+* add .env file extractor ([44386b1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/44386b17adfb95f45372f2cd850588e1cf475304))
+* add ConfigExtractor trait, EditCapability enum, key escaping ([a46f029](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/a46f0299a62540e5d83c6665bae1b3125f92e955))
+* add first-class config file indexing and gated edit support for JSON/TOML/YAML/Markdown/.env ([4bbac75](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/4bbac7599509e62fbd4bc94551eddc277fc8d68f))
+* add JSON key-path extractor ([a3485d3](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/a3485d3ef4af680770036df9b1f09d3f243509c3))
+* add Json/Toml/Yaml/Markdown/Env to LanguageId, Key/Section to SymbolKind, is_config to FileClassification ([7ccd265](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/7ccd2650cc9ae88018f15fe7968914e3bdb8aada))
+* add Markdown section extractor ([cc1a128](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/cc1a128ff48908ee6828476ef951058f09c15ace))
+* add TOML key-path extractor ([932b977](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/932b977e402b8f5503988efeba135bf8dea06873))
+* add YAML key-path extractor with serde_yml ([c5919e2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/c5919e20ddc5707889e32b764bf5afdac58ed1fb))
+* config file parsing — all extractors, pipeline integration, edit gating, test fixes ([bde2f3d](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/bde2f3d1a80bdd72cc22ed10d227963e4a651d44))
+* gate edit tools by config file EditCapability ([7613d11](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/7613d112cfa8c688c85d498808c4f7c740fcb9ce))
+* integrate config extractors into parsing pipeline ([961c25b](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/961c25b36a75ab4ea033ce5921f4368ab41a4495))
+* PreToolUse hook now intercepts config files for Tokenizor suggestions ([ee88bff](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/ee88bff2f5341e026cbed90b6da7a1dcaaef33eb))
+
 ## [0.25.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.24.0...v0.25.0) (2026-03-14)
 
 
