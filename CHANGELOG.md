@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.21.1...v0.21.2) (2026-03-14)
+
+
+### Bug Fixes
+
+* explore text search max_per_file too low for symbol injection ([4a5b67e](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/4a5b67edf156e27cfe21e1f8e4c0b86fea03ff9e))
+
 ## [0.21.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.21.0...v0.21.1) (2026-03-14)
 
 
