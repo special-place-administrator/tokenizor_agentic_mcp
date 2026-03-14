@@ -2468,6 +2468,31 @@ impl TokenizorServer {
 
     // ─── Edit tools (Tier 1) ─────────────────────────────────────────────────
 
+    fn check_config_edit_capability(
+        language: &crate::domain::LanguageId,
+        required: crate::parsing::config_extractors::EditCapability,
+        tool_name: &str,
+    ) -> Option<String> {
+        use crate::parsing::config_extractors::{edit_capability_for, EditCapability};
+        if let Some(cap) = edit_capability_for(language) {
+            let allowed = match required {
+                EditCapability::IndexOnly => false,
+                EditCapability::TextEditSafe => {
+                    matches!(cap, EditCapability::TextEditSafe | EditCapability::StructuralEditSafe)
+                }
+                EditCapability::StructuralEditSafe => {
+                    matches!(cap, EditCapability::StructuralEditSafe)
+                }
+            };
+            if !allowed {
+                return Some(format!(
+                    "{tool_name}: This file type ({language}) does not support structural edits via Tokenizor. Use edit_within_symbol for scoped text replacements, or the built-in Edit tool for raw text edits."
+                ));
+            }
+        }
+        None // Non-config files (source code) → no restriction
+    }
+
     /// Replace a symbol's entire definition with new source code. The index resolves the symbol's
     /// byte range server-side — no need to read the file first. Content is auto-indented to match
     /// the original symbol's indentation level.
@@ -2496,6 +2521,13 @@ impl TokenizorServer {
             Some(f) => f,
             None => return format::not_found_file(&params.0.path),
         };
+        if let Some(warning) = Self::check_config_edit_capability(
+            &file.language,
+            crate::parsing::config_extractors::EditCapability::StructuralEditSafe,
+            "replace_symbol_body",
+        ) {
+            return warning;
+        }
         let (_, sym) = match edit::resolve_or_error(
             &file,
             &params.0.name,
@@ -2643,6 +2675,13 @@ impl TokenizorServer {
             Some(f) => f,
             None => return format::not_found_file(&params.0.path),
         };
+        if let Some(warning) = Self::check_config_edit_capability(
+            &file.language,
+            crate::parsing::config_extractors::EditCapability::StructuralEditSafe,
+            "delete_symbol",
+        ) {
+            return warning;
+        }
         let (_, sym) = match edit::resolve_or_error(
             &file,
             &params.0.name,
@@ -2699,6 +2738,13 @@ impl TokenizorServer {
             Some(f) => f,
             None => return format::not_found_file(&params.0.path),
         };
+        if let Some(warning) = Self::check_config_edit_capability(
+            &file.language,
+            crate::parsing::config_extractors::EditCapability::TextEditSafe,
+            "edit_within_symbol",
+        ) {
+            return warning;
+        }
         let (_, sym) = match edit::resolve_or_error(
             &file,
             &params.0.name,
