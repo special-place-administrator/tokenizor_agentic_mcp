@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.22.4](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.22.3...v0.22.4) (2026-03-14)
+
+
+### Bug Fixes
+
+* add total hit limit to find_references ([d592e13](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/d592e136df4d78c04be59c6a3e73edc7d1fad2c2))
+
+
+### Performance Improvements
+
+* incremental reverse index updates on file mutation ([e85c445](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/e85c445b7d7e017a961e4de5da851a6ca0e0cd01))
+
 ## [0.22.3](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.22.2...v0.22.3) (2026-03-14)
 
 
