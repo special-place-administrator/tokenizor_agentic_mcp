@@ -236,6 +236,14 @@ pub struct SymbolRecord {
     pub doc_byte_range: Option<(u32, u32)>,
 }
 
+impl SymbolRecord {
+    /// Returns the effective start byte, including doc comments if present.
+    pub fn effective_start(&self) -> u32 {
+        self.doc_byte_range
+            .map_or(self.byte_range.0, |(start, _)| start)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SymbolKind {
     Function,

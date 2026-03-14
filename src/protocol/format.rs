@@ -144,7 +144,7 @@ fn render_symbol_detail(
     match sym {
         None => render_not_found_symbol(relative_path, symbols, name),
         Some(s) => {
-            let start = s.byte_range.0 as usize;
+            let start = s.effective_start() as usize;
             let end = s.byte_range.1 as usize;
             let body = if end <= content.len() {
                 String::from_utf8_lossy(&content[start..end]).into_owned()

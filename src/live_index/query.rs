@@ -1589,7 +1589,7 @@ impl LiveIndex {
             }
         };
 
-        let start = sym_rec.byte_range.0 as usize;
+        let start = sym_rec.effective_start() as usize;
         let end = sym_rec.byte_range.1 as usize;
         let body = if end <= file.content.len() {
             String::from_utf8_lossy(&file.content[start..end]).into_owned()
