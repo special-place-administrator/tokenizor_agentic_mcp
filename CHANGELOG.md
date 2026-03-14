@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.23.0...v0.23.1) (2026-03-14)
+
+
+### Bug Fixes
+
+* search_symbols file count + find_references missing cross-file type refs ([8d40874](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/8d4087446f8f7c980f5e5abe6b16366e6cc5f697))
+
 ## [0.23.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.22.4...v0.23.0) (2026-03-14)
 
 
