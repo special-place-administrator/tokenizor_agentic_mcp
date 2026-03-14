@@ -25,7 +25,7 @@ Regex escaping is systemic (hits every LLM agent). Explore scoring affects first
 
 **Application strategy (conservative):** When `regex=true`:
 1. Compile the pattern. If it compiles and returns results, use as-is.
-2. If it compiles but returns 0 results, check if the pattern contains likely double-escaped sequences (e.g., `\\s`). If so, retry with `fix_common_double_escapes`. If the fixed pattern produces results, use those and append a note to the output: `"(auto-corrected \\s → \\s in regex pattern)"`.
+2. If it compiles but returns 0 results, check if the pattern contains likely double-escaped sequences (e.g., `\\s`). If so, retry with `fix_common_double_escapes`. If the fixed pattern produces results, use those and append a note to the output: `"(auto-corrected double-escaped regex: \\\\s → \\s)"`.
 3. If it fails to compile and the pattern contains `\\s` etc., try the fixed pattern. If that compiles and works, use it with the note.
 4. If neither works, return the original error.
 
@@ -56,8 +56,10 @@ Additionally, after collecting text hits, extract enclosing symbols and inject t
 
 **Implementation:**
 
+**Sequencing constraint:** The symbol hit loop and text hit loop currently run independently. After this change, they both write to `match_counts`, so the text hit loop MUST run before the final sort+truncate. The implementation order is: (1) symbol search → populate match_counts, (2) text search → collect text_hits AND inject enclosing symbols into match_counts, (3) sort+truncate match_counts into final symbol_hits.
+
 ```rust
-// Replace the current symbol_hits collection loop with:
+// Phase 1: Symbol search — populate match_counts
 let mut match_counts: HashMap<(String, String, String), usize> = HashMap::new();
 for sq in &symbol_queries {
     let result = search::search_symbols(&guard, sq, None, limit * 3);
@@ -67,23 +69,40 @@ for sq in &symbol_queries {
     }
 }
 
-// After collecting text_hits, extract enclosing symbols
-for (path, _, _) in &text_hits {
-    if let Some(file) = guard.get_file(path) {
-        // find_enclosing_symbol for matched lines, add to match_counts
+// Phase 2: Text search — collect text_hits AND inject enclosing symbols
+let mut text_hits: Vec<(String, String, usize)> = Vec::new();
+for tq in &text_queries {
+    let options = search::TextSearchOptions {
+        total_limit: limit.min(50),
+        max_per_file: 2,
+        ..search::TextSearchOptions::for_current_code_search()
+    };
+    let result = search::search_text_with_options(&guard, Some(tq), None, false, &options);
+    if let Ok(r) = result {
+        for file in &r.files {
+            for m in &file.matches {
+                if text_hits.len() < limit && !format::is_noise_line(&m.line) {
+                    text_hits.push((file.path.clone(), m.line.clone(), m.line_number));
+                }
+                // Inject enclosing symbol into match_counts (bridges lexical→semantic gap)
+                if let Some(ref enc) = m.enclosing_symbol {
+                    let entry = (enc.name.clone(), enc.kind.clone(), file.path.clone());
+                    *match_counts.entry(entry).or_default() += 1;
+                }
+            }
+        }
     }
 }
 
-// Sort by match count descending, then alphabetical for stability
-let mut symbol_hits: Vec<_> = match_counts.into_iter().collect();
-symbol_hits.sort_by(|a, b| b.1.cmp(&a.1).then(a.0 .0.cmp(&b.0 .0)));
-symbol_hits.truncate(limit);
-// Convert back to (name, kind, path) tuples for existing downstream code
+// Phase 3: Sort by match count descending, then alphabetical for stability
+let mut ranked: Vec<_> = match_counts.into_iter().collect();
+ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0 .0.cmp(&b.0 .0)));
+ranked.truncate(limit);
 let symbol_hits: Vec<(String, String, String)> =
-    symbol_hits.into_iter().map(|(k, _)| k).collect();
+    ranked.into_iter().map(|(k, _)| k).collect();
 ```
 
-**Enclosing symbol extraction from text hits:** The text search results include `m.enclosing_symbol` on each match. Use this to inject the enclosing symbol into `match_counts` with a weight of 1, same as a direct name match. This is the key insight — text hits already carry the enclosing symbol info, we just need to surface it.
+**Key insight:** `m.enclosing_symbol` already carries the enclosing symbol's name and kind. Injecting it into `match_counts` during the text search loop (Phase 2) is simpler and cheaper than calling `guard.get_file()` + `find_enclosing_symbol` after the fact.
 
 ### Fix 3: `insert_before` conditional spacing
 
