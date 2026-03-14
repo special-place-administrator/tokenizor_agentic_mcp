@@ -800,10 +800,6 @@ fn enrich_with_callers(
         for sym_name in &symbol_names {
             let refs = index.find_references_for_name(sym_name, None, false);
             for (ref_file, ref_record) in refs {
-                // Skip self-references (same file)
-                if ref_file == file_matches.path {
-                    continue;
-                }
                 // Get enclosing symbol of the reference
                 let enclosing_name = ref_record
                     .enclosing_symbol_index
@@ -814,6 +810,12 @@ fn enrich_with_callers(
                             .map(|s| s.name.clone())
                     })
                     .unwrap_or_else(|| "(top-level)".to_string());
+
+                // Skip self-references only when the caller IS one of the matched
+                // symbols (same-file callers from different symbols are useful context)
+                if ref_file == file_matches.path && symbol_names.contains(&enclosing_name) {
+                    continue;
+                }
 
                 let key = (ref_file.to_string(), enclosing_name.clone());
                 if seen.insert(key) {
@@ -829,9 +831,9 @@ fn enrich_with_callers(
         // Cap at 10 callers to avoid noise
         callers.truncate(10);
 
-        if !callers.is_empty() {
-            file_matches.callers = Some(callers);
-        }
+        // Always set callers when follow_refs was requested — distinguishes
+        // "not requested" (None) from "ran but found nothing" (Some([]))
+        file_matches.callers = Some(callers);
     }
 }
 
@@ -5900,6 +5902,46 @@ mod tests {
         assert!(
             result.contains("Called by"),
             "should have Called by section, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_text_follow_refs_empty_callers_signal() {
+        // A file with a function that has no callers anywhere
+        let sym_a = make_symbol("orphan_fn", SymbolKind::Function, 0, 2);
+        let file_a_content = b"fn orphan_fn() {\n    do_work()\n}\n";
+        let (key_a, file_a) = make_file("src/orphan.rs", file_a_content, vec![sym_a]);
+
+        let server = make_server(make_live_index_ready(vec![(key_a, file_a)]));
+        let result = server
+            .search_text(Parameters(super::SearchTextInput {
+                query: Some("do_work".to_string()),
+                terms: None,
+                regex: None,
+                path_prefix: None,
+                language: None,
+                limit: None,
+                max_per_file: None,
+                include_generated: None,
+                include_tests: None,
+                glob: None,
+                exclude_glob: None,
+                context: None,
+                case_sensitive: None,
+                whole_word: None,
+                group_by: None,
+                follow_refs: Some(true),
+                follow_refs_limit: None,
+            }))
+            .await;
+        // follow_refs ran but found no cross-references — should signal this explicitly
+        assert!(
+            result.contains("no cross-references found"),
+            "should show empty-callers signal when follow_refs found nothing, got: {result}"
+        );
+        assert!(
+            !result.contains("Called by"),
+            "should not show 'Called by' when callers list is empty, got: {result}"
         );
     }
 

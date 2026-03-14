@@ -457,11 +457,15 @@ pub fn search_text_result_view(
             }
         }
         if let Some(ref callers) = file.callers {
-            let caller_strs: Vec<String> = callers
-                .iter()
-                .map(|c| format!("{} ({}:{})", c.symbol, c.file, c.line))
-                .collect();
-            lines.push(format!("    Called by: {}", caller_strs.join(", ")));
+            if callers.is_empty() {
+                lines.push("    (no cross-references found)".to_string());
+            } else {
+                let caller_strs: Vec<String> = callers
+                    .iter()
+                    .map(|c| format!("{} ({}:{})", c.symbol, c.file, c.line))
+                    .collect();
+                lines.push(format!("    Called by: {}", caller_strs.join(", ")));
+            }
         }
     }
     lines.join("\n")
