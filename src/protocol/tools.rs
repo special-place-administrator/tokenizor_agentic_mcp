@@ -471,7 +471,7 @@ pub struct GetSymbolContextInput {
     /// Optional selected symbol line from `search_symbols`.
     #[serde(default, deserialize_with = "lenient_u32")]
     pub symbol_line: Option<u32>,
-    /// Output verbosity: "signature" (name+params+return only, ~80% smaller), "compact" (signature + first doc line), "full" (default — complete body).
+    /// Output verbosity: "signature" (name+params+return only, ~80% smaller), "compact" (signature + first doc line), "full" (default — complete body). Applies to all three modes: default (controls the definition body), bundle (controls the main symbol body; dependency types always show full definitions), and sections/trace (controls the definition shown in the trace header).
     pub verbosity: Option<String>,
     /// When true, switch to bundle mode: returns symbol body + full definitions of all referenced custom types, resolved recursively. Best for edit preparation. Requires path.
     #[serde(default, deserialize_with = "lenient_bool")]
