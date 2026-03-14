@@ -1,6 +1,8 @@
 use tree_sitter::Node;
 
-use super::{collect_symbols, find_first_named_child, push_named_symbol, walk_children};
+use super::{
+    NO_DOC_SPEC, collect_symbols, find_first_named_child, push_named_symbol, walk_children,
+};
 use crate::domain::{SymbolKind, SymbolRecord};
 
 pub fn extract_symbols(node: &Node, source: &str) -> Vec<SymbolRecord> {
@@ -28,6 +30,7 @@ fn walk_node(
         symbols,
         kind,
         |node, source, _| find_name(node, source),
+        &NO_DOC_SPEC,
     );
     walk_children(node, source, depth, sort_order, symbols, kind, walk_node);
 }

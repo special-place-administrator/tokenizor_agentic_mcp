@@ -1,6 +1,12 @@
 use tree_sitter::Node;
 
-use super::{collect_symbols, push_named_symbol, walk_children};
+use super::{DocCommentSpec, collect_symbols, push_named_symbol, walk_children};
+
+pub(super) const DOC_SPEC: DocCommentSpec = DocCommentSpec {
+    comment_node_types: &["comment"],
+    doc_prefixes: None,
+    custom_doc_check: None,
+};
 use crate::domain::{SymbolKind, SymbolRecord};
 
 pub fn extract_symbols(node: &Node, source: &str) -> Vec<SymbolRecord> {
@@ -28,6 +34,7 @@ fn walk_node(
         symbols,
         kind,
         |node, source, kind| find_name(node, source, kind),
+        &DOC_SPEC,
     );
     walk_children(node, source, depth, sort_order, symbols, kind, walk_node);
 }

@@ -1,7 +1,14 @@
 use tree_sitter::Node;
 
 use super::{
-    collect_symbols, find_first_named_child, push_named_symbol, push_symbol, walk_children,
+    DocCommentSpec, collect_symbols, find_first_named_child, push_named_symbol, push_symbol,
+    walk_children,
+};
+
+pub(super) const DOC_SPEC: DocCommentSpec = DocCommentSpec {
+    comment_node_types: &["comment"],
+    doc_prefixes: Some(&["/**"]),
+    custom_doc_check: None,
 };
 use crate::domain::{SymbolKind, SymbolRecord};
 
@@ -36,6 +43,7 @@ fn walk_node(
         symbols,
         kind,
         |node, source, _| find_name(node, source),
+        &DOC_SPEC,
     );
     walk_children(node, source, depth, sort_order, symbols, kind, walk_node);
 }
@@ -57,7 +65,9 @@ fn extract_variable_declarations(
             } else {
                 SymbolKind::Variable
             };
-            push_symbol(node, name, kind, depth, sort_order, symbols);
+            push_symbol(
+                node, source, name, kind, depth, sort_order, symbols, &DOC_SPEC,
+            );
         }
     }
 }

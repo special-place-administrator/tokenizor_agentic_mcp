@@ -1,6 +1,22 @@
 use tree_sitter::Node;
 
-use super::{collect_symbols, push_symbol, walk_children};
+use super::{DocCommentSpec, collect_symbols, push_symbol, walk_children};
+
+fn is_elixir_doc(node: &tree_sitter::Node, source: &str) -> bool {
+    let start = node.start_byte();
+    let end = node.end_byte();
+    if end > source.len() {
+        return false;
+    }
+    let text = source[start..end].trim_start();
+    text.starts_with("@doc") || text.starts_with("@moduledoc") || text.starts_with("@typedoc")
+}
+
+pub(super) const DOC_SPEC: DocCommentSpec = DocCommentSpec {
+    comment_node_types: &["comment"],
+    doc_prefixes: None,
+    custom_doc_check: Some(is_elixir_doc),
+};
 use crate::domain::{SymbolKind, SymbolRecord};
 
 pub fn extract_symbols(node: &Node, source: &str) -> Vec<SymbolRecord> {
@@ -19,7 +35,16 @@ fn walk_node(
     if node.kind() == "call"
         && let Some((symbol_kind, name)) = extract_elixir_def(node, source)
     {
-        push_symbol(node, name, symbol_kind, depth, sort_order, symbols);
+        push_symbol(
+            node,
+            source,
+            name,
+            symbol_kind,
+            depth,
+            sort_order,
+            symbols,
+            &DOC_SPEC,
+        );
         walk_children(
             node,
             source,

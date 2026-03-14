@@ -132,12 +132,15 @@ pub(super) fn collect_symbols(node: &Node, source: &str, walk: WalkNodeFn) -> Ve
 
 pub(super) fn push_symbol(
     node: &Node,
+    source: &str,
     name: String,
     kind: SymbolKind,
     depth: u32,
     sort_order: &mut u32,
     symbols: &mut Vec<SymbolRecord>,
+    doc_spec: &DocCommentSpec,
 ) {
+    let doc_byte_range = scan_doc_range(node, source, doc_spec);
     symbols.push(SymbolRecord {
         name,
         kind,
@@ -148,7 +151,7 @@ pub(super) fn push_symbol(
             node.start_position().row as u32,
             node.end_position().row as u32,
         ),
-        doc_byte_range: None,
+        doc_byte_range,
     });
     *sort_order += 1;
 }
@@ -161,6 +164,7 @@ pub(super) fn push_named_symbol<F>(
     symbols: &mut Vec<SymbolRecord>,
     kind: Option<SymbolKind>,
     find_name: F,
+    doc_spec: &DocCommentSpec,
 ) -> bool
 where
     F: FnOnce(&Node, &str, SymbolKind) -> Option<String>,
@@ -171,7 +175,16 @@ where
     let Some(name) = find_name(node, source, symbol_kind) else {
         return false;
     };
-    push_symbol(node, name, symbol_kind, depth, sort_order, symbols);
+    push_symbol(
+        node,
+        source,
+        name,
+        symbol_kind,
+        depth,
+        sort_order,
+        symbols,
+        doc_spec,
+    );
     true
 }
 
@@ -248,6 +261,7 @@ mod tests {
             &mut symbols,
             Some(SymbolKind::Function),
             |node, source, _kind| find_first_named_child(node, source, &["identifier"]),
+            &NO_DOC_SPEC,
         );
 
         assert!(pushed);
@@ -312,8 +326,14 @@ mod tests {
         assert!(range.is_some(), "expected doc range for /// comments");
         let (start, end) = range.unwrap();
         let doc_text = &source[start as usize..end as usize];
-        assert!(doc_text.contains("Doc line 1"), "should contain first doc line");
-        assert!(doc_text.contains("Doc line 2"), "should contain second doc line");
+        assert!(
+            doc_text.contains("Doc line 1"),
+            "should contain first doc line"
+        );
+        assert!(
+            doc_text.contains("Doc line 2"),
+            "should contain second doc line"
+        );
     }
 
     #[test]
@@ -325,7 +345,10 @@ mod tests {
 
         let range = scan_doc_range(&function, source, &RUST_DOC_SPEC);
 
-        assert!(range.is_none(), "regular // comment should not be captured as doc");
+        assert!(
+            range.is_none(),
+            "regular // comment should not be captured as doc"
+        );
     }
 
     #[test]
@@ -340,8 +363,14 @@ mod tests {
         assert!(range.is_some(), "expected doc range for attached comment");
         let (start, end) = range.unwrap();
         let doc_text = &source[start as usize..end as usize];
-        assert!(doc_text.contains("Attached doc"), "should contain attached doc");
-        assert!(!doc_text.contains("Detached doc"), "should NOT contain detached doc");
+        assert!(
+            doc_text.contains("Attached doc"),
+            "should contain attached doc"
+        );
+        assert!(
+            !doc_text.contains("Detached doc"),
+            "should NOT contain detached doc"
+        );
     }
 
     #[test]
@@ -371,7 +400,13 @@ mod tests {
         assert!(range.is_some(), "expected doc range for Go comments");
         let (start, end) = range.unwrap();
         let doc_text = &source[start as usize..end as usize];
-        assert!(doc_text.contains("Package doc"), "should contain first doc line");
-        assert!(doc_text.contains("More doc"), "should contain second doc line");
+        assert!(
+            doc_text.contains("Package doc"),
+            "should contain first doc line"
+        );
+        assert!(
+            doc_text.contains("More doc"),
+            "should contain second doc line"
+        );
     }
 }
