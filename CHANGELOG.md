@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.29.0...v0.29.1) (2026-03-15)
+
+
+### Bug Fixes
+
+* daemon proxy deadlock under concurrent tool calls + request governor ([541dd68](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/541dd688e9956d75818733740764320513e9c8ab))
+
 ## [0.29.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.28.2...v0.29.0) (2026-03-15)
 
 
