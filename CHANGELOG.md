@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.27.2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.27.1...v0.27.2) (2026-03-15)
+
+
+### Bug Fixes
+
+* batch_rename catches path-qualified usages ([c2243ff](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/c2243ff058e0ca29848272641eed8c27eec47131))
+* batch_rename catches path-qualified usages via literal scan ([2824745](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/282474529928f46e3dec525470244baa3fb68873))
+
 ## [0.27.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.27.0...v0.27.1) (2026-03-15)
 
 
