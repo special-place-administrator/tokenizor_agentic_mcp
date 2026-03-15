@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.27.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.27.0...v0.27.1) (2026-03-15)
+
+
+### Bug Fixes
+
+* compute real line numbers for TOML symbols ([d939caa](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/d939caa7d3a587efa7482dc9f4790e7b102e15ac))
+* compute real line numbers for TOML symbols ([7dd4697](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/7dd46973f52228193cc98ccb8d01361b75eef808))
+
 ## [0.27.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.26.0...v0.27.0) (2026-03-15)
 
 
