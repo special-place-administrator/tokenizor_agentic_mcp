@@ -910,6 +910,8 @@ pub struct InspectMatchFoundView {
     pub excerpt: String,
     pub enclosing: Option<EnclosingSymbolView>,
     pub siblings: Vec<SiblingSymbolView>,
+    /// Number of siblings omitted due to the sibling_limit cap.
+    pub siblings_overflow: usize,
 }
 
 /// Owned result view for `inspect_match`.
@@ -1827,6 +1829,7 @@ impl LiveIndex {
         path: &str,
         line: u32,
         context_lines: Option<u32>,
+        sibling_limit: Option<u32>,
     ) -> InspectMatchView {
         let Some(file) = self.get_file(path) else {
             return InspectMatchView::FileNotFound {
@@ -1877,7 +1880,8 @@ impl LiveIndex {
 
         // 3. Find siblings (same depth as enclosing, or depth 0).
         let target_depth = enclosing_symbol.map(|s| s.depth).unwrap_or(0);
-        let siblings = file
+        let limit = sibling_limit.unwrap_or(10) as usize;
+        let mut siblings: Vec<SiblingSymbolView> = file
             .symbols
             .iter()
             .filter(|s| s.depth == target_depth)
@@ -1887,6 +1891,17 @@ impl LiveIndex {
                 line_range: (s.line_range.0 + 1, s.line_range.1 + 1),
             })
             .collect();
+        let siblings_overflow = if limit == 0 {
+            // sibling_limit=0 means suppress siblings entirely — no overflow hint either.
+            siblings.clear();
+            0
+        } else if siblings.len() > limit {
+            let overflow = siblings.len() - limit;
+            siblings.truncate(limit);
+            overflow
+        } else {
+            0
+        };
 
         InspectMatchView::Found(InspectMatchFoundView {
             path: file.relative_path.clone(),
@@ -1894,6 +1909,7 @@ impl LiveIndex {
             excerpt,
             enclosing,
             siblings,
+            siblings_overflow,
         })
     }
 

@@ -538,6 +538,9 @@ pub struct InspectMatchInput {
     /// Number of context lines to show around the match (default 3).
     #[serde(default, deserialize_with = "lenient_u32")]
     pub context: Option<u32>,
+    /// Maximum number of siblings to show (default 10). Use 0 to hide siblings entirely.
+    #[serde(default, deserialize_with = "lenient_u32")]
+    pub sibling_limit: Option<u32>,
 }
 
 /// Input for `explore`.
@@ -1776,7 +1779,12 @@ impl TokenizorServer {
         let view = {
             let guard = self.index.read().expect("lock poisoned");
             loading_guard!(guard);
-            guard.capture_inspect_match_view(&params.0.path, params.0.line, params.0.context)
+            guard.capture_inspect_match_view(
+                &params.0.path,
+                params.0.line,
+                params.0.context,
+                params.0.sibling_limit,
+            )
         };
 
         format::inspect_match_result_view(&view)
@@ -5848,6 +5856,7 @@ mod tests {
                 path: "src/lib.rs".to_string(),
                 line: 2,
                 context: None,
+                sibling_limit: None,
             }))
             .await;
 
@@ -5858,6 +5867,109 @@ mod tests {
             result.contains("Enclosing symbol: fn process (lines 1-3)"),
             "got: {result}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_inspect_match_default_sibling_limit_caps_at_10() {
+        // Build a file with 15 top-level functions (depth 0).
+        let mut syms = Vec::new();
+        for i in 0u32..15 {
+            syms.push(make_symbol(
+                &format!("fn_{i}"),
+                SymbolKind::Function,
+                i,
+                i,
+            ));
+        }
+        let content = (0u32..15)
+            .map(|i| format!("fn fn_{i}() {{}}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let target = make_file("src/lib.rs", content.as_bytes(), syms);
+        let server = make_server(make_live_index_ready(vec![target]));
+
+        // No sibling_limit — defaults to 10.
+        let result = server
+            .inspect_match(Parameters(super::InspectMatchInput {
+                path: "src/lib.rs".to_string(),
+                line: 1,
+                context: Some(0),
+                sibling_limit: None,
+            }))
+            .await;
+
+        // Count sibling rows (each rendered with two-space indent).
+        let sibling_rows = result
+            .lines()
+            .filter(|l| l.starts_with("  ") && !l.starts_with("  ..."))
+            .count();
+        assert!(sibling_rows <= 10, "expected ≤10 siblings, got {sibling_rows}; output:\n{result}");
+        assert!(result.contains("... and 5 more siblings"), "expected overflow hint; got:\n{result}");
+    }
+
+    #[tokio::test]
+    async fn test_inspect_match_sibling_limit_5_shows_exactly_5() {
+        let mut syms = Vec::new();
+        for i in 0u32..12 {
+            syms.push(make_symbol(
+                &format!("fn_{i}"),
+                SymbolKind::Function,
+                i,
+                i,
+            ));
+        }
+        let content = (0u32..12)
+            .map(|i| format!("fn fn_{i}() {{}}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let target = make_file("src/lib.rs", content.as_bytes(), syms);
+        let server = make_server(make_live_index_ready(vec![target]));
+
+        let result = server
+            .inspect_match(Parameters(super::InspectMatchInput {
+                path: "src/lib.rs".to_string(),
+                line: 1,
+                context: Some(0),
+                sibling_limit: Some(5),
+            }))
+            .await;
+
+        let sibling_rows = result
+            .lines()
+            .filter(|l| l.starts_with("  ") && !l.starts_with("  ..."))
+            .count();
+        assert_eq!(sibling_rows, 5, "expected exactly 5 siblings; output:\n{result}");
+        assert!(result.contains("... and 7 more siblings"), "expected overflow hint; got:\n{result}");
+    }
+
+    #[tokio::test]
+    async fn test_inspect_match_sibling_limit_0_hides_siblings() {
+        let mut syms = Vec::new();
+        for i in 0u32..5 {
+            syms.push(make_symbol(
+                &format!("fn_{i}"),
+                SymbolKind::Function,
+                i,
+                i,
+            ));
+        }
+        let content = (0u32..5)
+            .map(|i| format!("fn fn_{i}() {{}}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let target = make_file("src/lib.rs", content.as_bytes(), syms);
+        let server = make_server(make_live_index_ready(vec![target]));
+
+        let result = server
+            .inspect_match(Parameters(super::InspectMatchInput {
+                path: "src/lib.rs".to_string(),
+                line: 1,
+                context: Some(0),
+                sibling_limit: Some(0),
+            }))
+            .await;
+
+        assert!(!result.contains("Nearby siblings:"), "siblings should be hidden; got:\n{result}");
     }
 
     #[tokio::test]
@@ -6222,6 +6334,7 @@ mod tests {
                 path: "src/lib.rs".to_string(),
                 line: 999999,
                 context: None,
+                sibling_limit: None,
             }))
             .await;
         assert!(
@@ -6354,6 +6467,7 @@ mod tests {
                 path: "src/lib.rs".to_string(),
                 line: 0,
                 context: None,
+                sibling_limit: None,
             }))
             .await;
         assert!(
