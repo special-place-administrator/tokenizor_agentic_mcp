@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.4](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.30.3...v0.30.4) (2026-03-15)
+
+
+### Bug Fixes
+
+* batch_rename review fixes — atomic rollback, dead code, dedup ([0a7844e](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/0a7844ee1b8ce77b462f1f6a3b51b53c1ce17a22))
+
 ## [0.30.3](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.30.2...v0.30.3) (2026-03-15)
 
 
