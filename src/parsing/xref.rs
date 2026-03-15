@@ -629,6 +629,9 @@ pub fn extract_references(
         | LanguageId::Yaml
         | LanguageId::Markdown
         | LanguageId::Env => unreachable!("config types are handled before extract_references"),
+LanguageId::Html | LanguageId::Css | LanguageId::Scss => {
+    return (vec![], HashMap::new());
+}
     };
 
     let _ = ts_language; // used only to initialize query once
@@ -870,8 +873,11 @@ mod tests {
             | LanguageId::Toml
             | LanguageId::Yaml
             | LanguageId::Markdown
-            | LanguageId::Env => {
-                unreachable!("config languages don't use tree-sitter xref extraction")
+            | LanguageId::Env
+            | LanguageId::Html
+            | LanguageId::Css
+            | LanguageId::Scss => {
+                unreachable!("config/frontend languages don't use tree-sitter xref extraction")
             }
         };
         parser.set_language(&ts_language).expect("set language");

@@ -149,6 +149,7 @@ fn parse_source(source: &str, language: &LanguageId) -> Result<ParseSourceOutput
         | LanguageId::Yaml
         | LanguageId::Markdown
         | LanguageId::Env => unreachable!("config types are handled before parse_source"),
+LanguageId::Html | LanguageId::Css | LanguageId::Scss => todo!("grammar integration wired in Task 10"),
     };
 
     parser
