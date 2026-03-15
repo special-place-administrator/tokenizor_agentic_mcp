@@ -1,6 +1,6 @@
 use tree_sitter::Node;
 
-use super::{NO_DOC_SPEC, collect_symbols, push_symbol};
+use super::{NO_DOC_SPEC, at_rule_name, collect_symbols, push_symbol};
 use crate::domain::{SymbolKind, SymbolRecord};
 
 pub fn extract_symbols(node: &Node, source: &str) -> Vec<SymbolRecord> {
@@ -161,16 +161,6 @@ fn walk_children(
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         walk_node(&child, source, depth, sort_order, symbols);
-    }
-}
-
-/// Extract the at-rule name: text from the node start up to (but not
-/// including) the opening `{`, trimmed.
-fn at_rule_name(node: &Node, source: &str) -> String {
-    let text = node.utf8_text(source.as_bytes()).unwrap_or("");
-    match text.find('{') {
-        Some(pos) => text[..pos].trim().to_string(),
-        None => text.trim().to_string(),
     }
 }
 

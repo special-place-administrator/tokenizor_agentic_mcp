@@ -3,9 +3,9 @@ mod cpp;
 mod csharp;
 mod css;
 mod dart;
-mod html;
 mod elixir;
 mod go;
+mod html;
 mod java;
 mod javascript;
 mod kotlin;
@@ -239,6 +239,16 @@ pub(super) fn find_first_named_child(
         }
     }
     None
+}
+
+/// Extract the at-rule name: text from the node start up to (but not
+/// including) the opening `{`, trimmed. Shared by CSS and SCSS extractors.
+pub(super) fn at_rule_name(node: &Node, source: &str) -> String {
+    let text = node.utf8_text(source.as_bytes()).unwrap_or("");
+    match text.find('{') {
+        Some(pos) => text[..pos].trim().to_string(),
+        None => text.trim().to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -520,13 +530,14 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_abi_smoke_html_grammar() {
         let mut parser = Parser::new();
         let lang: tree_sitter::Language = tree_sitter_html::LANGUAGE.into();
         parser.set_language(&lang).expect("set HTML language");
-        let tree = parser.parse("<div></div>", None).expect("parse HTML snippet");
+        let tree = parser
+            .parse("<div></div>", None)
+            .expect("parse HTML snippet");
         assert!(!tree.root_node().has_error(), "root should not be error");
     }
 
@@ -535,7 +546,9 @@ mod tests {
         let mut parser = Parser::new();
         let lang: tree_sitter::Language = tree_sitter_css::LANGUAGE.into();
         parser.set_language(&lang).expect("set CSS language");
-        let tree = parser.parse(".a { color: red; }", None).expect("parse CSS snippet");
+        let tree = parser
+            .parse(".a { color: red; }", None)
+            .expect("parse CSS snippet");
         assert!(!tree.root_node().has_error(), "root should not be error");
     }
 

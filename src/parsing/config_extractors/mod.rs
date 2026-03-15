@@ -80,7 +80,6 @@ pub fn edit_capability_for(language: &LanguageId) -> Option<EditCapability> {
     extractor_for(language).map(|e| e.edit_capability())
 }
 
-
 /// Unified edit capability check for all languages (config + source).
 /// Returns `None` for languages with no edit restrictions (mature tree-sitter languages).
 pub fn edit_capability_for_language(language: &LanguageId) -> Option<EditCapability> {
@@ -95,7 +94,6 @@ pub fn edit_capability_for_language(language: &LanguageId) -> Option<EditCapabil
         _ => None,
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Key escaping helpers
@@ -228,23 +226,30 @@ mod tests {
         assert!(!is_config_language(&LanguageId::Rust));
     }
 
-
     #[test]
     fn test_edit_capability_for_language_frontend() {
         use crate::domain::LanguageId;
 
         // Frontend languages should return TextEditSafe
-        assert_eq!(edit_capability_for_language(&LanguageId::Html), Some(EditCapability::TextEditSafe));
-        assert_eq!(edit_capability_for_language(&LanguageId::Css), Some(EditCapability::TextEditSafe));
-        assert_eq!(edit_capability_for_language(&LanguageId::Scss), Some(EditCapability::TextEditSafe));
+        assert_eq!(
+            edit_capability_for_language(&LanguageId::Html),
+            Some(EditCapability::TextEditSafe)
+        );
+        assert_eq!(
+            edit_capability_for_language(&LanguageId::Css),
+            Some(EditCapability::TextEditSafe)
+        );
+        assert_eq!(
+            edit_capability_for_language(&LanguageId::Scss),
+            Some(EditCapability::TextEditSafe)
+        );
 
         // Config languages delegate to their extractor
         // JSON delegates to its extractor — verify it returns Some (exact level varies)
-assert!(edit_capability_for_language(&LanguageId::Json).is_some());
+        assert!(edit_capability_for_language(&LanguageId::Json).is_some());
 
         // Regular source languages return None (unrestricted)
         assert_eq!(edit_capability_for_language(&LanguageId::Rust), None);
         assert_eq!(edit_capability_for_language(&LanguageId::Python), None);
     }
-
 }

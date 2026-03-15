@@ -24,6 +24,9 @@ fn walk_node(
     emitted: &mut HashSet<(u32, u32)>,
 ) {
     match node.kind() {
+        // tree-sitter-html wraps self-closing tags (e.g. <input />) inside
+        // `element` nodes, so "self_closing_tag" is not a separate match arm.
+        // extract_tag_name handles both start_tag and self_closing_tag children.
         "element" => {
             let tag_name = extract_tag_name(node, source);
             if let Some(ref name) = tag_name {
