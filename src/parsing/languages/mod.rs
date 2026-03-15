@@ -514,4 +514,32 @@ mod tests {
             "multi-line block comment text missing"
         );
     }
+
+
+    #[test]
+    fn test_abi_smoke_html_grammar() {
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_html::LANGUAGE.into();
+        parser.set_language(&lang).expect("set HTML language");
+        let tree = parser.parse("<div></div>", None).expect("parse HTML snippet");
+        assert!(!tree.root_node().has_error(), "root should not be error");
+    }
+
+    #[test]
+    fn test_abi_smoke_css_grammar() {
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_css::LANGUAGE.into();
+        parser.set_language(&lang).expect("set CSS language");
+        let tree = parser.parse(".a { color: red; }", None).expect("parse CSS snippet");
+        assert!(!tree.root_node().has_error(), "root should not be error");
+    }
+
+    #[test]
+    fn test_abi_smoke_scss_grammar() {
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_scss::language();
+        parser.set_language(&lang).expect("set SCSS language");
+        let tree = parser.parse("$x: 1;", None).expect("parse SCSS snippet");
+        assert!(!tree.root_node().has_error(), "root should not be error");
+    }
 }
