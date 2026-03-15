@@ -39,6 +39,10 @@ Grammar dependencies:
 - `tree-sitter-css` 0.25.0 is the official tree-sitter CSS grammar
 - `tree-sitter-scss` 1.0.0 is community-maintained (serenadeai)
 
+**Known ABI risk:** `tree-sitter-angular` declares `tree-sitter ~0.25` but the host is `tree-sitter = "0.26"`. This may cause a compilation failure if the `~0.25` semver range excludes 0.26. Fallback: pin an older compatible version of `tree-sitter-angular`, or fork and update its dependency to accept `~0.26`. The ABI smoke tests (see Testing section) will catch this before any extractor work begins.
+
+**Out of scope:** `.less` (Less CSS) and `.sass` (indented Sass syntax) are not included — no mature tree-sitter grammars available. Can be added in a future sprint if needed.
+
 ## Symbol Extraction
 
 ### HTML/Angular
@@ -71,6 +75,8 @@ Grammar dependencies:
 
 **One symbol per rule block** with full selector list as name. Selector lists like `.btn, .btn-primary, :host { ... }` become a single symbol. Inner `@keyframes` steps are not extracted.
 
+**Note:** `@layer` is a recent CSS feature (2022). Verify that `tree-sitter-css` 0.25.0 includes a node type for `@layer` during ABI smoke testing. If absent, skip `@layer` extraction and add it when the grammar is updated.
+
 ### SCSS (extends CSS)
 
 All CSS symbols above, plus:
@@ -93,9 +99,30 @@ All three languages start at `TextEditSafe`:
 | Css | `TextEditSafe` | Selectors safe for scoped edits; structural delete could break cascade |
 | Scss | `TextEditSafe` | Community grammar, lower confidence on span accuracy |
 
-**Implementation:** Extend `edit_capability_for` to cover source-language extractors. Add a function that returns `Some(EditCapability::TextEditSafe)` for Html/Css/Scss and `None` for all other source languages. `None` explicitly means "unrestricted" — these are mature tree-sitter languages with proven span accuracy. Document this in the code.
+**Implementation:** Add a new function `edit_capability_for_language` in `src/parsing/config_extractors/mod.rs` that unifies both config and source-language capability checks:
 
-The existing `check_config_edit_capability` in `tools.rs` is renamed to `check_edit_capability` and checks both config extractors and source-language capabilities.
+```rust
+pub fn edit_capability_for_language(language: &LanguageId) -> Option<EditCapability> {
+    // Config languages — delegate to their extractor
+    if let Some(cap) = edit_capability_for(language) {
+        return Some(cap);
+    }
+    // Source languages with restricted editing
+    match language {
+        LanguageId::Html | LanguageId::Css | LanguageId::Scss => Some(EditCapability::TextEditSafe),
+        // All other source languages → None (unrestricted).
+        // None means "no capability restriction" — these are mature tree-sitter
+        // languages with proven span accuracy and existing edit tool support.
+        _ => None,
+    }
+}
+```
+
+This function lives in `config_extractors/mod.rs` because it already owns `EditCapability`. The name `edit_capability_for_language` distinguishes it from the existing `edit_capability_for` (config-only).
+
+The existing `check_config_edit_capability` in `tools.rs` (line ~2476) is renamed to `check_edit_capability` and updated to call `edit_capability_for_language` instead of `edit_capability_for`. The three call sites (in `replace_symbol_body`, `delete_symbol`, `edit_within_symbol`) and the function's internal comment ("Non-config files → no restriction") must all be updated. After the change, Html/Css/Scss source files will be gated at `TextEditSafe`, while all other source languages remain unrestricted.
+
+**Cross-reference extraction:** The `xref::extract_references` function in `src/parsing/xref.rs` has an exhaustive match on `LanguageId` for tree-sitter grammar selection. Html/Css/Scss need `unreachable!()` arms there (same pattern as config languages), since cross-reference extraction is not implemented for these languages in v1. The xref pass will return empty references for these file types.
 
 ## ABI Compatibility Validation
 
