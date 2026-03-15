@@ -329,7 +329,14 @@ fn outline_text(
     }
 
     // Apply budget enforcement.
-    let max_bytes = params.max_tokens.unwrap_or(200) * 4;
+    // Hook path: default 200 tokens (800 bytes) for compact hook output.
+    // Tool path: no cap unless explicitly requested — section filtering
+    // must be visible, not masked by a tiny default budget.
+    let max_bytes = match params.max_tokens {
+        Some(n) => n * 4,
+        None if options.include_savings_footer => 200 * 4, // hook path: compact
+        None => 0,                                          // tool path: unlimited (0 = no cap)
+    };
     let (mut text, _remaining) = build_with_budget(&lines, max_bytes);
 
     let output_bytes = text.len() as u64;
