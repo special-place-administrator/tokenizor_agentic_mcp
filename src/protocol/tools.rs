@@ -1888,8 +1888,27 @@ impl TokenizorServer {
             Ok(options) => options,
             Err(message) => return message,
         };
-        let is_regex = params.0.regex.unwrap_or(false);
+        let mut is_regex = params.0.regex.unwrap_or(false);
         let original_query = params.0.query.clone();
+
+        // Auto-detect regex patterns: if regex is not explicitly set and the
+        // query contains unambiguous regex sequences (\w, \d, \s, \b, .+, .*),
+        // enable regex mode automatically. These sequences never appear
+        // literally in code, so treating them as literals always gives 0 results.
+        if !is_regex {
+            if let Some(ref q) = params.0.query {
+                let has_regex_escape = q.contains("\\w")
+                    || q.contains("\\d")
+                    || q.contains("\\s")
+                    || q.contains("\\b")
+                    || q.contains("\\W")
+                    || q.contains("\\D")
+                    || q.contains("\\S");
+                if has_regex_escape {
+                    is_regex = true;
+                }
+            }
+        }
         let result = {
             let guard = self.index.read().expect("lock poisoned");
             loading_guard!(guard);

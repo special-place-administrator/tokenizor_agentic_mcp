@@ -631,16 +631,21 @@ pub(crate) fn execute_batch_edit(
                 }
                 EditOperation::EditWithin { old_text, new_text } => {
                     let old_bytes = (r.sym.byte_range.1 - r.sym.byte_range.0) as usize;
+                    let old_content_len = content.len();
                     let (new, count) =
                         build_edit_within(&content, &r.sym, old_text, new_text, false)
                             .map_err(|e| format!("Edit in {path}:{}: {e}", r.sym.name))?;
                     content = new;
+                    // Compute new symbol size from content length delta
+                    let new_bytes = (old_bytes as isize
+                        + (content.len() as isize - old_content_len as isize))
+                        as usize;
                     file_summaries.push(super::edit_format::format_edit_within(
                         path,
                         &r.sym.name,
                         count,
                         old_bytes,
-                        old_bytes,
+                        new_bytes,
                     ));
                 }
             }
