@@ -36,8 +36,17 @@ fn resolve_module_path(file_path: &str, language: &LanguageId) -> Option<String>
 
     match language {
         LanguageId::Rust => {
-            // Strip "src/" prefix; files outside src/ don't have crate module paths.
-            let stripped = path.strip_prefix("src").ok()?;
+            // Strip up to and including "src/" — handles both root projects ("src/lib.rs")
+            // and workspace crates ("crates/aap-core/src/types.rs").
+            let after_src: String = if let Ok(stripped) = path.strip_prefix("src") {
+                stripped.to_string_lossy().into_owned()
+            } else {
+                // Workspace layout: find "/src/" component anywhere in path
+                let normalized = file_path.replace('\\', "/");
+                let src_idx = normalized.find("/src/")?;
+                normalized[src_idx + 5..].to_string() // skip "/src/"
+            };
+            let stripped = std::path::Path::new(&after_src);
             let mut components: Vec<String> = stripped
                 .components()
                 .filter_map(|c| c.as_os_str().to_str().map(String::from))
@@ -4056,6 +4065,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_find_dependents_workspace_crate_qualified_import() {
+        // Workspace layout: crates/core/src/types.rs defines types,
+        // crates/api/src/handler.rs imports "crate::types".
+        // The module path for "crates/core/src/types.rs" should resolve to
+        // "crate::types", matching the import in handler.rs.
+        let import_ref = make_ref("crate::types", None, ReferenceKind::Import, None, 0);
+        let type_usage = make_ref("MyType", None, ReferenceKind::TypeUsage, None, 5);
+        let f_handler = make_file_with_refs(
+            "crates/api/src/handler.rs",
+            vec![import_ref, type_usage],
+            HashMap::new(),
+        );
+        let my_type_sym = SymbolRecord {
+            name: "MyType".to_string(),
+            kind: SymbolKind::Struct,
+            depth: 0,
+            sort_order: 0,
+            byte_range: (0, 30),
+            line_range: (0, 1),
+            doc_byte_range: None,
+        };
+        let mut f_types = make_file_with_refs("crates/core/src/types.rs", vec![], HashMap::new());
+        f_types.symbols.push(my_type_sym);
+        let index = make_index(
+            vec![
+                ("crates/api/src/handler.rs", f_handler),
+                ("crates/core/src/types.rs", f_types),
+            ],
+            false,
+        );
+
+        let deps = index.find_dependents_for_file("crates/core/src/types.rs");
+        assert!(
+            !deps.is_empty(),
+            "workspace crate types.rs should have dependents, got: {:?}",
+            deps.iter().map(|(p, _)| p).collect::<Vec<_>>()
+        );
+    }
+
     // --- find_dependents: module path resolution ---
 
     #[test]
@@ -4695,6 +4744,19 @@ public class PacketsController {
         );
         // Files outside src/ have no module path
         assert_eq!(resolve_module_path("tests/foo.rs", &LanguageId::Rust), None);
+        // Workspace crates: "crates/my-crate/src/types.rs" → "crate::types"
+        assert_eq!(
+            resolve_module_path("crates/aap-core/src/types.rs", &LanguageId::Rust),
+            Some("crate::types".to_string())
+        );
+        assert_eq!(
+            resolve_module_path("crates/aap-core/src/lib.rs", &LanguageId::Rust),
+            Some("crate".to_string())
+        );
+        assert_eq!(
+            resolve_module_path("crates/aap-core/src/domain/mod.rs", &LanguageId::Rust),
+            Some("crate::domain".to_string())
+        );
     }
 
     #[test]
