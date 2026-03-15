@@ -126,8 +126,9 @@ pub(crate) fn apply_indentation(text: &str, indent: &[u8]) -> Vec<u8> {
 
 /// Build the bytes to insert before a symbol: indented content + separator + existing content.
 /// Splices at the start of the line (before existing indentation) so indentation isn't doubled.
-/// Uses `\n\n` when the target symbol has no doc comments (visual separation between definitions),
-/// and `\n` when doc comments are present (keeps doc comment tight against its symbol).
+/// Uses `\n\n` when the target symbol has no doc comments and no blank line already precedes
+/// the splice point (visual separation between definitions), and `\n` otherwise (avoids triple
+/// newlines when a blank line already exists, and keeps doc comments tight against their symbol).
 pub(crate) fn build_insert_before(
     file_content: &[u8],
     sym: &SymbolRecord,
@@ -142,10 +143,17 @@ pub(crate) fn build_insert_before(
     let indent = detect_indentation(file_content, sym.byte_range.0);
     let indented = apply_indentation(new_code, &indent);
     let mut insertion = indented;
-    let separator = if sym.doc_byte_range.is_some() {
-        b"\n" as &[u8]
+    let separator: &[u8] = if sym.doc_byte_range.is_some() {
+        b"\n"
     } else {
-        b"\n\n"
+        // Use single newline only when a blank line already precedes the symbol
+        // (avoids creating triple-newline sequences). At start-of-file (empty prefix),
+        // there's no existing blank line, so use double newline for visual separation.
+        let prefix = &file_content[..line_start as usize];
+        let already_has_blank = prefix.len() >= 2
+            && prefix[prefix.len() - 1] == b'\n'
+            && prefix[prefix.len() - 2] == b'\n';
+        if already_has_blank { b"\n" } else { b"\n\n" }
     };
     insertion.extend_from_slice(separator);
     apply_splice(file_content, (line_start, line_start), &insertion)
@@ -1796,6 +1804,98 @@ mod tests {
         assert!(
             result_str.contains("Point3D { x: f64 }\n\nstruct Point"),
             "should have \\n\\n separator when no doc comment: {result_str}"
+        );
+    }
+
+    #[test]
+    fn test_build_insert_before_no_double_blank_line() {
+        // File already has a blank line before the symbol: inserting should NOT create \n\n\n.
+        // "\n"            =  1 byte (0..1)   — blank line preceding the symbol
+        // "fn existing() {}\n" = 18 bytes (1..19)
+        let content = b"\nfn existing() {}\n";
+        let sym = SymbolRecord {
+            name: "existing".to_string(),
+            kind: SymbolKind::Function,
+            depth: 0,
+            sort_order: 0,
+            byte_range: (1, 18),
+            line_range: (1, 1),
+            doc_byte_range: None,
+        };
+        let result = build_insert_before(content, &sym, "fn new_fn() {}");
+        let result_str = String::from_utf8(result).unwrap();
+        assert!(
+            !result_str.contains("\n\n\n"),
+            "should not produce triple newline when blank line already precedes symbol: {result_str:?}"
+        );
+        assert!(
+            result_str.contains("fn new_fn() {}"),
+            "inserted content missing: {result_str:?}"
+        );
+        assert!(
+            result_str.contains("fn existing() {}"),
+            "existing content missing: {result_str:?}"
+        );
+    }
+
+    #[test]
+    fn test_build_insert_before_first_symbol_in_file() {
+        // Symbol starts at byte 0 (prefix is empty) — no double blank line should be produced.
+        let content = b"fn first() {}\n";
+        let sym = SymbolRecord {
+            name: "first".to_string(),
+            kind: SymbolKind::Function,
+            depth: 0,
+            sort_order: 0,
+            byte_range: (0, 13),
+            line_range: (0, 0),
+            doc_byte_range: None,
+        };
+        let result = build_insert_before(content, &sym, "fn before() {}");
+        let result_str = String::from_utf8(result).unwrap();
+        assert!(
+            !result_str.contains("\n\n\n"),
+            "should not produce triple newline when symbol is first in file: {result_str:?}"
+        );
+        assert!(
+            result_str.contains("fn before() {}"),
+            "inserted content missing: {result_str:?}"
+        );
+        assert!(
+            result_str.contains("fn first() {}"),
+            "original content missing: {result_str:?}"
+        );
+    }
+
+    #[test]
+    fn test_build_insert_before_with_doc_byte_range() {
+        // Symbol has doc_byte_range — separator is always \n (tight against doc comment).
+        // "/// Doc\n"       =  8 bytes (0..8)
+        // "fn target() {}\n" = 15 bytes (8..23)
+        // "\n"               =  1 byte  (23..24)
+        // "fn other() {}\n"  = 14 bytes (24..38)
+        let content = b"/// Doc\nfn target() {}\n\nfn other() {}\n";
+        let sym = SymbolRecord {
+            name: "target".to_string(),
+            kind: SymbolKind::Function,
+            depth: 0,
+            sort_order: 0,
+            byte_range: (8, 23),
+            line_range: (1, 1),
+            doc_byte_range: Some((0, 8)),
+        };
+        let result = build_insert_before(content, &sym, "fn inserted() {}");
+        let result_str = String::from_utf8(result).unwrap();
+        // insertion goes above the doc comment, with \n separator (not \n\n)
+        assert!(
+            !result_str.contains("\n\n\n"),
+            "should not produce triple newline with doc_byte_range: {result_str:?}"
+        );
+        let ins_pos = result_str.find("fn inserted()").expect("inserted content missing");
+        let doc_pos = result_str.find("/// Doc").expect("doc comment missing");
+        assert!(
+            ins_pos < doc_pos,
+            "insertion should appear before doc comment: ins={ins_pos} doc={doc_pos}"
         );
     }
 
