@@ -241,6 +241,43 @@ pub fn find_git_root() -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
+/// Check if content appears to be binary.
+/// Examines up to BINARY_SNIFF_BYTES of the content using three heuristics:
+/// 1. NUL byte present -> binary
+/// 2. UTF-8 decode failure -> binary
+/// 3. >30% suspicious control bytes (excluding \t, \n, \r) -> binary
+pub fn is_binary_content(content: &[u8]) -> bool {
+    if content.is_empty() {
+        return false;
+    }
+    let check_len = content.len().min(crate::domain::index::BINARY_SNIFF_BYTES);
+    let window = &content[..check_len];
+
+    // Heuristic 1: NUL byte
+    if window.contains(&0) {
+        return true;
+    }
+
+    // Heuristic 2: Invalid UTF-8
+    if std::str::from_utf8(window).is_err() {
+        return true;
+    }
+
+    // Heuristic 3: High control byte ratio
+    // Control bytes: 0x01-0x08, 0x0E-0x1F, 0x7F
+    // Excludes common text controls: \t (0x09), \n (0x0A), \r (0x0D)
+    let suspicious_controls = window
+        .iter()
+        .filter(|&&b| matches!(b, 0x01..=0x08 | 0x0E..=0x1F | 0x7F))
+        .count();
+    let ratio = suspicious_controls as f64 / window.len() as f64;
+    if ratio > 0.30 {
+        return true;
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,5 +464,53 @@ mod tests {
             !is_forbidden_root(tmp.path()),
             "temp project dir should be allowed"
         );
+    }
+
+    #[test]
+    fn test_binary_sniff_detects_null_bytes() {
+        let content = b"hello\x00world";
+        assert!(is_binary_content(content));
+    }
+
+    #[test]
+    fn test_binary_sniff_allows_pure_utf8() {
+        let content = b"fn main() { println!(\"hello\"); }";
+        assert!(!is_binary_content(content));
+    }
+
+    #[test]
+    fn test_binary_sniff_empty_file() {
+        assert!(!is_binary_content(b""));
+    }
+
+    #[test]
+    fn test_binary_sniff_detects_invalid_utf8() {
+        let content: &[u8] = &[0x80, 0x81, 0x82, 0x83, 0x84];
+        assert!(is_binary_content(content));
+    }
+
+    #[test]
+    fn test_binary_sniff_detects_high_control_ratio() {
+        let mut content = Vec::new();
+        for _ in 0..80 {
+            content.push(0x01); // SOH — control char
+        }
+        for _ in 0..20 {
+            content.push(b'A'); // printable
+        }
+        // 80% control bytes > 30% threshold -> binary
+        assert!(is_binary_content(&content));
+    }
+
+    #[test]
+    fn test_binary_sniff_allows_low_control_ratio() {
+        let content = b"line1\tvalue1\nline2\tvalue2\nline3\tvalue3\n";
+        assert!(!is_binary_content(content));
+    }
+
+    #[test]
+    fn test_binary_sniff_allows_common_whitespace_controls() {
+        let content = b"col1\tcol2\tcol3\r\nval1\tval2\tval3\r\n";
+        assert!(!is_binary_content(content));
     }
 }
