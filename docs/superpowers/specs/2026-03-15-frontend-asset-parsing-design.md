@@ -77,7 +77,7 @@ Grammar dependencies:
 
 **One symbol per rule block** with full selector list as name. Selector lists like `.btn, .btn-primary, :host { ... }` become a single symbol. Inner `@keyframes` steps are not extracted.
 
-**Note:** `@layer` is a recent CSS feature (2022). Verify that `tree-sitter-css` 0.25.0 includes a node type for `@layer` during ABI smoke testing. If absent, skip `@layer` extraction and add it when the grammar is updated.
+**Note:** `@layer` is a recent CSS feature (2022). Verify that `tree-sitter-css` 0.25.0 includes a node type for `@layer` during extractor unit testing (see CSS unit tests section). If absent, skip `@layer` extraction and document as a known gap.
 
 ### SCSS (extends CSS)
 
