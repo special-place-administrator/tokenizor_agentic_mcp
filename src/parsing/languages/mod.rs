@@ -136,7 +136,9 @@ pub fn extract_symbols(node: &Node, source: &str, language: &LanguageId) -> Vec<
         | LanguageId::Yaml
         | LanguageId::Markdown
         | LanguageId::Env => unreachable!("config types are handled before parse_source"),
-LanguageId::Html | LanguageId::Css | LanguageId::Scss => todo!("extractors wired in Task 10"),
+        LanguageId::Html => html::extract_symbols(node, source),
+        LanguageId::Css => css::extract_symbols(node, source),
+        LanguageId::Scss => scss::extract_symbols(node, source),
     }
 }
 
