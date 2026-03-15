@@ -609,7 +609,44 @@ pub(crate) fn execute_batch_rename(
             .collect()
     };
 
-    // Phase 3: Group all rename sites by file.
+    // Phase 2b: Supplemental literal scan for path-qualified usages.
+    // The xref index tracks call targets (e.g. "new" in Widget::new()), not
+    // path prefixes. A literal whole-word scan catches Type::method() patterns,
+    // import paths, and any other usage the xref system doesn't index.
+    let literal_sites: Vec<(String, (u32, u32))> = {
+        let guard = index.read().expect("lock poisoned");
+        let name_bytes = input.name.as_bytes();
+        let name_len = name_bytes.len();
+        let mut sites = Vec::new();
+        for (file_path, file) in &guard.files {
+            let content = &file.content;
+            let mut start = 0;
+            while let Some(pos) = content[start..]
+                .windows(name_len)
+                .position(|w| w == name_bytes)
+            {
+                let abs_pos = start + pos;
+                // Whole-word check: char before must not be alphanumeric/underscore,
+                // char after must not be alphanumeric/underscore.
+                let before_ok = abs_pos == 0
+                    || !content[abs_pos - 1].is_ascii_alphanumeric()
+                        && content[abs_pos - 1] != b'_';
+                let after_pos = abs_pos + name_len;
+                let after_ok = after_pos >= content.len()
+                    || !content[after_pos].is_ascii_alphanumeric() && content[after_pos] != b'_';
+                if before_ok && after_ok {
+                    sites.push((
+                        file_path.clone(),
+                        (abs_pos as u32, (abs_pos + name_len) as u32),
+                    ));
+                }
+                start = abs_pos + 1;
+            }
+        }
+        sites
+    };
+
+    // Phase 3: Group all rename sites by file (indexed refs + literal scan).
     let mut by_file: std::collections::HashMap<String, Vec<(u32, u32)>> =
         std::collections::HashMap::new();
     by_file
@@ -617,6 +654,9 @@ pub(crate) fn execute_batch_rename(
         .or_default()
         .push(def_name_range);
     for (path, range) in &ref_sites {
+        by_file.entry(path.clone()).or_default().push(*range);
+    }
+    for (path, range) in &literal_sites {
         by_file.entry(path.clone()).or_default().push(*range);
     }
     // Sort reverse by offset, dedup.

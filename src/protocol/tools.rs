@@ -6649,6 +6649,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_batch_rename_catches_path_qualified_calls() {
+        // Regression: batch_rename must catch Type::new() path-qualified calls,
+        // not just simple name references. The index tracks "new" as the call
+        // target, but "Widget" as a path prefix must also be renamed.
+        use crate::protocol::edit::BatchRenameInput;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+
+        let lib_content = b"pub struct Widget { pub name: String }\nimpl Widget {\n    pub fn new(name: &str) -> Self { Widget { name: name.to_string() } }\n}\n";
+        let main_content =
+            b"use crate::Widget;\nfn make() -> Widget {\n    Widget::new(\"default\")\n}\n";
+        std::fs::write(src_dir.join("lib.rs"), lib_content).unwrap();
+        std::fs::write(src_dir.join("main.rs"), main_content).unwrap();
+
+        let mut files = vec![];
+        for (path, content) in [
+            ("src/lib.rs", lib_content as &[u8]),
+            ("src/main.rs", main_content as &[u8]),
+        ] {
+            let result = crate::parsing::process_file(path, content, LanguageId::Rust);
+            let indexed =
+                crate::live_index::store::IndexedFile::from_parse_result(result, content.to_vec());
+            files.push((path.to_string(), indexed));
+        }
+        let index = make_live_index_ready(files);
+        let server = make_server_with_root(index, Some(dir.path().to_path_buf()));
+
+        let input = BatchRenameInput {
+            path: "src/lib.rs".to_string(),
+            name: "Widget".to_string(),
+            kind: None,
+            symbol_line: None,
+            new_name: "Gadget".to_string(),
+            dry_run: None,
+        };
+        let result = server.batch_rename(Parameters(input)).await;
+        assert!(result.contains("Renamed"), "result: {result}");
+
+        // Verify disk: Widget::new() in main.rs must become Gadget::new()
+        let main = std::fs::read_to_string(src_dir.join("main.rs")).unwrap();
+        assert!(
+            !main.contains("Widget"),
+            "main.rs should have no 'Widget' left after rename, got: {main}"
+        );
+        assert!(
+            main.contains("Gadget::new"),
+            "main.rs should contain Gadget::new, got: {main}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_text_agrees_with_disk_after_rename() {
+        // Regression: after batch_rename, search_text must agree with on-disk
+        // content. If rename misses some sites, search_text must still find
+        // the old name (because it's still on disk), not report zero matches.
+        use crate::protocol::edit::BatchRenameInput;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+
+        let lib_content = b"pub struct Widget { pub name: String }\nimpl Widget {\n    pub fn new(name: &str) -> Self { Widget { name: name.to_string() } }\n}\n";
+        let main_content =
+            b"use crate::Widget;\nfn make() -> Widget {\n    Widget::new(\"default\")\n}\n";
+        std::fs::write(src_dir.join("lib.rs"), lib_content).unwrap();
+        std::fs::write(src_dir.join("main.rs"), main_content).unwrap();
+
+        let mut files = vec![];
+        for (path, content) in [
+            ("src/lib.rs", lib_content as &[u8]),
+            ("src/main.rs", main_content as &[u8]),
+        ] {
+            let result = crate::parsing::process_file(path, content, LanguageId::Rust);
+            let indexed =
+                crate::live_index::store::IndexedFile::from_parse_result(result, content.to_vec());
+            files.push((path.to_string(), indexed));
+        }
+        let index = make_live_index_ready(files);
+        let server = make_server_with_root(index, Some(dir.path().to_path_buf()));
+
+        // Do the rename
+        let input = BatchRenameInput {
+            path: "src/lib.rs".to_string(),
+            name: "Widget".to_string(),
+            kind: None,
+            symbol_line: None,
+            new_name: "Gadget".to_string(),
+            dry_run: None,
+        };
+        let _result = server.batch_rename(Parameters(input)).await;
+
+        // Now check: if "Widget" is still on disk anywhere, search_text must find it.
+        let disk_has_widget = std::fs::read_to_string(src_dir.join("main.rs"))
+            .unwrap()
+            .contains("Widget")
+            || std::fs::read_to_string(src_dir.join("lib.rs"))
+                .unwrap()
+                .contains("Widget");
+
+        if disk_has_widget {
+            // search_text should find it too — index must not lie
+            let search_input = crate::protocol::tools::SearchTextInput {
+                query: Some("Widget".to_string()),
+                terms: None,
+                path_prefix: None,
+                glob: None,
+                exclude_glob: None,
+                language: None,
+                regex: None,
+                case_sensitive: None,
+                whole_word: None,
+                group_by: None,
+                follow_refs: None,
+                follow_refs_limit: None,
+                context: None,
+                limit: None,
+                max_per_file: None,
+                include_tests: None,
+                include_generated: None,
+            };
+            let search_result = server.search_text(Parameters(search_input)).await;
+            assert!(
+                !search_result.contains("0 matches"),
+                "search_text says 0 matches but Widget is still on disk! Index/disk desync. search_result: {search_result}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_batch_insert_adds_to_multiple_files() {
         use crate::protocol::edit::{BatchInsertInput, InsertPosition, InsertTarget};
 
