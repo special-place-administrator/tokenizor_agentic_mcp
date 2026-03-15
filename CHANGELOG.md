@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.28.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.28.0...v0.28.1) (2026-03-15)
+
+
+### Bug Fixes
+
+* find_dependents resolves workspace crate paths ([418652a](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/418652a42bd3e1443602cb87cd1eed2d7e4c0574))
+* find_dependents resolves workspace crate paths (B4) ([f02819d](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/f02819db942530bcbb974fe946d05224bb953ab6)), closes [#89](https://github.com/special-place-administrator/tokenizor_agentic_mcp/issues/89)
+
 ## [0.28.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.27.3...v0.28.0) (2026-03-15)
 
 
