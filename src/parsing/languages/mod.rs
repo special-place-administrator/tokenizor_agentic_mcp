@@ -1,7 +1,9 @@
 mod c;
 mod cpp;
 mod csharp;
+mod css;
 mod dart;
+mod html;
 mod elixir;
 mod go;
 mod java;
@@ -12,6 +14,7 @@ mod php;
 mod python;
 mod ruby;
 mod rust;
+mod scss;
 mod swift;
 mod typescript;
 
