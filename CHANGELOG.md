@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.28.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.27.3...v0.28.0) (2026-03-15)
+
+
+### Features
+
+* improve explore relevance ranking (Q1) ([5b829ca](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/5b829cab9138885daf8479b3fb3a594bc35838d5))
+* quality improvements from 3-project eval (Q1-Q6) ([8d23ff4](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/8d23ff4749250d4ad85f12324280543fd8c5e403))
+* quality improvements from eval feedback (Q3-Q6) ([79ac714](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/79ac714eb67a2d504be76a4beec7479cfe154385))
+
 ## [0.27.3](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.27.2...v0.27.3) (2026-03-15)
 
 
