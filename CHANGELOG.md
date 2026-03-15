@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.8](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.30.7...v0.30.8) (2026-03-15)
+
+
+### Bug Fixes
+
+* update installer test assertion for execFileSyncFn version check ([f6ed05d](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/f6ed05dd601105a4a3249cf2844b4da91210c560))
+
 ## [0.30.7](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.30.6...v0.30.7) (2026-03-15)
 
 
