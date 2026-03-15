@@ -179,11 +179,57 @@ pub(crate) fn build_delete(file_content: &[u8], sym: &SymbolRecord) -> Vec<u8> {
     // Extend to start of line (include leading whitespace).
     let start = {
         let s = sym.effective_start() as usize;
-        file_content[..s]
+        let mut line_start = file_content[..s]
             .iter()
             .rposition(|&b| b == b'\n')
             .map(|p| p + 1)
-            .unwrap_or(0) as u32
+            .unwrap_or(0);
+
+        // If doc_byte_range is None (no attached doc comment), scan upward
+        // past a single blank line to find orphaned doc comments. This handles
+        // the case where a blank line separates a comment from its symbol,
+        // preventing scan_doc_range from attaching it.
+        if sym.doc_byte_range.is_none() {
+            // Split content above into lines and scan from bottom up.
+            let above = &file_content[..line_start];
+            let lines: Vec<&[u8]> = above.split(|&b| b == b'\n').collect();
+            // lines has a trailing empty element if above ends with \n.
+            // Walk from the end: skip empty/whitespace lines (blank lines),
+            // then collect consecutive comment lines.
+            let mut i = lines.len();
+            // Skip trailing empty element from split
+            if i > 0 && lines[i - 1].is_empty() {
+                i -= 1;
+            }
+            // Skip exactly one blank line
+            if i > 0 && lines[i - 1].iter().all(|b| b.is_ascii_whitespace()) {
+                i -= 1;
+                // Now collect consecutive comment lines above the blank line
+                let mut found_comments = false;
+                while i > 0 {
+                    let line_text = std::str::from_utf8(lines[i - 1]).unwrap_or("");
+                    let trimmed = line_text.trim_start();
+                    if trimmed.starts_with("///")
+                        || trimmed.starts_with("//!")
+                        || trimmed.starts_with("/**")
+                        || trimmed.starts_with("# ")
+                        || trimmed == "#"
+                    {
+                        found_comments = true;
+                        i -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                if found_comments {
+                    // Compute byte offset: sum of lengths of lines 0..i + newlines
+                    let new_start: usize = lines[..i].iter().map(|l| l.len() + 1).sum();
+                    line_start = new_start;
+                }
+            }
+        }
+
+        line_start as u32
     };
     // Extend past trailing newlines (consume up to one blank line).
     let end = {
@@ -1629,6 +1675,39 @@ mod tests {
         assert!(
             result_str.contains("fn bar()"),
             "other function should remain"
+        );
+    }
+
+    #[test]
+    fn test_build_delete_removes_blank_line_separated_doc_comments() {
+        // Regression: doc comments separated by a blank line from the symbol
+        // are NOT attached via doc_byte_range (scan_doc_range stops at blank lines).
+        // But delete_symbol should still clean them up to avoid orphaned comments.
+        //
+        // "/// Batch-inserted marker\n" = 26 bytes (0..26)
+        // "\n"                          =  1 byte  (26..27)
+        // "fn batch_marker() {}\n"      = 21 bytes (27..48)
+        // "\n"                          =  1 byte  (48..49)
+        // "fn other() {}\n"             = 14 bytes (49..63)
+        let content = b"/// Batch-inserted marker\n\nfn batch_marker() {}\n\nfn other() {}\n";
+        let sym = SymbolRecord {
+            name: "batch_marker".to_string(),
+            kind: SymbolKind::Function,
+            depth: 0,
+            sort_order: 0,
+            byte_range: (27, 48),
+            line_range: (2, 2),
+            doc_byte_range: None, // blank line prevents attachment
+        };
+        let result = build_delete(content, &sym);
+        let result_str = String::from_utf8(result).unwrap();
+        assert!(
+            !result_str.contains("/// Batch-inserted marker"),
+            "orphaned doc comment should be cleaned up, got: {result_str}"
+        );
+        assert!(
+            result_str.contains("fn other()"),
+            "other function should remain, got: {result_str}"
         );
     }
 

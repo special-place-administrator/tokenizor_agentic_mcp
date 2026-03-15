@@ -723,11 +723,22 @@ fn normalize_search_text_glob(input: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|pattern| !pattern.is_empty())
         .map(|pattern| {
-            pattern
+            let normalized = pattern
                 .replace('\\', "/")
                 .trim_start_matches("./")
                 .trim_start_matches('/')
-                .to_string()
+                .to_string();
+            // Auto-prefix bare filenames (no glob chars, no path separators)
+            // so "foo.rs" matches "**/foo.rs" instead of failing silently.
+            if !normalized.contains('*')
+                && !normalized.contains('/')
+                && !normalized.contains('?')
+                && !normalized.contains('[')
+            {
+                format!("**/{normalized}")
+            } else {
+                normalized
+            }
         })
         .filter(|pattern| !pattern.is_empty())
 }
@@ -2456,8 +2467,13 @@ impl TokenizorServer {
                 }
                 if code_only && lang_filter.is_none() {
                     let ext = p.rsplit('.').next().unwrap_or("");
-                    if crate::domain::index::LanguageId::from_extension(ext).is_none() {
-                        return false;
+                    match crate::domain::index::LanguageId::from_extension(ext) {
+                        None => return false,
+                        Some(lang) => {
+                            if crate::parsing::config_extractors::is_config_language(&lang) {
+                                return false;
+                            }
+                        }
                     }
                 }
                 true
