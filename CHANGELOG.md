@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.6](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.30.5...v0.30.6) (2026-03-15)
+
+
+### Bug Fixes
+
+* batch_edit dry_run byte count + auto-detect regex in search_text ([29474c2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/29474c21bd33b1da6858bdbb4179eaa3ac9611a1))
+
 ## [0.30.5](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.30.4...v0.30.5) (2026-03-15)
 
 
