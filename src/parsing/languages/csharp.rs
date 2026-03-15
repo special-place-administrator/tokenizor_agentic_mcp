@@ -29,8 +29,15 @@ fn walk_node(
         "enum_declaration" => Some(SymbolKind::Enum),
         "method_declaration" => Some(SymbolKind::Method),
         "constructor_declaration" => Some(SymbolKind::Function),
-        "namespace_declaration" => Some(SymbolKind::Module),
+        "local_function_statement" => Some(SymbolKind::Function),
+        "namespace_declaration" | "file_scoped_namespace_declaration" => Some(SymbolKind::Module),
         "property_declaration" => Some(SymbolKind::Variable),
+        "global_statement" => {
+            // Top-level statements in C# — recurse into children to find
+            // local_function_statement and expression_statement nodes.
+            walk_children(node, source, depth, sort_order, symbols, None, walk_node);
+            return;
+        }
         _ => None,
     };
 
@@ -99,6 +106,36 @@ mod tests {
         let e = symbols.iter().find(|s| s.kind == SymbolKind::Enum);
         assert!(e.is_some(), "should extract enum, got: {:?}", symbols);
         assert_eq!(e.unwrap().name, "Color");
+    }
+
+    #[test]
+    fn test_csharp_top_level_statements() {
+        let source = r#"
+using System;
+
+Console.WriteLine("Hello");
+
+void Greet(string name) {
+    Console.WriteLine($"Hi, {name}!");
+}
+
+int Add(int a, int b) => a + b;
+"#;
+        let symbols = parse_csharp(source);
+        let greet = symbols.iter().find(|s| s.name == "Greet");
+        assert!(
+            greet.is_some(),
+            "should extract top-level local function Greet, got: {:?}",
+            symbols
+        );
+        assert_eq!(greet.unwrap().kind, SymbolKind::Function);
+        let add = symbols.iter().find(|s| s.name == "Add");
+        assert!(
+            add.is_some(),
+            "should extract top-level local function Add, got: {:?}",
+            symbols
+        );
+        assert_eq!(add.unwrap().kind, SymbolKind::Function);
     }
 
     #[test]

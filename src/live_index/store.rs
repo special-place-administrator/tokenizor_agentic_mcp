@@ -384,8 +384,12 @@ impl SharedIndexHandle {
     }
 
     pub fn reload(&self, root: &Path) -> crate::error::Result<()> {
+        // Build new index data OUTSIDE the write lock (file I/O + parsing).
+        // Only the final swap acquires the lock, reducing block time from
+        // seconds (full I/O) to milliseconds (in-memory index rebuild).
+        let data = LiveIndex::build_reload_data(root)?;
         let mut live = self.live.write().expect("lock poisoned");
-        live.reload(root)?;
+        live.apply_reload_data(data);
         self.publish_locked(&live);
         Ok(())
     }
@@ -502,6 +506,84 @@ impl PublishedIndexState {
             PublishedIndexStatus::Degraded => "Degraded",
         }
     }
+}
+
+/// Secondary indices derived from a single `files` map snapshot.
+/// Invariant: these indices are one coherent snapshot derived from exactly
+/// the `files` map they are paired with. Grouping them enforces this.
+pub(crate) struct DerivedIndices {
+    pub trigram_index: super::trigram::TrigramIndex,
+    pub reverse_index: HashMap<String, Vec<ReferenceLocation>>,
+    pub files_by_basename: HashMap<String, Vec<String>>,
+    pub files_by_dir_component: HashMap<String, Vec<String>>,
+}
+
+impl DerivedIndices {
+    /// Build all derived indices from a file map. Pure function — no side effects,
+    /// no locks, safe to call from any thread.
+    pub(crate) fn build_from_files(files: &HashMap<String, Arc<IndexedFile>>) -> Self {
+        let (files_by_basename, files_by_dir_component) = build_path_indices_from_files(files);
+        Self {
+            trigram_index: super::trigram::TrigramIndex::build_from_files(files),
+            reverse_index: build_reverse_index_from_files(files),
+            files_by_basename,
+            files_by_dir_component,
+        }
+    }
+}
+
+/// Pre-computed reload data built outside any lock.
+///
+/// Contains everything needed to swap into a `LiveIndex` under the write lock.
+/// All derived indices are pre-built so that `apply_reload_data` is pure field
+/// assignment (microseconds, not milliseconds).
+///
+/// # Failure boundaries
+///
+/// `build_reload_data()` is all-or-nothing and side-effect-free with respect to
+/// the live index state. Only `apply_reload_data()` mutates the live state, and
+/// it cannot fail — it's pure assignment.
+pub(crate) struct ReloadData {
+    pub files: HashMap<String, Arc<IndexedFile>>,
+    pub cb_state: CircuitBreakerState,
+    pub load_duration: Duration,
+    pub gitignore: Option<ignore::gitignore::Gitignore>,
+    pub derived: DerivedIndices,
+}
+
+/// Build a reverse index from a file map (standalone, no `&self` needed).
+pub(crate) fn build_reverse_index_from_files(
+    files: &HashMap<String, Arc<IndexedFile>>,
+) -> HashMap<String, Vec<ReferenceLocation>> {
+    let mut idx: HashMap<String, Vec<ReferenceLocation>> = HashMap::new();
+    for (file_path, indexed_file) in files {
+        for (reference_idx, reference) in indexed_file.references.iter().enumerate() {
+            idx.entry(reference.name.clone())
+                .or_default()
+                .push(ReferenceLocation {
+                    file_path: file_path.clone(),
+                    reference_idx: reference_idx as u32,
+                });
+        }
+    }
+    idx
+}
+
+/// Build path indices (basename + dir component) from a file map.
+pub(crate) fn build_path_indices_from_files(
+    files: &HashMap<String, Arc<IndexedFile>>,
+) -> (HashMap<String, Vec<String>>, HashMap<String, Vec<String>>) {
+    let mut by_basename: HashMap<String, Vec<String>> = HashMap::new();
+    let mut by_dir_component: HashMap<String, Vec<String>> = HashMap::new();
+    for path in files.keys() {
+        if let Some(basename) = basename_key(path) {
+            insert_sorted_unique(by_basename.entry(basename).or_default(), path);
+        }
+        for component in dir_component_keys(path) {
+            insert_sorted_unique(by_dir_component.entry(component).or_default(), path);
+        }
+    }
+    (by_basename, by_dir_component)
 }
 
 impl LiveIndex {
@@ -794,19 +876,17 @@ impl LiveIndex {
         (tier1, tier2, tier3)
     }
 
-    /// Reload all source files under `root` into this index in-place.
-    ///
-    /// Replaces all files, resets circuit breaker, and updates timestamps.
-    /// On success sets `is_empty = false`. On error the index remains in its previous state
-    /// (but partial results may have been loaded).
-    pub fn reload(&mut self, root: &Path) -> crate::error::Result<()> {
+    /// Build reload data without holding any lock. Performs all file I/O and
+    /// parsing via Rayon. The returned `ReloadData` is applied under the write
+    /// lock via `apply_reload_data` — reducing lock hold time from seconds to
+    /// milliseconds.
+    pub(crate) fn build_reload_data(root: &Path) -> crate::error::Result<ReloadData> {
         use crate::error::TokenizorError;
 
         let start = Instant::now();
 
-        info!("LiveIndex::reload starting at {:?}", root);
+        info!("LiveIndex::build_reload_data starting at {:?}", root);
 
-        // Validate root exists before attempting discovery
         if !root.exists() {
             return Err(TokenizorError::Discovery(format!(
                 "root path does not exist: {}",
@@ -874,26 +954,53 @@ impl LiveIndex {
 
         let load_duration = start.elapsed();
         info!(
-            "LiveIndex::reload done: {} files, {} symbols, {:?}",
+            "LiveIndex::build_reload_data done: {} files, {} symbols, {:?}",
             new_files.len(),
             new_files.values().map(|f| f.symbols.len()).sum::<usize>(),
             load_duration
         );
 
-        // 4. Swap in-place
-        self.files = new_files;
+        // Pre-build all derived indices outside any lock.
+        let derived = DerivedIndices::build_from_files(&new_files);
+
+        Ok(ReloadData {
+            files: new_files,
+            cb_state: new_cb,
+            load_duration,
+            gitignore: discovery::load_gitignore(root),
+            derived,
+        })
+    }
+
+    /// Apply pre-built reload data under the write lock. Pure field assignment —
+    /// all derived indices are pre-built in `ReloadData`, so this takes
+    /// microseconds instead of milliseconds. Cannot fail.
+    pub(crate) fn apply_reload_data(&mut self, data: ReloadData) {
+        self.files = data.files;
         self.loaded_at = Instant::now();
         self.loaded_at_system = SystemTime::now();
-        self.load_duration = load_duration;
-        self.cb_state = new_cb;
+        self.load_duration = data.load_duration;
+        self.cb_state = data.cb_state;
         self.is_empty = false;
         self.load_source = IndexLoadSource::FreshLoad;
         self.snapshot_verify_state = SnapshotVerifyState::NotNeeded;
-        self.trigram_index = super::trigram::TrigramIndex::build_from_files(&self.files);
-        self.gitignore = discovery::load_gitignore(root);
-        self.rebuild_reverse_index();
-        self.rebuild_path_indices();
+        self.trigram_index = data.derived.trigram_index;
+        self.reverse_index = data.derived.reverse_index;
+        self.files_by_basename = data.derived.files_by_basename;
+        self.files_by_dir_component = data.derived.files_by_dir_component;
+        self.gitignore = data.gitignore;
+    }
 
+    /// Replaces all files, resets circuit breaker, and updates timestamps.
+    /// On success sets `is_empty = false`. On error the index remains in its previous state
+    /// (but partial results may have been loaded).
+    ///
+    /// NOTE: This method does all I/O under `&mut self`. Prefer calling
+    /// `build_reload_data` outside the lock and then `apply_reload_data` under
+    /// the lock when called via `SharedIndexHandle::reload`.
+    pub fn reload(&mut self, root: &Path) -> crate::error::Result<()> {
+        let data = Self::build_reload_data(root)?;
+        self.apply_reload_data(data);
         Ok(())
     }
 
@@ -968,33 +1075,22 @@ impl LiveIndex {
         }
     }
 
-    /// Rebuild `reverse_index` from scratch by iterating all files' references.
+    /// Rebuild `reverse_index` from scratch using current `self.files`.
     ///
-    /// Used by bulk operations: `load()`, `reload()`, and snapshot restore.
-    /// Maps reference name -> Vec of ReferenceLocation (file + index into references vec).
+    /// Used by incremental callers (load, snapshot restore, tests).
+    /// For bulk reload, prefer `DerivedIndices::build_from_files` outside the lock.
     pub(crate) fn rebuild_reverse_index(&mut self) {
-        let mut idx: HashMap<String, Vec<ReferenceLocation>> = HashMap::new();
-        for (file_path, indexed_file) in &self.files {
-            for (reference_idx, reference) in indexed_file.references.iter().enumerate() {
-                idx.entry(reference.name.clone())
-                    .or_default()
-                    .push(ReferenceLocation {
-                        file_path: file_path.clone(),
-                        reference_idx: reference_idx as u32,
-                    });
-            }
-        }
-        self.reverse_index = idx;
+        self.reverse_index = build_reverse_index_from_files(&self.files);
     }
 
+    /// Rebuild path indices (basename + dir component) from current `self.files`.
+    ///
+    /// Used by incremental callers (load, snapshot restore, tests).
+    /// For bulk reload, prefer `DerivedIndices::build_from_files` outside the lock.
     pub(crate) fn rebuild_path_indices(&mut self) {
-        self.files_by_basename.clear();
-        self.files_by_dir_component.clear();
-
-        let paths: Vec<String> = self.files.keys().cloned().collect();
-        for path in &paths {
-            self.insert_path_indices_for_path(path);
-        }
+        let (by_basename, by_dir_component) = build_path_indices_from_files(&self.files);
+        self.files_by_basename = by_basename;
+        self.files_by_dir_component = by_dir_component;
     }
 
     fn insert_path_indices_for_path(&mut self, path: &str) {

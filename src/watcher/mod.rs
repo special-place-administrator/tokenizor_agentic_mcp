@@ -413,13 +413,31 @@ pub async fn run_watcher(
                         .recv_timeout(Duration::from_millis(RECV_TIMEOUT_MS))
                     {
                         Ok(Ok(events)) => {
-                            process_events(
-                                events,
-                                &repo_root,
-                                &shared,
-                                &mut burst_trackers,
-                                &watcher_info,
-                            );
+                            // Run process_events in spawn_blocking to avoid
+                            // starving tokio worker threads during file I/O
+                            // and tree-sitter parsing.
+                            let shared_clone = shared.clone();
+                            let root_clone = repo_root.clone();
+                            let watcher_info_clone = watcher_info.clone();
+                            let mut trackers = std::mem::take(&mut burst_trackers);
+                            match tokio::task::spawn_blocking(move || {
+                                process_events(
+                                    events,
+                                    &root_clone,
+                                    &shared_clone,
+                                    &mut trackers,
+                                    &watcher_info_clone,
+                                );
+                                trackers
+                            })
+                            .await
+                            {
+                                Ok(t) => burst_trackers = t,
+                                // Intentional: on panic the burst trackers reset to empty.
+                                // This is acceptable — burst tracking is a performance
+                                // optimization, not a correctness requirement.
+                                Err(e) => warn!("watcher: process_events panicked: {e}"),
+                            }
                         }
                         Ok(Err(errors)) => {
                             for err in &errors {

@@ -1072,8 +1072,19 @@ async fn call_tool_handler(
 ) -> Result<String, (axum::http::StatusCode, String)> {
     if tool_name == "index_folder" {
         let input = decode_params::<IndexFolderInput>(params).map_err(bad_request)?;
+        let state_for_index = state.clone();
+        let session_id_owned = session_id.clone();
         return state
-            .index_folder_for_session(&session_id, input)
+            .governor
+            .execute("index_folder", async move {
+                tokio::task::spawn_blocking(move || {
+                    state_for_index.index_folder_for_session(&session_id_owned, input)
+                })
+                .await
+                .map_err(|join_err| anyhow::anyhow!("index_folder task panicked: {join_err}"))?
+            })
+            .await
+            .map_err(|gov_err| bad_request(gov_err.into()))?
             .map_err(bad_request);
     }
 

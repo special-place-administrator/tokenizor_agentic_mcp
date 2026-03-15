@@ -2121,26 +2121,38 @@ impl TokenizorServer {
                         shared_commits: Some(entry.shared_commits),
                     })
                     .collect();
-                if hits.is_empty() && commit_count < 50 {
-                    return format!(
-                        "No co-change data for '{target_path}'. Git history has only {commit_count} commit(s) — temporal coupling analysis works best with 50+ commits."
-                    );
+                if hits.is_empty() {
+                    return if commit_count < 50 {
+                        format!(
+                            "No co-change data for '{target_path}'. Only {commit_count} commit(s) analyzed — co-change needs at least 2 shared commits per pair. Results improve with more history."
+                        )
+                    } else {
+                        format!(
+                            "No co-change data for '{target_path}' (analyzed {commit_count} commits). This file may change independently of others."
+                        )
+                    };
                 }
                 let total = hits.len();
-                return format::search_files_result_view(&SearchFilesView::Found {
+                let mut result = format::search_files_result_view(&SearchFilesView::Found {
                     query: format!("co-changes with {target_path}"),
                     total_matches: total,
                     overflow_count: 0,
                     hits,
                 });
+                if commit_count < 50 {
+                    result.push_str(&format!(
+                        "\n\n⚠ Low confidence: only {commit_count} commit(s) analyzed. Coupling scores may shift as history grows."
+                    ));
+                }
+                return result;
             }
-            if commit_count < 50 {
+            if commit_count < 20 {
                 return format!(
-                    "No git history found for '{target_path}'. Git history has only {commit_count} commit(s) — temporal coupling analysis works best with 50+ commits."
+                    "'{target_path}' not found in git history ({commit_count} commit(s) analyzed). Co-change analysis needs more history to produce useful results."
                 );
             }
             return format!(
-                "No git history found for '{target_path}'. Check the file path is correct."
+                "No git history found for '{target_path}'. Check the file path is correct and that it has been committed."
             );
         }
 
@@ -2366,9 +2378,12 @@ impl TokenizorServer {
                 // Not in index — try raw disk read for non-source files
                 // (Cargo.toml, package.json, workflow YAMLs, etc.)
                 if let Some(root) = self.capture_repo_root() {
-                    let full_path = root.join(&params.0.path);
-                    if full_path.exists() && full_path.is_file() {
-                        match std::fs::read(&full_path) {
+                    let canon_path = match edit::safe_repo_path(&root, &params.0.path) {
+                        Ok(p) => p,
+                        Err(_) => return format::not_found_file(&params.0.path),
+                    };
+                    if canon_path.is_file() {
+                        match std::fs::read(&canon_path) {
                             Ok(content) => {
                                 return format::render_file_content_bytes(
                                     &params.0.path,
@@ -3008,7 +3023,10 @@ impl TokenizorServer {
         let indented = edit::apply_indentation(&params.0.new_body, &indent);
         let new_content =
             edit::apply_splice(&file.content, (line_start, sym.byte_range.1), &indented);
-        let abs_path = repo_root.join(&params.0.path);
+        let abs_path = match edit::safe_repo_path(&repo_root, &params.0.path) {
+            Ok(p) => p,
+            Err(e) => return format!("Error: {e}"),
+        };
         if let Err(e) = edit::atomic_write_file(&abs_path, &new_content) {
             return format!("Error writing {}: {e}", params.0.path);
         }
@@ -3092,7 +3110,10 @@ impl TokenizorServer {
         } else {
             edit::build_insert_after(&file.content, &sym, &params.0.content)
         };
-        let abs_path = repo_root.join(&params.0.path);
+        let abs_path = match edit::safe_repo_path(&repo_root, &params.0.path) {
+            Ok(p) => p,
+            Err(e) => return format!("Error: {e}"),
+        };
         if let Err(e) = edit::atomic_write_file(&abs_path, &new_content) {
             return format!("Error writing {}: {e}", params.0.path);
         }
@@ -3154,7 +3175,10 @@ impl TokenizorServer {
         };
         let deleted_bytes = (sym.byte_range.1 - sym.byte_range.0) as usize;
         let new_content = edit::build_delete(&file.content, &sym);
-        let abs_path = repo_root.join(&params.0.path);
+        let abs_path = match edit::safe_repo_path(&repo_root, &params.0.path) {
+            Ok(p) => p,
+            Err(e) => return format!("Error: {e}"),
+        };
         if let Err(e) = edit::atomic_write_file(&abs_path, &new_content) {
             return format!("Error writing {}: {e}", params.0.path);
         }
@@ -3249,7 +3273,10 @@ impl TokenizorServer {
         }
         let old_sym_bytes = sym_end - sym_start;
         let new_content = edit::apply_splice(&file.content, sym.byte_range, new_body.as_bytes());
-        let abs_path = repo_root.join(&params.0.path);
+        let abs_path = match edit::safe_repo_path(&repo_root, &params.0.path) {
+            Ok(p) => p,
+            Err(e) => return format!("Error: {e}"),
+        };
         if let Err(e) = edit::atomic_write_file(&abs_path, &new_content) {
             return format!("Error writing {}: {e}", params.0.path);
         }
@@ -3272,8 +3299,9 @@ impl TokenizorServer {
     // ── Tier 2: Batch edit tools ──────────────────────────────────────────
 
     /// Apply multiple symbol-addressed edits atomically.
+    /// Set dry_run=true for a read-only preview that makes no file changes.
     #[tool(
-        description = "Apply multiple symbol-addressed edits atomically across files. Each edit specifies a file, symbol, and operation (replace/insert_before/insert_after/delete/edit_within). All symbols are validated before any writes — if any resolution fails, no files are modified. Edits within the same file must target non-overlapping symbols. NOT for single-symbol edits (use replace_symbol_body, insert_symbol, etc.)."
+        description = "Apply multiple symbol-addressed edits atomically across files. Each edit specifies a file, symbol, and operation (replace/insert_before/insert_after/delete/edit_within). All symbols are validated before any writes — if any resolution fails, no files are modified. Set dry_run=true for a READ-ONLY preview that shows what would change without writing (safe, no confirmation needed). Edits within the same file must target non-overlapping symbols. NOT for single-symbol edits (use replace_symbol_body, insert_symbol, etc.)."
     )]
     pub(crate) async fn batch_edit(&self, params: Parameters<edit::BatchEditInput>) -> String {
         if let Some(result) = self.proxy_tool_call("batch_edit", &params.0).await {
@@ -3303,8 +3331,9 @@ impl TokenizorServer {
     }
 
     /// Rename a symbol and update all references project-wide.
+    /// Set dry_run=true for a read-only preview that makes no file changes.
     #[tool(
-        description = "Rename a symbol and update all references across the project. Finds the definition and all usage sites via the index's reverse reference map. Best-effort: common names (e.g. `new`, `get`) may produce false positives — verify with what_changed afterward. NOT for replacing a symbol's body (use replace_symbol_body)."
+        description = "Rename a symbol and update all references across the project. Finds the definition and all usage sites via the index's reverse reference map. Set dry_run=true for a READ-ONLY preview that lists affected files without writing any changes (safe, no confirmation needed). Best-effort: common names (e.g. `new`, `get`) may produce false positives — verify with what_changed afterward. NOT for replacing a symbol's body (use replace_symbol_body)."
     )]
     pub(crate) async fn batch_rename(&self, params: Parameters<edit::BatchRenameInput>) -> String {
         if let Some(result) = self.proxy_tool_call("batch_rename", &params.0).await {

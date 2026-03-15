@@ -4,7 +4,7 @@
 //! and is tracked through its lifecycle: queued → executing → completed.
 //!
 //! The governor prevents collisions between concurrent requests:
-//! - Weighted semaphore limits total concurrency (default 8 permits)
+//! - Weighted semaphore limits total concurrency (default 16 permits)
 //! - Write operations (edits, renames) are serialized via a write gate
 //! - Read operations run concurrently but never overlap with writes
 //! - Per-request timeouts at both queue and execution phases
@@ -18,7 +18,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, Semaphore};
 
 /// Default maximum concurrent tool calls (total permits).
-const DEFAULT_MAX_CONCURRENCY: usize = 8;
+/// Sized for multi-agent workloads: 4 agents × 4 concurrent calls = 16 permits.
+const DEFAULT_MAX_CONCURRENCY: usize = 16;
 
 /// Default per-request execution timeout.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -491,8 +492,8 @@ mod tests {
     fn test_governor_snapshot_starts_empty() {
         let gov = RequestGovernor::new();
         let snap = gov.snapshot();
-        assert_eq!(snap.max_concurrency, 8);
-        assert_eq!(snap.available_permits, 8);
+        assert_eq!(snap.max_concurrency, DEFAULT_MAX_CONCURRENCY);
+        assert_eq!(snap.available_permits, DEFAULT_MAX_CONCURRENCY);
         assert!(snap.in_flight.is_empty());
         assert_eq!(snap.total_submitted, 0);
         assert_eq!(snap.total_completed, 0);

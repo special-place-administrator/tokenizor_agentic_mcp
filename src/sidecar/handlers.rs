@@ -335,7 +335,7 @@ fn outline_text(
     let max_bytes = match params.max_tokens {
         Some(n) => n * 4,
         None if options.include_savings_footer => 200 * 4, // hook path: compact
-        None => 0,                                          // tool path: unlimited (0 = no cap)
+        None => 0,                                         // tool path: unlimited (0 = no cap)
     };
     let (mut text, _remaining) = build_with_budget(&lines, max_bytes);
 

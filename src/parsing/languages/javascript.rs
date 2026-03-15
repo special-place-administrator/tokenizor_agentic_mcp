@@ -60,7 +60,9 @@ fn extract_variable_declarations(
         if child.kind() == "variable_declarator"
             && let Some(name) = find_name(&child, source)
         {
-            let kind = if is_const_declaration(node) {
+            let kind = if has_function_initializer(&child) {
+                SymbolKind::Function
+            } else if is_const_declaration(node) {
                 SymbolKind::Constant
             } else {
                 SymbolKind::Variable
@@ -70,6 +72,17 @@ fn extract_variable_declarations(
             );
         }
     }
+}
+
+fn has_function_initializer(declarator: &Node) -> bool {
+    let mut cursor = declarator.walk();
+    for child in declarator.children(&mut cursor) {
+        match child.kind() {
+            "arrow_function" | "function_expression" | "generator_function" => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 fn is_const_declaration(node: &Node) -> bool {
@@ -84,4 +97,66 @@ fn is_const_declaration(node: &Node) -> bool {
 
 fn find_name(node: &Node, source: &str) -> Option<String> {
     find_first_named_child(node, source, &["identifier", "property_identifier"])
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tree_sitter::Parser;
+
+    fn parse_js(source: &str) -> Vec<SymbolRecord> {
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_javascript::LANGUAGE.into();
+        parser.set_language(&lang).expect("set JS language");
+        let tree = parser.parse(source, None).expect("parse JS source");
+        extract_symbols(&tree.root_node(), source)
+    }
+
+    #[test]
+    fn test_js_arrow_function_is_function_kind() {
+        let source = "const handler = (req, res) => { return res.json({}); };";
+        let symbols = parse_js(source);
+        let handler = symbols.iter().find(|s| s.name == "handler");
+        assert!(
+            handler.is_some(),
+            "should extract arrow function, got: {:?}",
+            symbols
+        );
+        assert_eq!(
+            handler.unwrap().kind,
+            SymbolKind::Function,
+            "arrow function should be Function, not Constant"
+        );
+    }
+
+    #[test]
+    fn test_js_function_expression_is_function_kind() {
+        let source = "const greet = function(name) { return name; };";
+        let symbols = parse_js(source);
+        let greet = symbols.iter().find(|s| s.name == "greet");
+        assert!(greet.is_some());
+        assert_eq!(greet.unwrap().kind, SymbolKind::Function);
+    }
+
+    #[test]
+    fn test_js_const_non_function_is_constant() {
+        let source = "const MAX_SIZE = 100;";
+        let symbols = parse_js(source);
+        let max = symbols.iter().find(|s| s.name == "MAX_SIZE");
+        assert!(max.is_some());
+        assert_eq!(max.unwrap().kind, SymbolKind::Constant);
+    }
+
+    #[test]
+    fn test_js_let_variable_is_variable() {
+        let source = "let count = 0;";
+        let symbols = parse_js(source);
+        let count = symbols.iter().find(|s| s.name == "count");
+        assert!(count.is_some());
+        assert_eq!(count.unwrap().kind, SymbolKind::Variable);
+    }
 }

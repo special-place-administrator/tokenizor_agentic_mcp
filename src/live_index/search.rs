@@ -903,7 +903,7 @@ pub fn search_text_with_options(
     let effective_options;
     let opts = if normalized_terms.len() > 1 {
         effective_options = TextSearchOptions {
-            total_limit: options.total_limit * normalized_terms.len(),
+            total_limit: options.total_limit.saturating_mul(normalized_terms.len()),
             max_per_file: options.max_per_file,
             case_sensitive: options.case_sensitive,
             whole_word: options.whole_word,

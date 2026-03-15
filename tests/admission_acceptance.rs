@@ -68,7 +68,8 @@ fn test_admission_tier_acceptance() {
 
     // Tier 1: src/main.rs, src/lib.rs, src/utils/mod.rs, README.md, config.toml = 5
     assert_eq!(
-        tier1, 5,
+        tier1,
+        5,
         "expected 5 Tier-1 (indexed) files, got {tier1}; skipped={:?}",
         index
             .skipped_files()

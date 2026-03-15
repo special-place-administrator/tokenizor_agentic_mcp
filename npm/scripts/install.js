@@ -86,7 +86,7 @@ function createInstaller(overrides = {}) {
 
   function getInstalledVersion(binPath) {
     try {
-      const output = execSyncFn(`"${binPath}" --version`, {
+      const output = execFileSyncFn(binPath, ["--version"], {
         encoding: "utf8",
         timeout: 5000,
       }).trim();

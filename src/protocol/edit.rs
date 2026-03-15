@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -9,6 +9,26 @@ use crate::live_index::query::{
     SymbolSelectorMatch, render_symbol_selector, resolve_symbol_selector,
 };
 use crate::live_index::store::IndexedFile;
+
+// ---------------------------------------------------------------------------
+// Path containment
+// ---------------------------------------------------------------------------
+
+/// Validate that a user-supplied relative path stays within the repo root.
+/// Returns the canonicalized absolute path on success.
+pub(crate) fn safe_repo_path(repo_root: &Path, relative_path: &str) -> Result<PathBuf, String> {
+    let full_path = repo_root.join(relative_path);
+    let canon_root = repo_root
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve repo root: {e}"))?;
+    let canon_path = full_path
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve path '{relative_path}': {e}"))?;
+    if !canon_path.starts_with(&canon_root) {
+        return Err(format!("path '{relative_path}' is outside the repository"));
+    }
+    Ok(canon_path)
+}
 
 // ---------------------------------------------------------------------------
 // Core splice
@@ -658,7 +678,13 @@ pub(crate) fn execute_batch_edit(
             }
             summaries.extend(file_summaries);
         } else {
-            let abs_path = repo_root.join(path);
+            let abs_path = match safe_repo_path(repo_root, path) {
+                Ok(p) => p,
+                Err(e) => {
+                    write_failures.push(format!("FAILED {path}: {e}"));
+                    continue;
+                }
+            };
             match atomic_write_file(&abs_path, &content) {
                 Ok(()) => {
                     reindex_after_write(index, &abs_path, path, &content, language);
@@ -879,9 +905,13 @@ pub(crate) fn execute_batch_rename(
         } else {
             file.language.clone()
         };
+        let abs = match safe_repo_path(repo_root, path) {
+            Ok(p) => p,
+            Err(e) => return Err(format!("Path containment error for '{path}': {e}")),
+        };
         staged.push(StagedFile {
             path: path.clone(),
-            abs_path: repo_root.join(path),
+            abs_path: abs,
             original,
             new_content,
             language: lang,
@@ -1048,7 +1078,10 @@ pub(crate) fn execute_batch_insert(
             InsertPosition::After => build_insert_after(&file.content, &sym, &input.content),
         };
 
-        let abs_path = repo_root.join(&target.path);
+        let abs_path = match safe_repo_path(repo_root, &target.path) {
+            Ok(p) => p,
+            Err(e) => return Err(format!("Target {}: {e}", target.path)),
+        };
         match atomic_write_file(&abs_path, &new_content) {
             Ok(()) => {
                 let lang = file.language.clone();
