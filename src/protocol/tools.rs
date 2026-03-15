@@ -482,6 +482,11 @@ pub struct GetSymbolContextInput {
     /// Omit for default symbol-context mode. Pass empty array for all trace sections.
     #[serde(default)]
     pub sections: Option<Vec<String>>,
+    /// Optional max token budget for bundle mode. When set, truncates type dependency
+    /// resolution to stay within budget. Dependencies are resolved in order; excess
+    /// dependencies are listed as names only without full definitions.
+    #[serde(default, deserialize_with = "lenient_u64")]
+    pub max_tokens: Option<u64>,
 }
 
 /// Input for `analyze_file_impact`.
@@ -572,6 +577,10 @@ pub struct DiffSymbolsInput {
     /// Only files with a recognized programming language extension are included.
     #[serde(default, deserialize_with = "lenient_bool")]
     pub code_only: Option<bool>,
+    /// When true, show only per-file summary counts (+N added, -N removed, ~N modified)
+    /// without listing individual symbols. Like `git diff --stat` vs `git diff`.
+    #[serde(default, deserialize_with = "lenient_bool")]
+    pub compact: Option<bool>,
 }
 
 enum WhatChangedMode {
@@ -1334,7 +1343,21 @@ impl TokenizorServer {
                 (v, raw)
             };
             let verbosity = params.0.verbosity.as_deref().unwrap_or("full");
-            let result = format::context_bundle_result_view(&view, verbosity);
+            let mut result = format::context_bundle_result_view(&view, verbosity);
+            // Apply max_tokens truncation if requested
+            if let Some(max_tokens) = params.0.max_tokens {
+                let max_chars = (max_tokens as usize) * 4; // ~4 chars per token
+                if result.len() > max_chars {
+                    result.truncate(max_chars);
+                    // Find last complete line
+                    if let Some(last_nl) = result.rfind('\n') {
+                        result.truncate(last_nl + 1);
+                    }
+                    result.push_str(&format!(
+                        "\n... truncated at ~{max_tokens} tokens. Use without max_tokens for full output.\n"
+                    ));
+                }
+            }
             let saved = raw_chars.saturating_sub(result.len());
             let footer = format::compact_savings_footer(result.len(), raw_chars);
             self.record_read_savings((saved / 4) as u64);
@@ -1760,6 +1783,7 @@ impl TokenizorServer {
                         .to_string();
                 }
             }
+            let commit_count = temporal.stats.total_commits_analyzed;
             if let Some(history) = temporal.files.get(target_path.as_str()) {
                 let hits: Vec<SearchFilesHit> = history
                     .co_changes
@@ -1771,6 +1795,11 @@ impl TokenizorServer {
                         shared_commits: Some(entry.shared_commits),
                     })
                     .collect();
+                if hits.is_empty() && commit_count < 50 {
+                    return format!(
+                        "No co-change data for '{target_path}'. Git history has only {commit_count} commit(s) — temporal coupling analysis works best with 50+ commits."
+                    );
+                }
                 let total = hits.len();
                 return format::search_files_result_view(&SearchFilesView::Found {
                     query: format!("co-changes with {target_path}"),
@@ -1778,6 +1807,11 @@ impl TokenizorServer {
                     overflow_count: 0,
                     hits,
                 });
+            }
+            if commit_count < 50 {
+                return format!(
+                    "No git history found for '{target_path}'. Git history has only {commit_count} commit(s) — temporal coupling analysis works best with 50+ commits."
+                );
             }
             return format!(
                 "No git history found for '{target_path}'. Check the file path is correct."
@@ -2468,7 +2502,13 @@ impl TokenizorServer {
             return format!("No file changes found between {base} and {target}.");
         }
 
-        format::diff_symbols_result_view(base, target, &changed_files, &repo)
+        format::diff_symbols_result_view(
+            base,
+            target,
+            &changed_files,
+            &repo,
+            params.0.compact.unwrap_or(false),
+        )
     }
 
     // ─── Edit tools (Tier 1) ─────────────────────────────────────────────────
@@ -3519,6 +3559,7 @@ mod tests {
                 verbosity: None,
                 bundle: None,
                 sections: None,
+                max_tokens: None,
             }))
             .await;
 
@@ -3572,6 +3613,7 @@ mod tests {
                 verbosity: None,
                 bundle: None,
                 sections: None,
+                max_tokens: None,
             }))
             .await;
 
@@ -3607,6 +3649,7 @@ mod tests {
                 verbosity: None,
                 bundle: None,
                 sections: None,
+                max_tokens: None,
             }))
             .await;
 
@@ -3667,6 +3710,7 @@ mod tests {
                 verbosity: None,
                 bundle: None,
                 sections: None,
+                max_tokens: None,
             }))
             .await;
 
@@ -5570,6 +5614,7 @@ mod tests {
                 verbosity: None,
                 bundle: None,
                 sections: Some(vec!["dependents".to_string()]),
+                max_tokens: None,
             }))
             .await;
 
@@ -5598,6 +5643,7 @@ mod tests {
                 verbosity: None,
                 bundle: None,
                 sections: Some(vec![]),
+                max_tokens: None,
             }))
             .await;
 
@@ -5716,6 +5762,7 @@ mod tests {
                 verbosity: None,
                 bundle: Some(true),
                 sections: None,
+                max_tokens: None,
             }))
             .await;
         assert_eq!(result, crate::protocol::format::empty_guard_message());
@@ -5734,6 +5781,7 @@ mod tests {
                 verbosity: None,
                 bundle: Some(true),
                 sections: None,
+                max_tokens: None,
             }))
             .await;
         assert!(result.contains("File not found"), "got: {result}");
@@ -5782,6 +5830,7 @@ mod tests {
                 verbosity: None,
                 bundle: Some(true),
                 sections: None,
+                max_tokens: None,
             }))
             .await;
 
@@ -5817,6 +5866,7 @@ mod tests {
                 verbosity: None,
                 bundle: Some(true),
                 sections: None,
+                max_tokens: None,
             }))
             .await;
 

@@ -1944,6 +1944,21 @@ fn render_context_bundle_found(view: &ContextBundleFoundView, verbosity: &str) -
     if !view.dependencies.is_empty() {
         output.push_str(&format_type_dependencies(&view.dependencies));
     }
+    // Hint: when a struct/enum has 0 callers, suggest looking at impl blocks instead.
+    let is_struct_like = matches!(
+        view.kind_label.as_str(),
+        "struct" | "enum" | "class" | "interface" | "trait"
+    );
+    if is_struct_like && view.callers.total_count == 0 && view.callees.total_count == 0 {
+        output.push_str(&format!(
+            "\nTip: This {} has 0 direct callers/callees. Try `get_symbol_context` on its `impl` block or use `find_references(name=\"{}\")` to find usages.\n",
+            view.kind_label,
+            view.body.lines().next()
+                .and_then(|l| l.split_whitespace().nth(1))
+                .map(|n| n.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_'))
+                .unwrap_or("...")
+        ));
+    }
     output
 }
 
@@ -4827,6 +4842,7 @@ pub fn diff_symbols_result_view(
     target: &str,
     changed_files: &[&str],
     repo: &crate::git::GitRepo,
+    compact: bool,
 ) -> String {
     use std::collections::HashMap;
 
@@ -4888,33 +4904,48 @@ pub fn diff_symbols_result_view(
             continue; // No symbol-level changes
         }
 
-        lines.push(format!("── {} ──", file_path));
+        total_added += file_added.len();
+        total_removed += file_removed.len();
+        total_modified += file_modified.len();
 
-        if !file_added.is_empty() {
-            total_added += file_added.len();
-            let mut sorted = file_added.clone();
-            sorted.sort_unstable();
-            for name in &sorted {
-                lines.push(format!("  + {name}"));
+        if compact {
+            // Compact mode: one line per file with counts only
+            let mut parts = Vec::new();
+            if !file_added.is_empty() {
+                parts.push(format!("+{}", file_added.len()));
             }
-        }
-        if !file_removed.is_empty() {
-            total_removed += file_removed.len();
-            let mut sorted = file_removed.clone();
-            sorted.sort_unstable();
-            for name in &sorted {
-                lines.push(format!("  - {name}"));
+            if !file_removed.is_empty() {
+                parts.push(format!("-{}", file_removed.len()));
             }
-        }
-        if !file_modified.is_empty() {
-            total_modified += file_modified.len();
-            let mut sorted = file_modified.clone();
-            sorted.sort_unstable();
-            for name in &sorted {
-                lines.push(format!("  ~ {name}"));
+            if !file_modified.is_empty() {
+                parts.push(format!("~{}", file_modified.len()));
             }
+            lines.push(format!("  {} ({})", file_path, parts.join(", ")));
+        } else {
+            lines.push(format!("── {} ──", file_path));
+            if !file_added.is_empty() {
+                let mut sorted = file_added.clone();
+                sorted.sort_unstable();
+                for name in &sorted {
+                    lines.push(format!("  + {name}"));
+                }
+            }
+            if !file_removed.is_empty() {
+                let mut sorted = file_removed.clone();
+                sorted.sort_unstable();
+                for name in &sorted {
+                    lines.push(format!("  - {name}"));
+                }
+            }
+            if !file_modified.is_empty() {
+                let mut sorted = file_modified.clone();
+                sorted.sort_unstable();
+                for name in &sorted {
+                    lines.push(format!("  ~ {name}"));
+                }
+            }
+            lines.push(String::new());
         }
-        lines.push(String::new());
     }
 
     // Summary

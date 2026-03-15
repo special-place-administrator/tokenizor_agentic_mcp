@@ -1258,6 +1258,7 @@ async fn execute_tool_call(
                     verbosity: tp.verbosity,
                     bundle: None,
                     sections: Some(sections),
+                    max_tokens: None,
                 }))
                 .await)
         }
@@ -1317,6 +1318,7 @@ async fn execute_tool_call(
                 verbosity: bundle_input.verbosity,
                 bundle: Some(true),
                 sections: None,
+                max_tokens: None,
             };
             Ok(server.get_symbol_context(Parameters(merged)).await)
         }
