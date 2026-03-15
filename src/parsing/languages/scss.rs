@@ -1,6 +1,6 @@
 use tree_sitter::Node;
 
-use super::{collect_symbols, push_symbol, NO_DOC_SPEC};
+use super::{NO_DOC_SPEC, collect_symbols, push_symbol};
 use crate::domain::{SymbolKind, SymbolRecord};
 
 pub fn extract_symbols(node: &Node, source: &str) -> Vec<SymbolRecord> {
@@ -27,7 +27,13 @@ fn walk_node(
                         .to_string();
                     if !name.is_empty() {
                         push_symbol(
-                            node, source, name, SymbolKind::Other, depth, sort_order, symbols,
+                            node,
+                            source,
+                            name,
+                            SymbolKind::Other,
+                            depth,
+                            sort_order,
+                            symbols,
                             &NO_DOC_SPEC,
                         );
                     }
@@ -46,8 +52,14 @@ fn walk_node(
                     let text = child.utf8_text(source.as_bytes()).unwrap_or("");
                     if text.starts_with('$') || text.starts_with("--") {
                         push_symbol(
-                            node, source, text.to_string(), SymbolKind::Variable, depth,
-                            sort_order, symbols, &NO_DOC_SPEC,
+                            node,
+                            source,
+                            text.to_string(),
+                            SymbolKind::Variable,
+                            depth,
+                            sort_order,
+                            symbols,
+                            &NO_DOC_SPEC,
                         );
                     }
                     break;
@@ -57,7 +69,13 @@ fn walk_node(
         "mixin_statement" => {
             if let Some(name) = find_identifier_child(node, source) {
                 push_symbol(
-                    node, source, name, SymbolKind::Function, depth, sort_order, symbols,
+                    node,
+                    source,
+                    name,
+                    SymbolKind::Function,
+                    depth,
+                    sort_order,
+                    symbols,
                     &NO_DOC_SPEC,
                 );
             }
@@ -66,7 +84,13 @@ fn walk_node(
         "function_statement" => {
             if let Some(name) = find_identifier_child(node, source) {
                 push_symbol(
-                    node, source, name, SymbolKind::Function, depth, sort_order, symbols,
+                    node,
+                    source,
+                    name,
+                    SymbolKind::Function,
+                    depth,
+                    sort_order,
+                    symbols,
                     &NO_DOC_SPEC,
                 );
             }
@@ -78,7 +102,13 @@ fn walk_node(
             let name = at_rule_name(node, source);
             if !name.is_empty() {
                 push_symbol(
-                    node, source, name, SymbolKind::Module, depth, sort_order, symbols,
+                    node,
+                    source,
+                    name,
+                    SymbolKind::Module,
+                    depth,
+                    sort_order,
+                    symbols,
                     &NO_DOC_SPEC,
                 );
             }
@@ -88,7 +118,13 @@ fn walk_node(
             let name = at_rule_name(node, source);
             if !name.is_empty() {
                 push_symbol(
-                    node, source, name, SymbolKind::Module, depth, sort_order, symbols,
+                    node,
+                    source,
+                    name,
+                    SymbolKind::Module,
+                    depth,
+                    sort_order,
+                    symbols,
                     &NO_DOC_SPEC,
                 );
             }
@@ -160,7 +196,11 @@ mod tests {
     fn test_scss_variable_extracted() {
         let symbols = parse_scss("$primary-color: #333;");
         let var = symbols.iter().find(|s| s.kind == SymbolKind::Variable);
-        assert!(var.is_some(), "should extract $variable as Variable, got: {:?}", symbols);
+        assert!(
+            var.is_some(),
+            "should extract $variable as Variable, got: {:?}",
+            symbols
+        );
         assert_eq!(var.unwrap().name, "$primary-color");
     }
 
@@ -168,7 +208,11 @@ mod tests {
     fn test_scss_mixin_extracted() {
         let symbols = parse_scss("@mixin button-base { display: inline; }");
         let mixin = symbols.iter().find(|s| s.kind == SymbolKind::Function);
-        assert!(mixin.is_some(), "should extract @mixin as Function, got: {:?}", symbols);
+        assert!(
+            mixin.is_some(),
+            "should extract @mixin as Function, got: {:?}",
+            symbols
+        );
         assert_eq!(mixin.unwrap().name, "button-base");
     }
 
@@ -176,27 +220,43 @@ mod tests {
     fn test_scss_function_extracted() {
         let symbols = parse_scss("@function darken-color($color) { @return $color; }");
         let func = symbols.iter().find(|s| s.kind == SymbolKind::Function);
-        assert!(func.is_some(), "should extract @function as Function, got: {:?}", symbols);
+        assert!(
+            func.is_some(),
+            "should extract @function as Function, got: {:?}",
+            symbols
+        );
         assert_eq!(func.unwrap().name, "darken-color");
     }
 
     #[test]
     fn test_scss_include_not_extracted() {
         let symbols = parse_scss("@include button-base;");
-        assert!(symbols.is_empty(), "@include should not be extracted, got: {:?}", symbols);
+        assert!(
+            symbols.is_empty(),
+            "@include should not be extracted, got: {:?}",
+            symbols
+        );
     }
 
     #[test]
     fn test_scss_use_forward_not_extracted() {
         let symbols = parse_scss("@use 'variables';\n@forward 'mixins';");
-        assert!(symbols.is_empty(), "@use/@forward should not be extracted, got: {:?}", symbols);
+        assert!(
+            symbols.is_empty(),
+            "@use/@forward should not be extracted, got: {:?}",
+            symbols
+        );
     }
 
     #[test]
     fn test_scss_css_selectors_also_work() {
         let symbols = parse_scss(".btn { color: red; }");
         let rule = symbols.iter().find(|s| s.kind == SymbolKind::Other);
-        assert!(rule.is_some(), "should extract CSS selector as Other, got: {:?}", symbols);
+        assert!(
+            rule.is_some(),
+            "should extract CSS selector as Other, got: {:?}",
+            symbols
+        );
         assert_eq!(rule.unwrap().name, ".btn");
     }
 
@@ -204,7 +264,11 @@ mod tests {
     fn test_scss_custom_property_extracted() {
         let symbols = parse_scss(":root { --gap: 8px; }");
         let var = symbols.iter().find(|s| s.kind == SymbolKind::Variable);
-        assert!(var.is_some(), "should extract custom property as Variable, got: {:?}", symbols);
+        assert!(
+            var.is_some(),
+            "should extract custom property as Variable, got: {:?}",
+            symbols
+        );
         assert_eq!(var.unwrap().name, "--gap");
     }
 

@@ -26,9 +26,9 @@ pub enum LanguageId {
     Yaml,
     Markdown,
     Env,
-Html,
-Css,
-Scss,
+    Html,
+    Css,
+    Scss,
 }
 
 impl LanguageId {
@@ -55,9 +55,9 @@ impl LanguageId {
             "yaml" | "yml" => Some(Self::Yaml),
             "md" => Some(Self::Markdown),
             "env" => Some(Self::Env),
-"html" => Some(Self::Html),
-"css" => Some(Self::Css),
-"scss" => Some(Self::Scss),
+            "html" => Some(Self::Html),
+            "css" => Some(Self::Css),
+            "scss" => Some(Self::Scss),
             _ => None,
         }
     }
@@ -85,9 +85,9 @@ impl LanguageId {
             Self::Yaml => &["yaml", "yml"],
             Self::Markdown => &["md"],
             Self::Env => &["env"],
-Self::Html => &["html"],
-Self::Css => &["css"],
-Self::Scss => &["scss"],
+            Self::Html => &["html"],
+            Self::Css => &["css"],
+            Self::Scss => &["scss"],
         }
     }
 
@@ -112,9 +112,9 @@ Self::Scss => &["scss"],
             | Self::Yaml
             | Self::Markdown
             | Self::Env
-| Self::Html
-| Self::Css
-| Self::Scss => SupportTier::Broader,
+            | Self::Html
+            | Self::Css
+            | Self::Scss => SupportTier::Broader,
         }
     }
 }
@@ -143,9 +143,9 @@ impl fmt::Display for LanguageId {
             Self::Yaml => "YAML",
             Self::Markdown => "Markdown",
             Self::Env => "Env",
-Self::Html => "HTML",
-Self::Css => "CSS",
-Self::Scss => "SCSS",
+            Self::Html => "HTML",
+            Self::Css => "CSS",
+            Self::Scss => "SCSS",
         };
         write!(f, "{name}")
     }

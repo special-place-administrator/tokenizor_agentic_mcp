@@ -1,6 +1,6 @@
 use tree_sitter::Node;
 
-use super::{collect_symbols, push_symbol, NO_DOC_SPEC};
+use super::{NO_DOC_SPEC, collect_symbols, push_symbol};
 use crate::domain::{SymbolKind, SymbolRecord};
 
 pub fn extract_symbols(node: &Node, source: &str) -> Vec<SymbolRecord> {
@@ -50,9 +50,7 @@ fn walk_node(
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
                 if child.kind() == "property_name" {
-                    let prop_text = child
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("");
+                    let prop_text = child.utf8_text(source.as_bytes()).unwrap_or("");
                     if prop_text.starts_with("--") {
                         push_symbol(
                             node,
@@ -156,14 +154,21 @@ mod tests {
     fn test_css_selector_block_extracted() {
         let symbols = parse_css(".btn { color: red; }");
         let rule = symbols.iter().find(|s| s.kind == SymbolKind::Other);
-        assert!(rule.is_some(), "should extract rule_set, got: {:?}", symbols);
+        assert!(
+            rule.is_some(),
+            "should extract rule_set, got: {:?}",
+            symbols
+        );
         assert_eq!(rule.unwrap().name, ".btn");
     }
 
     #[test]
     fn test_css_selector_list_single_symbol() {
         let symbols = parse_css(".btn, .btn-primary { color: red; }");
-        let rules: Vec<_> = symbols.iter().filter(|s| s.kind == SymbolKind::Other).collect();
+        let rules: Vec<_> = symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Other)
+            .collect();
         assert_eq!(
             rules.len(),
             1,
@@ -212,10 +217,11 @@ mod tests {
 
     #[test]
     fn test_css_keyframes_outer_extracted_inner_skipped() {
-        let symbols = parse_css(
-            "@keyframes fade-in { 0% { opacity: 0; } 100% { opacity: 1; } }",
-        );
-        let kf: Vec<_> = symbols.iter().filter(|s| s.kind == SymbolKind::Module).collect();
+        let symbols = parse_css("@keyframes fade-in { 0% { opacity: 0; } 100% { opacity: 1; } }");
+        let kf: Vec<_> = symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Module)
+            .collect();
         assert_eq!(
             kf.len(),
             1,

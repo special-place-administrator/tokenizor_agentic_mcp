@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use tree_sitter::Node;
 
-use super::{push_symbol, NO_DOC_SPEC};
+use super::{NO_DOC_SPEC, push_symbol};
 use crate::domain::{SymbolKind, SymbolRecord};
 
 pub fn extract_symbols(node: &Node, source: &str) -> Vec<SymbolRecord> {
@@ -35,8 +35,14 @@ fn walk_node(
                     let byte_key = (node.start_byte() as u32, node.end_byte() as u32);
                     if emitted.insert(byte_key) {
                         push_symbol(
-                            node, source, name.clone(), SymbolKind::Other, depth, sort_order,
-                            symbols, &NO_DOC_SPEC,
+                            node,
+                            source,
+                            name.clone(),
+                            SymbolKind::Other,
+                            depth,
+                            sort_order,
+                            symbols,
+                            &NO_DOC_SPEC,
                         );
                     }
                 }
@@ -113,17 +119,19 @@ fn scan_template_refs(
                     let mut attr_cursor = attr.walk();
                     for attr_child in attr.children(&mut attr_cursor) {
                         if attr_child.kind() == "attribute_name" {
-                            let text = attr_child
-                                .utf8_text(source.as_bytes())
-                                .unwrap_or("");
+                            let text = attr_child.utf8_text(source.as_bytes()).unwrap_or("");
                             if text.starts_with('#') && text.len() > 1 {
                                 let ref_name = &text[1..];
-                                let byte_key =
-                                    (attr.start_byte() as u32, attr.end_byte() as u32);
+                                let byte_key = (attr.start_byte() as u32, attr.end_byte() as u32);
                                 if emitted.insert(byte_key) {
                                     push_symbol(
-                                        &attr, source, ref_name.to_string(),
-                                        SymbolKind::Variable, depth, sort_order, symbols,
+                                        &attr,
+                                        source,
+                                        ref_name.to_string(),
+                                        SymbolKind::Variable,
+                                        depth,
+                                        sort_order,
+                                        symbols,
                                         &NO_DOC_SPEC,
                                     );
                                 }
@@ -170,8 +178,14 @@ fn scan_angular_text(
                     let byte_key = (line_start, line_start + line.len() as u32);
                     if emitted.insert(byte_key) {
                         push_symbol(
-                            node, source, keyword.to_string(), SymbolKind::Module, depth,
-                            sort_order, symbols, &NO_DOC_SPEC,
+                            node,
+                            source,
+                            keyword.to_string(),
+                            SymbolKind::Module,
+                            depth,
+                            sort_order,
+                            symbols,
+                            &NO_DOC_SPEC,
                         );
                     }
                     break; // Only one keyword per line
@@ -190,7 +204,13 @@ fn scan_angular_text(
                 let byte_key = (line_start, line_start + line.len() as u32);
                 if emitted.insert(byte_key) {
                     push_symbol(
-                        node, source, name, SymbolKind::Variable, depth, sort_order, symbols,
+                        node,
+                        source,
+                        name,
+                        SymbolKind::Variable,
+                        depth,
+                        sort_order,
+                        symbols,
                         &NO_DOC_SPEC,
                     );
                 }
@@ -227,7 +247,11 @@ mod tests {
     fn test_html_top_level_element() {
         let symbols = parse_html("<header>content</header>");
         let el = symbols.iter().find(|s| s.name == "header");
-        assert!(el.is_some(), "should extract top-level element, got: {:?}", symbols);
+        assert!(
+            el.is_some(),
+            "should extract top-level element, got: {:?}",
+            symbols
+        );
         assert_eq!(el.unwrap().kind, SymbolKind::Other);
     }
 
@@ -235,21 +259,34 @@ mod tests {
     fn test_html_custom_element_any_depth() {
         let symbols = parse_html("<div><section><app-header></app-header></section></div>");
         let custom = symbols.iter().find(|s| s.name == "app-header");
-        assert!(custom.is_some(), "should extract custom element at any depth, got: {:?}", symbols);
+        assert!(
+            custom.is_some(),
+            "should extract custom element at any depth, got: {:?}",
+            symbols
+        );
     }
 
     #[test]
     fn test_html_ng_template() {
         let symbols = parse_html("<ng-template>content</ng-template>");
         let tmpl = symbols.iter().find(|s| s.name == "ng-template");
-        assert!(tmpl.is_some(), "should extract ng-template, got: {:?}", symbols);
+        assert!(
+            tmpl.is_some(),
+            "should extract ng-template, got: {:?}",
+            symbols
+        );
     }
 
     #[test]
     fn test_html_generic_nested_skipped() {
         let symbols = parse_html("<div><p><span>text</span></p></div>");
         // Only top-level div should be extracted
-        assert_eq!(symbols.len(), 1, "only top-level element, got: {:?}", symbols);
+        assert_eq!(
+            symbols.len(),
+            1,
+            "only top-level element, got: {:?}",
+            symbols
+        );
         assert_eq!(symbols[0].name, "div");
     }
 
@@ -257,7 +294,12 @@ mod tests {
     fn test_html_top_level_custom_element_not_duped() {
         let symbols = parse_html("<app-root>content</app-root>");
         let matches: Vec<_> = symbols.iter().filter(|s| s.name == "app-root").collect();
-        assert_eq!(matches.len(), 1, "top-level custom element should appear once, got: {:?}", matches);
+        assert_eq!(
+            matches.len(),
+            1,
+            "top-level custom element should appear once, got: {:?}",
+            matches
+        );
     }
 
     // ─── AST-backed: template refs ─────────────────────────────────────
@@ -265,8 +307,14 @@ mod tests {
     #[test]
     fn test_html_template_ref() {
         let symbols = parse_html("<input #myInput />");
-        let tref = symbols.iter().find(|s| s.name == "myInput" && s.kind == SymbolKind::Variable);
-        assert!(tref.is_some(), "should extract template ref, got: {:?}", symbols);
+        let tref = symbols
+            .iter()
+            .find(|s| s.name == "myInput" && s.kind == SymbolKind::Variable);
+        assert!(
+            tref.is_some(),
+            "should extract template ref, got: {:?}",
+            symbols
+        );
     }
 
     // ─── Text-scanned: Angular control flow ────────────────────────────
@@ -305,14 +353,24 @@ mod tests {
     fn test_html_else_not_extracted() {
         let symbols = parse_html("@if (x) { <span>yes</span> } @else { <span>no</span> }");
         let else_sym = symbols.iter().find(|s| s.name.contains("@else"));
-        assert!(else_sym.is_none(), "@else should NOT be a separate symbol, got: {:?}", symbols);
+        assert!(
+            else_sym.is_none(),
+            "@else should NOT be a separate symbol, got: {:?}",
+            symbols
+        );
     }
 
     #[test]
     fn test_html_empty_not_extracted() {
-        let symbols = parse_html("@for (item of items; track item.id) { <p>x</p> } @empty { <p>No items</p> }");
+        let symbols = parse_html(
+            "@for (item of items; track item.id) { <p>x</p> } @empty { <p>No items</p> }",
+        );
         let empty_sym = symbols.iter().find(|s| s.name.contains("@empty"));
-        assert!(empty_sym.is_none(), "@empty should NOT be a separate symbol, got: {:?}", symbols);
+        assert!(
+            empty_sym.is_none(),
+            "@empty should NOT be a separate symbol, got: {:?}",
+            symbols
+        );
     }
 
     // ─── Text-scanned: @let declarations ───────────────────────────────
@@ -320,7 +378,9 @@ mod tests {
     #[test]
     fn test_html_let_declaration() {
         let symbols = parse_html("@let user = currentUser();");
-        let letvar = symbols.iter().find(|s| s.name == "user" && s.kind == SymbolKind::Variable);
+        let letvar = symbols
+            .iter()
+            .find(|s| s.name == "user" && s.kind == SymbolKind::Variable);
         assert!(letvar.is_some(), "should extract @let, got: {:?}", symbols);
     }
 
@@ -332,7 +392,11 @@ mod tests {
         let div = symbols.iter().find(|s| s.name == "div");
         assert!(div.is_some(), "should extract top-level div");
         let angular_noise: Vec<_> = symbols.iter().filter(|s| s.name.starts_with('@')).collect();
-        assert!(angular_noise.is_empty(), "plain HTML should have no Angular noise, got: {:?}", angular_noise);
+        assert!(
+            angular_noise.is_empty(),
+            "plain HTML should have no Angular noise, got: {:?}",
+            angular_noise
+        );
     }
 
     #[test]
@@ -346,13 +410,19 @@ mod tests {
     #[test]
     fn test_html_multiple_angular_constructs_in_one_text_node() {
         // tree-sitter-html may merge adjacent Angular lines into one text node
-        let symbols = parse_html("@if (a) { }\n@for (item of items; track item.id) { }\n@let user = currentUser();");
+        let symbols = parse_html(
+            "@if (a) { }\n@for (item of items; track item.id) { }\n@let user = currentUser();",
+        );
         let if_sym = symbols.iter().find(|s| s.name == "@if");
         let for_sym = symbols.iter().find(|s| s.name == "@for");
         let let_sym = symbols.iter().find(|s| s.name == "user");
         assert!(if_sym.is_some(), "should find @if, got: {:?}", symbols);
         assert!(for_sym.is_some(), "should find @for, got: {:?}", symbols);
-        assert!(let_sym.is_some(), "should find @let user, got: {:?}", symbols);
+        assert!(
+            let_sym.is_some(),
+            "should find @let user, got: {:?}",
+            symbols
+        );
     }
 
     // ─── Regression: malformed Angular-ish text ────────────────────────
