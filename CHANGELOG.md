@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.5](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.30.4...v0.30.5) (2026-03-15)
+
+
+### Bug Fixes
+
+* get_file_context sections filter masked by 800-byte hook budget ([5ff4c9e](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/5ff4c9e3031e099d7321c5b906ba3109f031e3f7))
+
 ## [0.30.4](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.30.3...v0.30.4) (2026-03-15)
 
 
