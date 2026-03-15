@@ -319,6 +319,7 @@ mod tests {
             load_source: IndexLoadSource::FreshLoad,
             snapshot_verify_state: SnapshotVerifyState::NotNeeded,
             is_empty: false,
+            tier_counts: (0, 0, 0),
         }
     }
 

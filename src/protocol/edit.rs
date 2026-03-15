@@ -1055,6 +1055,237 @@ pub(crate) fn detect_stale_references(
 }
 
 // ---------------------------------------------------------------------------
+// Qualified path scanner
+// ---------------------------------------------------------------------------
+
+/// A qualified path match with confidence classification.
+#[derive(Debug)]
+pub struct QualifiedMatch {
+    /// Byte offset of the match in the source.
+    pub offset: usize,
+    /// Line number (1-based).
+    pub line: usize,
+    /// The full matched segment (e.g., "MyType::new()").
+    pub context: String,
+    /// Whether the match is confident (code context) or uncertain (string/comment).
+    pub confident: bool,
+}
+
+/// Find qualified path usages of `identifier` in `source`.
+///
+/// Looks for patterns where the identifier appears as a path segment:
+/// - `identifier::method()` — associated function call
+/// - `module::identifier::method()` — deeper nesting
+/// - `use path::identifier` — import path
+/// - `identifier::<T>::method()` — turbofish syntax
+///
+/// Classifies matches as confident (in code) vs uncertain (in strings/comments).
+pub fn find_qualified_usages(identifier: &str, source: &str) -> Vec<QualifiedMatch> {
+    let mut results = Vec::new();
+
+    // Track block comment nesting depth across the whole source.
+    // We scan line by line but need to carry block-comment state.
+    let mut in_block_comment = false;
+    // Track raw string state: None = not in raw string, Some(n) = in raw string with n #s.
+    let mut in_raw_string: Option<usize> = None;
+
+    let mut line_num = 0usize;
+    let mut line_byte_offset = 0usize;
+
+    for line in source.split('\n') {
+        line_num += 1;
+
+        // Scan this line for occurrences of `identifier`, updating parse state.
+        let line_bytes = line.as_bytes();
+        let id_len = identifier.len();
+
+        // We walk through the line character by character to find all occurrences
+        // of `identifier` and classify each.
+        let mut col = 0usize; // byte index within line
+
+        while col < line_bytes.len() {
+            // --- Update parse state at current col ---
+
+            // Check for raw string start: r" or r#..."#
+            if !in_block_comment && in_raw_string.is_none() {
+                if line_bytes[col] == b'r' {
+                    // Count leading #s
+                    let mut hashes = 0usize;
+                    let mut j = col + 1;
+                    while j < line_bytes.len() && line_bytes[j] == b'#' {
+                        hashes += 1;
+                        j += 1;
+                    }
+                    if j < line_bytes.len() && line_bytes[j] == b'"' {
+                        in_raw_string = Some(hashes);
+                        col = j + 1;
+                        continue;
+                    }
+                }
+            }
+
+            // Check for raw string end or matches inside raw string (uncertain)
+            if let Some(hashes) = in_raw_string {
+                if line_bytes[col] == b'"' {
+                    // Check for matching #s after closing quote
+                    let mut j = col + 1;
+                    let mut count = 0usize;
+                    while j < line_bytes.len() && line_bytes[j] == b'#' && count < hashes {
+                        count += 1;
+                        j += 1;
+                    }
+                    if count == hashes {
+                        in_raw_string = None;
+                        col = j;
+                        continue;
+                    }
+                }
+                // Inside raw string — check for identifier match (uncertain)
+                if col + id_len <= line_bytes.len() && &line[col..col + id_len] == identifier {
+                    let preceded = col >= 2 && &line[col - 2..col] == "::";
+                    let followed = col + id_len + 2 <= line.len()
+                        && &line[col + id_len..col + id_len + 2] == "::";
+                    if preceded || followed {
+                        let ctx_start = col.saturating_sub(20);
+                        let ctx_end = (col + id_len + 20).min(line.len());
+                        results.push(QualifiedMatch {
+                            offset: line_byte_offset + col,
+                            line: line_num,
+                            context: line[ctx_start..ctx_end].to_string(),
+                            confident: false,
+                        });
+                    }
+                }
+                col += 1;
+                continue;
+            }
+
+            // Check for block comment start/end
+            if !in_block_comment {
+                // Check for line comment: rest of line is a comment — scan for matches then break
+                if col + 1 < line_bytes.len() && line_bytes[col] == b'/' && line_bytes[col + 1] == b'/' {
+                    // Everything from here to end of line is a line comment (uncertain)
+                    let rest = &line[col..];
+                    let mut search_start = 0usize;
+                    while let Some(pos) = rest[search_start..].find(identifier) {
+                        let abs_col = col + search_start + pos;
+                        let preceded_by_colon = abs_col >= 2
+                            && &line[abs_col - 2..abs_col] == "::"
+                            || abs_col >= 2 && line_bytes[abs_col - 1] == b':';
+                        let followed_by_colon = abs_col + id_len + 1 < line_bytes.len()
+                            && &line[abs_col + id_len..abs_col + id_len + 2] == "::";
+                        let preceded_2 = abs_col >= 2 && &line[abs_col - 2..abs_col] == "::";
+                        let followed_2 = abs_col + id_len + 2 <= line.len()
+                            && &line[abs_col + id_len..abs_col + id_len + 2] == "::";
+                        let _ = (preceded_by_colon, followed_by_colon);
+                        if preceded_2 || followed_2 {
+                            let ctx_start = abs_col.saturating_sub(20);
+                            let ctx_end = (abs_col + id_len + 20).min(line.len());
+                            results.push(QualifiedMatch {
+                                offset: line_byte_offset + abs_col,
+                                line: line_num,
+                                context: line[ctx_start..ctx_end].to_string(),
+                                confident: false,
+                            });
+                        }
+                        search_start += pos + 1;
+                    }
+                    break; // rest of line consumed
+                }
+
+                // Block comment start
+                if col + 1 < line_bytes.len() && line_bytes[col] == b'/' && line_bytes[col + 1] == b'*' {
+                    in_block_comment = true;
+                    col += 2;
+                    continue;
+                }
+            } else {
+                // Inside block comment — look for end
+                if col + 1 < line_bytes.len() && line_bytes[col] == b'*' && line_bytes[col + 1] == b'/' {
+                    in_block_comment = false;
+                    col += 2;
+                    continue;
+                }
+                // Still in block comment — check for identifier match (uncertain)
+                if col + id_len <= line_bytes.len() && &line[col..col + id_len] == identifier {
+                    let prec2 = col >= 2 && &line[col - 2..col] == "::";
+                    let fol2 = col + id_len + 2 <= line.len() && &line[col + id_len..col + id_len + 2] == "::";
+                    if prec2 || fol2 {
+                        let ctx_start = col.saturating_sub(20);
+                        let ctx_end = (col + id_len + 20).min(line.len());
+                        results.push(QualifiedMatch {
+                            offset: line_byte_offset + col,
+                            line: line_num,
+                            context: line[ctx_start..ctx_end].to_string(),
+                            confident: false,
+                        });
+                    }
+                }
+                col += 1;
+                continue;
+            }
+
+            // Normal code: check for string literal (double-quote)
+            if line_bytes[col] == b'"' {
+                // Scan to closing quote (handling backslash escapes), emit uncertain matches
+                col += 1;
+                while col < line_bytes.len() && line_bytes[col] != b'"' {
+                    if line_bytes[col] == b'\\' {
+                        col += 2; // skip escaped char
+                        continue;
+                    }
+                    // Check for identifier match inside string
+                    if col + id_len <= line_bytes.len() && &line[col..col + id_len] == identifier {
+                        let prec2 = col >= 2 && &line[col - 2..col] == "::";
+                        let fol2 = col + id_len + 2 <= line.len()
+                            && &line[col + id_len..col + id_len + 2] == "::";
+                        if prec2 || fol2 {
+                            let ctx_start = col.saturating_sub(20);
+                            let ctx_end = (col + id_len + 20).min(line.len());
+                            results.push(QualifiedMatch {
+                                offset: line_byte_offset + col,
+                                line: line_num,
+                                context: line[ctx_start..ctx_end].to_string(),
+                                confident: false,
+                            });
+                        }
+                    }
+                    col += 1;
+                }
+                col += 1; // skip closing quote
+                continue;
+            }
+
+            // Normal code: check for identifier match
+            if col + id_len <= line_bytes.len() && &line[col..col + id_len] == identifier {
+                let prec2 = col >= 2 && &line[col - 2..col] == "::";
+                let fol2 = col + id_len + 2 <= line.len()
+                    && &line[col + id_len..col + id_len + 2] == "::";
+                if prec2 || fol2 {
+                    let ctx_start = col.saturating_sub(20);
+                    let ctx_end = (col + id_len + 20).min(line.len());
+                    results.push(QualifiedMatch {
+                        offset: line_byte_offset + col,
+                        line: line_num,
+                        context: line[ctx_start..ctx_end].to_string(),
+                        confident: true,
+                    });
+                }
+                col += id_len;
+                continue;
+            }
+
+            col += 1;
+        }
+
+        // +1 for the '\n' that split() consumed
+        line_byte_offset += line.len() + 1;
+    }
+
+    results
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -2095,5 +2326,81 @@ mod tests {
             "doc comment should not be duplicated: {result_str}"
         );
         assert!(result_str.contains("pub fn bar()"), "edit should apply");
+    }
+
+    // -----------------------------------------------------------------------
+    // find_qualified_usages tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_finds_type_new_qualified_call() {
+        let source = "let x = MyType::new();";
+        let matches = find_qualified_usages("MyType", source);
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].confident);
+    }
+
+    #[test]
+    fn test_finds_deep_nested_qualified() {
+        let source = "let x = module::MyType::new();";
+        let matches = find_qualified_usages("MyType", source);
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].confident);
+    }
+
+    #[test]
+    fn test_finds_use_import_path() {
+        let source = "use crate::module::MyType;";
+        let matches = find_qualified_usages("MyType", source);
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].confident);
+    }
+
+    #[test]
+    fn test_scanner_finds_all_raw_occurrences_of_common_name() {
+        let source = "let x = SomeOther::new();\nlet y = Target::new();";
+        let matches = find_qualified_usages("new", source);
+        assert_eq!(matches.len(), 2);
+        assert!(matches.iter().all(|m| m.confident));
+    }
+
+    #[test]
+    fn test_uncertain_match_in_string() {
+        let source = r#"let s = "MyType::new()";"#;
+        let matches = find_qualified_usages("MyType", source);
+        assert_eq!(matches.len(), 1);
+        assert!(!matches[0].confident);
+    }
+
+    #[test]
+    fn test_uncertain_match_in_comment() {
+        let source = "// MyType::new() creates an instance";
+        let matches = find_qualified_usages("MyType", source);
+        assert_eq!(matches.len(), 1);
+        assert!(!matches[0].confident);
+    }
+
+    #[test]
+    fn test_finds_turbofish_qualified_call() {
+        let source = "let x = MyType::<T>::new();";
+        let matches = find_qualified_usages("MyType", source);
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].confident);
+    }
+
+    #[test]
+    fn test_uncertain_match_in_block_comment() {
+        let source = "/* MyType::new() creates an instance */";
+        let matches = find_qualified_usages("MyType", source);
+        assert_eq!(matches.len(), 1);
+        assert!(!matches[0].confident);
+    }
+
+    #[test]
+    fn test_uncertain_match_in_multiline_string() {
+        let source = "let s = r\"\n            MyType::new()\n        \";";
+        let matches = find_qualified_usages("MyType", source);
+        assert_eq!(matches.len(), 1);
+        assert!(!matches[0].confident);
     }
 }

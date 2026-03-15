@@ -512,34 +512,171 @@ impl LiveIndex {
 
         info!("LiveIndex::load starting at {:?}", root);
 
-        // 1. Discover all source files
-        let discovered = discovery::discover_files(root)?;
-        info!("discovered {} source files", discovered.len());
+        // 1. Discover ALL files (not just known-language ones) so the admission gate
+        //    can classify every file, including those with denylisted or unknown extensions.
+        let all_entries = discovery::discover_all_files(root)?;
+        info!(
+            "discovered {} total files (pre-admission)",
+            all_entries.len()
+        );
 
-        // 2. Parse all files in parallel via Rayon
-        let parse_results: Vec<(String, IndexedFile)> = discovered
+        // 2. Run admission gate in parallel.
+        //    For files that pass Tier-1 initially (size/extension checks), we read content
+        //    and re-run the binary sniff before committing to parse.
+        //    Files that are non-Normal skip reading entirely.
+        use crate::discovery::classify_admission;
+        use crate::domain::index::{AdmissionTier, SkippedFile};
+
+        enum AdmissionOutcome {
+            Parse {
+                relative_path: String,
+                language: crate::domain::LanguageId,
+                classification: crate::domain::FileClassification,
+                bytes: Vec<u8>,
+            },
+            Skip(SkippedFile),
+        }
+
+        let outcomes: Vec<AdmissionOutcome> = all_entries
             .par_iter()
-            .filter_map(|df| {
-                let bytes = match std::fs::read(&df.absolute_path) {
+            .filter_map(|entry| {
+                // Phase 1: size + extension check (no I/O beyond what the walk gave us).
+                let decision_pre = classify_admission(
+                    &entry.absolute_path,
+                    entry.file_size,
+                    None, // no content yet
+                );
+
+                match decision_pre.tier {
+                    AdmissionTier::HardSkip | AdmissionTier::MetadataOnly => {
+                        // No need to read content — already decided.
+                        let sf = SkippedFile {
+                            path: entry.relative_path.clone(),
+                            size: entry.file_size,
+                            extension: entry
+                                .absolute_path
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .map(|s| s.to_string()),
+                            decision: decision_pre,
+                        };
+                        return Some(AdmissionOutcome::Skip(sf));
+                    }
+                    AdmissionTier::Normal => {}
+                }
+
+                // Phase 2: we tentatively have Tier-1. If the file has no recognized
+                // language, we cannot parse it — skip it as metadata-only.
+                let language = match &entry.language {
+                    Some(lang) => lang.clone(),
+                    None => {
+                        // Unknown extension, not on denylist, under size limit.
+                        // Read content to do binary sniff, then store as skipped.
+                        let bytes = match std::fs::read(&entry.absolute_path) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                warn!("failed to read {:?}: {}", entry.absolute_path, e);
+                                return None;
+                            }
+                        };
+                        let decision_post =
+                            classify_admission(&entry.absolute_path, entry.file_size, Some(&bytes));
+                        let sf = SkippedFile {
+                            path: entry.relative_path.clone(),
+                            size: entry.file_size,
+                            extension: entry
+                                .absolute_path
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .map(|s| s.to_string()),
+                            decision: decision_post,
+                        };
+                        return Some(AdmissionOutcome::Skip(sf));
+                    }
+                };
+
+                // Phase 3: read content and do binary sniff before passing to parser.
+                let bytes = match std::fs::read(&entry.absolute_path) {
                     Ok(b) => b,
                     Err(e) => {
-                        warn!("failed to read {:?}: {}", df.absolute_path, e);
+                        warn!("failed to read {:?}: {}", entry.absolute_path, e);
                         return None;
                     }
                 };
 
-                let result = parsing::process_file_with_classification(
-                    &df.relative_path,
-                    &bytes,
-                    df.language.clone(),
-                    df.classification,
-                );
-                let indexed = IndexedFile::from_parse_result(result, bytes);
-                Some((df.relative_path.clone(), indexed))
+                let decision_post =
+                    classify_admission(&entry.absolute_path, entry.file_size, Some(&bytes));
+
+                match decision_post.tier {
+                    AdmissionTier::HardSkip | AdmissionTier::MetadataOnly => {
+                        // Binary sniff reclassified this file — do NOT parse.
+                        let sf = SkippedFile {
+                            path: entry.relative_path.clone(),
+                            size: entry.file_size,
+                            extension: entry
+                                .absolute_path
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .map(|s| s.to_string()),
+                            decision: decision_post,
+                        };
+                        Some(AdmissionOutcome::Skip(sf))
+                    }
+                    AdmissionTier::Normal => Some(AdmissionOutcome::Parse {
+                        relative_path: entry.relative_path.clone(),
+                        language,
+                        classification: entry.classification,
+                        bytes,
+                    }),
+                }
             })
             .collect();
 
-        // 3. Build HashMap sequentially, running circuit breaker checks
+        // 3. Split outcomes into parse candidates and skipped files.
+        let mut skipped_files: Vec<SkippedFile> = Vec::new();
+        let mut to_parse: Vec<(
+            String,
+            crate::domain::LanguageId,
+            crate::domain::FileClassification,
+            Vec<u8>,
+        )> = Vec::new();
+
+        for outcome in outcomes {
+            match outcome {
+                AdmissionOutcome::Skip(sf) => skipped_files.push(sf),
+                AdmissionOutcome::Parse {
+                    relative_path,
+                    language,
+                    classification,
+                    bytes,
+                } => {
+                    to_parse.push((relative_path, language, classification, bytes));
+                }
+            }
+        }
+
+        info!(
+            "admission gate: {} to parse, {} skipped",
+            to_parse.len(),
+            skipped_files.len()
+        );
+
+        // 4. Parse all admitted files in parallel via Rayon.
+        let parse_results: Vec<(String, IndexedFile)> = to_parse
+            .par_iter()
+            .map(|(relative_path, language, classification, bytes)| {
+                let result = parsing::process_file_with_classification(
+                    relative_path,
+                    bytes,
+                    language.clone(),
+                    *classification,
+                );
+                let indexed = IndexedFile::from_parse_result(result, bytes.clone());
+                (relative_path.clone(), indexed)
+            })
+            .collect();
+
+        // 5. Build HashMap sequentially, running circuit breaker checks.
         let cb_state = CircuitBreakerState::from_env();
         let mut files: HashMap<String, Arc<IndexedFile>> =
             HashMap::with_capacity(parse_results.len());
@@ -573,9 +710,10 @@ impl LiveIndex {
 
         let load_duration = start.elapsed();
         info!(
-            "LiveIndex loaded: {} files, {} symbols, {:?}",
+            "LiveIndex loaded: {} files, {} symbols, {} skipped, {:?}",
             files.len(),
             files.values().map(|f| f.symbols.len()).sum::<usize>(),
+            skipped_files.len(),
             load_duration
         );
 
@@ -596,7 +734,7 @@ impl LiveIndex {
             files_by_dir_component: HashMap::new(),
             trigram_index,
             gitignore,
-            skipped_files: Vec::new(),
+            skipped_files,
         };
         index.rebuild_reverse_index();
         index.rebuild_path_indices();
