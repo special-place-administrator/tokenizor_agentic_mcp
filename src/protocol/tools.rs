@@ -3000,8 +3000,9 @@ impl TokenizorServer {
         let parent_type = edit::find_parent_impl_type(&file, &sym);
         edit::reindex_after_write(
             &self.index,
+            &abs_path,
             &params.0.path,
-            new_content,
+            &new_content,
             file.language.clone(),
         );
         let warnings = edit::detect_stale_references(
@@ -3078,8 +3079,9 @@ impl TokenizorServer {
         }
         edit::reindex_after_write(
             &self.index,
+            &abs_path,
             &params.0.path,
-            new_content,
+            &new_content,
             file.language.clone(),
         );
         edit_format::format_insert(
@@ -3139,8 +3141,9 @@ impl TokenizorServer {
         }
         edit::reindex_after_write(
             &self.index,
+            &abs_path,
             &params.0.path,
-            new_content,
+            &new_content,
             file.language.clone(),
         );
         edit_format::format_delete(
@@ -3233,8 +3236,9 @@ impl TokenizorServer {
         }
         edit::reindex_after_write(
             &self.index,
+            &abs_path,
             &params.0.path,
-            new_content,
+            &new_content,
             file.language.clone(),
         );
         edit_format::format_edit_within(

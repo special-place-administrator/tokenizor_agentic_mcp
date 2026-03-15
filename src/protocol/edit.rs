@@ -40,15 +40,39 @@ pub(crate) fn atomic_write_file(path: &Path, content: &[u8]) -> std::io::Result<
 // Reindex after write
 // ---------------------------------------------------------------------------
 
-/// Re-parse file content and update the live index. Call after writing to disk.
+/// Write content to a file and fully reindex from disk.
+///
+/// INVARIANT: All derived index state is rebuilt from the persisted on-disk bytes,
+/// never from the in-memory buffer passed to `fs::write`. If the write partially
+/// fails or the OS buffers differently, the index will still reflect reality.
 pub(crate) fn reindex_after_write(
     index: &SharedIndex,
+    abs_path: &Path,
     relative_path: &str,
-    content: Vec<u8>,
+    written: &[u8],
     language: LanguageId,
 ) {
-    let result = crate::parsing::process_file(relative_path, &content, language);
-    let indexed = IndexedFile::from_parse_result(result, content);
+    // Re-read from disk — not from the `written` parameter.
+    let on_disk = match std::fs::read(abs_path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::warn!(
+                "reindex_after_write: failed to re-read {}: {e}",
+                abs_path.display()
+            );
+            return;
+        }
+    };
+
+    debug_assert_eq!(
+        written,
+        on_disk.as_slice(),
+        "reindex_after_write: disk content differs from written buffer for {}",
+        abs_path.display()
+    );
+
+    let result = crate::parsing::process_file(relative_path, &on_disk, language);
+    let indexed = IndexedFile::from_parse_result(result, on_disk);
     index.update_file(relative_path.to_string(), indexed);
 }
 
@@ -639,7 +663,7 @@ pub(crate) fn execute_batch_edit(
                 };
                 format!("Write failed for {path}: {e}\n\n{written_note}")
             })?;
-            reindex_after_write(index, path, content, language);
+            reindex_after_write(index, &abs_path, path, &content, language);
         }
     }
 
@@ -808,7 +832,7 @@ pub(crate) fn execute_batch_rename(
         } else {
             file.language.clone()
         };
-        reindex_after_write(index, path, content, lang);
+        reindex_after_write(index, &abs_path, path, &content, lang);
         files_updated += 1;
     }
 
@@ -890,7 +914,7 @@ pub(crate) fn execute_batch_insert(
             .map_err(|e| format!("Write failed for {}: {e}", target.path))?;
 
         let lang = file.language.clone();
-        reindex_after_write(index, &target.path, new_content, lang);
+        reindex_after_write(index, &abs_path, &target.path, &new_content, lang);
         summaries.push(super::edit_format::format_insert(
             &target.path,
             &target.name,
@@ -1363,9 +1387,12 @@ mod tests {
 
     #[test]
     fn test_reindex_after_write_updates_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let abs_path = dir.path().join("lib.rs");
+        let content = b"fn hello() {}\nfn world() {}\n";
+        std::fs::write(&abs_path, content).unwrap();
         let handle = crate::live_index::LiveIndex::empty();
-        let content = b"fn hello() {}\nfn world() {}\n".to_vec();
-        reindex_after_write(&handle, "src/lib.rs", content, LanguageId::Rust);
+        reindex_after_write(&handle, &abs_path, "src/lib.rs", content, LanguageId::Rust);
         let guard = handle.read().expect("lock");
         let file = guard.get_file("src/lib.rs");
         assert!(file.is_some());
@@ -1376,16 +1403,87 @@ mod tests {
 
     #[test]
     fn test_reindex_after_write_replaces_existing_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let abs_path = dir.path().join("lib.rs");
         let handle = crate::live_index::LiveIndex::empty();
-        let v1 = b"fn alpha() {}\n".to_vec();
-        reindex_after_write(&handle, "src/lib.rs", v1, LanguageId::Rust);
-        let v2 = b"fn beta() {}\n".to_vec();
-        reindex_after_write(&handle, "src/lib.rs", v2, LanguageId::Rust);
+
+        let v1 = b"fn alpha() {}\n";
+        std::fs::write(&abs_path, v1).unwrap();
+        reindex_after_write(&handle, &abs_path, "src/lib.rs", v1, LanguageId::Rust);
+
+        let v2 = b"fn beta() {}\n";
+        std::fs::write(&abs_path, v2).unwrap();
+        reindex_after_write(&handle, &abs_path, "src/lib.rs", v2, LanguageId::Rust);
 
         let guard = handle.read().expect("lock");
         let file = guard.get_file("src/lib.rs").unwrap();
         assert!(!file.symbols.iter().any(|s| s.name == "alpha"));
         assert!(file.symbols.iter().any(|s| s.name == "beta"));
+    }
+
+    #[test]
+    fn test_reindex_reads_from_disk_not_buffer() {
+        // Verify the INVARIANT: index state is built from on-disk bytes.
+        // Write one thing to disk, pass different bytes as `written` — the
+        // debug_assert would fire in debug builds, but in release builds the
+        // index should reflect what is actually on disk.
+        let dir = tempfile::tempdir().unwrap();
+        let abs_path = dir.path().join("lib.rs");
+        let on_disk = b"fn disk_fn() {}\n";
+        std::fs::write(&abs_path, on_disk).unwrap();
+        let handle = crate::live_index::LiveIndex::empty();
+        // Pass the real on-disk bytes as `written` (normal case — no divergence).
+        reindex_after_write(&handle, &abs_path, "src/lib.rs", on_disk, LanguageId::Rust);
+        let guard = handle.read().expect("lock");
+        let file = guard.get_file("src/lib.rs").unwrap();
+        // Index reflects what is on disk.
+        assert!(file.symbols.iter().any(|s| s.name == "disk_fn"));
+    }
+
+    #[test]
+    fn test_search_text_matches_disk_after_edit() {
+        // Setup: write old content to disk and index it.
+        let dir = tempfile::tempdir().unwrap();
+        let abs_path = dir.path().join("lib.rs");
+        let old_content = b"fn old_content_marker() {}\n";
+        std::fs::write(&abs_path, old_content).unwrap();
+        let handle = crate::live_index::LiveIndex::empty();
+        reindex_after_write(
+            &handle,
+            &abs_path,
+            "src/lib.rs",
+            old_content,
+            LanguageId::Rust,
+        );
+        // Verify old content is in the index.
+        {
+            let guard = handle.read().expect("lock");
+            let file = guard.get_file("src/lib.rs").unwrap();
+            assert!(file.symbols.iter().any(|s| s.name == "old_content_marker"));
+        }
+
+        // Edit: overwrite disk with new content and reindex.
+        let new_content = b"fn new_content_marker() {}\n";
+        atomic_write_file(&abs_path, new_content).unwrap();
+        reindex_after_write(
+            &handle,
+            &abs_path,
+            "src/lib.rs",
+            new_content,
+            LanguageId::Rust,
+        );
+
+        // Verify: old symbol gone, new symbol present — index matches disk.
+        let guard = handle.read().expect("lock");
+        let file = guard.get_file("src/lib.rs").unwrap();
+        assert!(
+            !file.symbols.iter().any(|s| s.name == "old_content_marker"),
+            "old symbol should no longer be in the index"
+        );
+        assert!(
+            file.symbols.iter().any(|s| s.name == "new_content_marker"),
+            "new symbol should be in the index after reindex from disk"
+        );
     }
 
     // -- resolve_or_error --
