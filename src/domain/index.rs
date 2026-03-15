@@ -458,6 +458,27 @@ pub const HARD_SKIP_BYTES: u64 = 100 * 1024 * 1024;
 pub const METADATA_ONLY_BYTES: u64 = 1 * 1024 * 1024;
 pub const BINARY_SNIFF_BYTES: usize = 8192;
 
+const DENYLISTED_EXTENSIONS: &[&str] = &[
+    // ML models
+    "safetensors", "ckpt", "pt", "onnx", "gguf", "pth",
+    // VM/disk images
+    "vmdk", "iso", "img", "qcow2",
+    // Archives
+    "tar", "gz", "zip", "7z", "rar", "bz2", "xz", "zst",
+    // Databases
+    "db", "sqlite", "sqlite3", "mdb",
+    // Media
+    "mp3", "mp4", "wav", "avi", "mov", "mkv",
+    "png", "jpg", "jpeg", "gif", "bmp", "ico",
+    "woff", "woff2", "ttf", "eot",
+    // Binary
+    "bin",
+];
+
+pub fn is_denylisted_extension(ext: &str) -> bool {
+    DENYLISTED_EXTENSIONS.contains(&ext.to_lowercase().as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,5 +704,26 @@ mod tests {
         assert_ne!(t1, t2);
         assert_ne!(t2, t3);
         assert_ne!(t1, t3);
+    }
+
+    #[test]
+    fn test_extension_is_denylisted() {
+        assert!(is_denylisted_extension("safetensors"));
+        assert!(is_denylisted_extension("ckpt"));
+        assert!(is_denylisted_extension("zip"));
+        assert!(is_denylisted_extension("mp4"));
+        assert!(is_denylisted_extension("woff2"));
+        assert!(is_denylisted_extension("png"));
+        assert!(is_denylisted_extension("bin"));
+    }
+
+    #[test]
+    fn test_extension_not_denylisted() {
+        assert!(!is_denylisted_extension("rs"));
+        assert!(!is_denylisted_extension("ts"));
+        assert!(!is_denylisted_extension("json"));
+        assert!(!is_denylisted_extension("svg")); // SVG intentionally NOT denylisted
+        assert!(!is_denylisted_extension("md"));
+        assert!(!is_denylisted_extension("toml"));
     }
 }
