@@ -19,7 +19,7 @@
 **Fix:** After the existing indexed-reference rename pass, run a supplemental scan for qualified path usages where the renamed identifier appears as a path segment.
 
 **Constraints:**
-- Scope the supplemental scan to: (a) files already containing indexed rename candidates, plus (b) files in the same directory and its parent, up to the crate/package root. This is the "module neighborhood" — not the entire project.
+- Scope the supplemental scan to: (a) files already containing indexed rename candidates, plus (b) files reachable through the renamed symbol's import/module neighborhood within the same crate/package. Fall back to directory-parent traversal only when module resolution is unavailable (e.g., non-Rust languages without explicit module declarations).
 - Classify matches as **confident** (exact path segment match in code context) vs **uncertain** (ambiguous, e.g., inside a string literal or comment)
 - Never silently apply uncertain replacements — surface them separately in output
 - Dry-run output must clearly separate confident from uncertain sections
@@ -46,6 +46,12 @@
    - Rebuild affected index entries (symbols, FTS, reverse index) from the on-disk bytes
    - Only then return success
 2. A debug assertion can optionally verify the re-read content matches expectations, but the assertion is not the correctness mechanism — the re-read is.
+
+**Atomic multi-file operations contract:**
+- Files written successfully are reindexed from disk immediately after each write
+- Files not written (due to failure or not yet reached) remain untouched in the index
+- No speculative index mutation is allowed — the index is only updated from persisted bytes
+- The overall operation may still return an error, but successfully-written files have correct index state
 
 **This applies to:** `replace_symbol_body`, `edit_within_symbol`, `insert_symbol`, `delete_symbol`, `batch_edit`, `batch_rename`, `batch_insert`
 
@@ -96,7 +102,9 @@ A markdown file may be `NoiseClass::None` but `AdmissionTier::Normal`. A `.safet
 - VM/disk images: `.vmdk`, `.iso`, `.img`, `.qcow2`
 - Archives: `.tar`, `.gz`, `.zip`, `.7z`, `.rar`, `.bz2`, `.xz`, `.zst`
 - Databases: `.db`, `.sqlite`, `.sqlite3`, `.mdb`
-- Media: `.mp3`, `.mp4`, `.wav`, `.avi`, `.mov`, `.mkv`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.bmp`, `.ico`, `.svg`, `.woff`, `.woff2`, `.ttf`, `.eot`
+- Media: `.mp3`, `.mp4`, `.wav`, `.avi`, `.mov`, `.mkv`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.bmp`, `.ico`, `.woff`, `.woff2`, `.ttf`, `.eot`
+
+**Note on `.svg`:** Excluded from the denylist intentionally. SVG files are often plain-text XML meaningful in frontend repos. They are handled by the size threshold (>1MB → Tier 2) and binary sniff instead.
 
 **Policy note:** `.bin` is denylisted because it is almost never source code. Note that the denylist at step 2 takes precedence over the binary sniff at step 4 — a `.bin` file that is legitimate UTF-8 text will still be classified as Tier 2 by the denylist before the sniff is reached. If this becomes a problem in practice, `.bin` can be removed from the denylist and left to the sniff. The size threshold and binary sniff remain the real backstops for unlisted extensions.
 
@@ -203,7 +211,7 @@ The headline number (`N symbols`) in health and repo_map compact counts **only T
 **ComfyUI stress test (acceptance):**
 - Project with multi-GB model files indexes without choking
 - Health shows realistic symbol count (not inflated by model files)
-- Index completes in reasonable time (<60s for code files)
+- Admission tiers prevent artifact-driven index blowups (runtime materially improved vs pre-admission behavior)
 
 ---
 
