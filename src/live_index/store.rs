@@ -279,6 +279,8 @@ pub struct PublishedIndexState {
     pub load_source: IndexLoadSource,
     pub snapshot_verify_state: SnapshotVerifyState,
     pub is_empty: bool,
+    /// Admission tier counts: (Tier1 indexed, Tier2 metadata-only, Tier3 hard-skipped).
+    pub tier_counts: (usize, usize, usize),
 }
 
 /// The in-memory index: file contents and parsed symbols for all discovered files.
@@ -488,6 +490,7 @@ impl PublishedIndexState {
             load_source: index.load_source,
             snapshot_verify_state: index.snapshot_verify_state,
             is_empty: index.is_empty,
+            tier_counts: stats.tier_counts,
         }
     }
 

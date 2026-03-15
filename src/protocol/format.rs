@@ -751,12 +751,20 @@ pub fn file_tree_view_with_skipped(
     let footer = if lines.len() > 1 { lines.pop() } else { None };
 
     // Build Tier 2 file lines. Each gets placed at the correct indentation by stripping the prefix.
-    let strip_len = if prefix.is_empty() { 0 } else { prefix.len() + 1 };
+    let strip_len = if prefix.is_empty() {
+        0
+    } else {
+        prefix.len() + 1
+    };
     let mut tier2_lines: Vec<(String, String)> = tier2
         .iter()
         .map(|sf| {
             let p = sf.path.as_str();
-            let rel = if p.len() >= strip_len { &p[strip_len..] } else { p };
+            let rel = if p.len() >= strip_len {
+                &p[strip_len..]
+            } else {
+                p
+            };
             let reason = sf
                 .decision
                 .reason
@@ -782,7 +790,11 @@ pub fn file_tree_view_with_skipped(
         lines.push(f);
     }
     if tier3_count > 0 {
-        let artifact_label = if tier3_count == 1 { "artifact" } else { "artifacts" };
+        let artifact_label = if tier3_count == 1 {
+            "artifact"
+        } else {
+            "artifacts"
+        };
         lines.push(format!(
             "{} hard-skipped {} not shown (>100MB)",
             tier3_count, artifact_label
@@ -5219,8 +5231,12 @@ mod tests {
         ];
 
         let sym = make_symbol("foo", SymbolKind::Function, 0, 1, 3);
-        let (k, f) =
-            make_file_with_lang("src/main.rs", b"fn foo() {}", vec![sym], crate::domain::LanguageId::Rust);
+        let (k, f) = make_file_with_lang(
+            "src/main.rs",
+            b"fn foo() {}",
+            vec![sym],
+            crate::domain::LanguageId::Rust,
+        );
         let index = make_index(vec![(k, f)]);
         let view = index.capture_repo_outline_view();
 
@@ -5245,7 +5261,10 @@ mod tests {
             "expected '>100MB' in footer, got: {result}"
         );
         // The indexed file must still appear.
-        assert!(result.contains("main.rs"), "indexed file should appear, got: {result}");
+        assert!(
+            result.contains("main.rs"),
+            "indexed file should appear, got: {result}"
+        );
     }
 
     #[test]

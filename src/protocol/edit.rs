@@ -915,10 +915,8 @@ pub(crate) fn execute_batch_rename(
                     );
                 }
                 Err(rb_err) => {
-                    rollback_failures.push(format!(
-                        "  {} (reindex after rollback): {rb_err}",
-                        sf.path
-                    ));
+                    rollback_failures
+                        .push(format!("  {} (reindex after rollback): {rb_err}", sf.path));
                 }
             }
         }
@@ -948,7 +946,13 @@ pub(crate) fn execute_batch_rename(
     let mut files_updated = 0;
     let mut refs_updated = 0;
     for sf in &staged {
-        reindex_after_write(index, &sf.abs_path, &sf.path, &sf.new_content, sf.language.clone());
+        reindex_after_write(
+            index,
+            &sf.abs_path,
+            &sf.path,
+            &sf.new_content,
+            sf.language.clone(),
+        );
         files_updated += 1;
         refs_updated += sf.refs_count;
     }
@@ -2221,11 +2225,17 @@ mod tests {
 
         // File 1 (a.rs): was written successfully — disk and index reflect edit.
         let a_content = std::fs::read_to_string(src.join("a.rs")).unwrap();
-        assert!(a_content.contains("new"), "a.rs should be updated: {a_content}");
+        assert!(
+            a_content.contains("new"),
+            "a.rs should be updated: {a_content}"
+        );
 
         // File 2 (b.rs): write failed — disk unchanged, index unchanged.
         let b_content = std::fs::read_to_string(&b_path).unwrap();
-        assert!(b_content.contains("old"), "b.rs should be unchanged: {b_content}");
+        assert!(
+            b_content.contains("old"),
+            "b.rs should be unchanged: {b_content}"
+        );
 
         // File 3 (c.rs): also attempted — best-effort continues past file 2.
         // (Whether c.rs succeeded depends on iteration order, but the error must mention b.rs.)

@@ -611,6 +611,8 @@ pub struct HealthStats {
     pub debounce_window_ms: u64,
     /// Sorted, deduplicated list of files with partial-parse status.
     pub partial_parse_files: Vec<String>,
+    /// Admission tier counts: (Tier1 indexed, Tier2 metadata-only, Tier3 hard-skipped).
+    pub tier_counts: (usize, usize, usize),
 }
 
 /// Owned entry used to render the repo outline after releasing the index lock.
@@ -2032,6 +2034,7 @@ impl LiveIndex {
             last_event_at: None,
             debounce_window_ms: 200,
             partial_parse_files,
+            tier_counts: self.tier_counts(),
         }
     }
 
