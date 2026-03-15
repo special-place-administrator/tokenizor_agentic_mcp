@@ -8,7 +8,7 @@ pub use server::spawn_sidecar;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde::Serialize;
 
@@ -55,6 +55,8 @@ pub struct TokenStats {
     pub write_fires: AtomicUsize,
     pub grep_fires: AtomicUsize,
     pub grep_saved_tokens: AtomicU64,
+    /// Per-tool invocation counts since daemon start.
+    pub tool_calls: Mutex<HashMap<String, usize>>,
 }
 
 impl TokenStats {
@@ -68,6 +70,7 @@ impl TokenStats {
             write_fires: AtomicUsize::new(0),
             grep_fires: AtomicUsize::new(0),
             grep_saved_tokens: AtomicU64::new(0),
+            tool_calls: Mutex::new(HashMap::new()),
         })
     }
 
@@ -95,6 +98,20 @@ impl TokenStats {
         self.grep_fires.fetch_add(1, Ordering::Relaxed);
         let saved = file_bytes.saturating_sub(output_bytes) / 4;
         self.grep_saved_tokens.fetch_add(saved, Ordering::Relaxed);
+    }
+
+    /// Record a single MCP tool invocation by name.
+    pub fn record_tool_call(&self, name: &str) {
+        let mut map = self.tool_calls.lock().unwrap();
+        *map.entry(name.to_string()).or_insert(0) += 1;
+    }
+
+    /// Return per-tool invocation counts sorted by count descending, then name ascending.
+    pub fn tool_call_counts(&self) -> Vec<(String, usize)> {
+        let map = self.tool_calls.lock().unwrap();
+        let mut counts: Vec<(String, usize)> = map.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        counts
     }
 
     /// Read all counter values atomically (Relaxed ordering — display only).
@@ -240,6 +257,22 @@ mod tests {
         assert_eq!(snap.grep_fires, 1);
         // (2000 - 100) / 4 = 475
         assert_eq!(snap.grep_saved_tokens, 475);
+    }
+
+    #[test]
+    fn test_token_stats_records_tool_calls() {
+        let stats = TokenStats::new();
+
+        stats.record_tool_call("search_text");
+        stats.record_tool_call("search_text");
+        stats.record_tool_call("get_file_context");
+
+        let counts = stats.tool_call_counts();
+
+        // search_text has the highest count and should appear first.
+        assert_eq!(counts[0], ("search_text".to_string(), 2));
+        assert_eq!(counts[1], ("get_file_context".to_string(), 1));
+        assert_eq!(counts.len(), 2);
     }
 
     #[test]

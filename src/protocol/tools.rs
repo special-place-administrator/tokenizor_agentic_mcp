@@ -904,10 +904,9 @@ fn file_content_options_from_input(
             || input.around_line.is_some()
             || input.around_match.is_some()
             || input.chunk_index.is_some()
-            || input.max_lines.is_some()
         {
             return Err(
-                "Invalid get_file_content request: `around_symbol` cannot be combined with `start_line`, `end_line`, `around_line`, `around_match`, `chunk_index`, or `max_lines`. Valid with `around_symbol`: `symbol_line`, `context_lines`."
+                "Invalid get_file_content request: `around_symbol` cannot be combined with `start_line`, `end_line`, `around_line`, `around_match`, or `chunk_index`. Valid with `around_symbol`: `symbol_line`, `context_lines`, `max_lines`."
                     .to_string(),
             );
         }
@@ -925,6 +924,7 @@ fn file_content_options_from_input(
                 around_symbol,
                 input.symbol_line,
                 input.context_lines,
+                input.max_lines,
             ),
         );
     }
@@ -1898,6 +1898,14 @@ impl TokenizorServer {
             if !savings.is_empty() {
                 result.push('\n');
                 result.push_str(&savings);
+            }
+
+            // Append per-tool call counts.
+            let counts = stats.tool_call_counts();
+            let counts_section = format::format_tool_call_counts(&counts);
+            if !counts_section.is_empty() {
+                result.push('\n');
+                result.push_str(&counts_section);
             }
         }
 
@@ -5504,7 +5512,7 @@ mod tests {
                 start_line: Some(2),
                 end_line: None,
                 chunk_index: Some(1),
-                max_lines: Some(2),
+                max_lines: None,
                 around_line: None,
                 around_match: None,
                 around_symbol: Some("connect".to_string()),
@@ -5516,7 +5524,7 @@ mod tests {
             .await;
         assert_eq!(
             result,
-            "Invalid get_file_content request: `around_symbol` cannot be combined with `start_line`, `end_line`, `around_line`, `around_match`, `chunk_index`, or `max_lines`. Valid with `around_symbol`: `symbol_line`, `context_lines`."
+            "Invalid get_file_content request: `around_symbol` cannot be combined with `start_line`, `end_line`, `around_line`, `around_match`, or `chunk_index`. Valid with `around_symbol`: `symbol_line`, `context_lines`, `max_lines`."
         );
     }
 

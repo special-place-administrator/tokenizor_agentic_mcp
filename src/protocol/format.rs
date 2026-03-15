@@ -903,7 +903,10 @@ pub fn health_report_from_stats(status: &str, stats: &HealthStats) -> String {
     );
 
     if !stats.partial_parse_files.is_empty() {
-        output.push_str(&format!("\nPartial parse files ({}):\n", stats.partial_parse_files.len()));
+        output.push_str(&format!(
+            "\nPartial parse files ({}):\n",
+            stats.partial_parse_files.len()
+        ));
         for (i, path) in stats.partial_parse_files.iter().take(10).enumerate() {
             output.push_str(&format!("  {}. {}\n", i + 1, path));
         }
@@ -1094,9 +1097,8 @@ pub fn file_content_from_indexed_file_with_context(
             file,
             around_symbol,
             context.symbol_line,
-            context
-                .context_lines
-                .unwrap_or(DEFAULT_AROUND_LINE_CONTEXT_LINES),
+            context.context_lines.unwrap_or(0),
+            context.max_lines,
         );
     }
 
@@ -1301,12 +1303,19 @@ fn render_numbered_around_symbol_excerpt(
     around_symbol: &str,
     symbol_line: Option<u32>,
     context_lines: u32,
+    max_lines: Option<u32>,
 ) -> String {
     let content = String::from_utf8_lossy(&file.content);
     let lines: Vec<&str> = content.lines().collect();
 
-    match resolve_around_symbol_line(file, around_symbol, symbol_line) {
-        Ok(around_line) => render_numbered_around_line_excerpt(&lines, around_line, context_lines),
+    match resolve_around_symbol_range(file, around_symbol, symbol_line) {
+        Ok((sym_start, sym_end)) => render_numbered_symbol_range_excerpt(
+            &lines,
+            sym_start,
+            sym_end,
+            context_lines,
+            max_lines,
+        ),
         Err(AroundSymbolResolutionError::NotFound) => {
             render_not_found_symbol(&file.relative_path, &file.symbols, around_symbol)
         }
@@ -1330,6 +1339,54 @@ fn render_numbered_around_symbol_excerpt(
     }
 }
 
+/// Render a numbered excerpt covering the full symbol range `sym_start..=sym_end`
+/// (1-indexed inclusive), extended by `context_lines` on each side.
+/// When `max_lines` is set and the total exceeds it, truncate with a hint.
+fn render_numbered_symbol_range_excerpt(
+    lines: &[&str],
+    sym_start: u32,
+    sym_end: u32,
+    context_lines: u32,
+    max_lines: Option<u32>,
+) -> String {
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    let total = lines.len();
+    let start = (sym_start as usize)
+        .saturating_sub(context_lines as usize)
+        .max(1);
+    let end = ((sym_end as usize).saturating_add(context_lines as usize)).min(total);
+
+    if start > end || start > total {
+        return String::new();
+    }
+
+    let full_range_len = end - start + 1;
+
+    if let Some(ml) = max_lines {
+        let ml = ml as usize;
+        if ml > 0 && full_range_len > ml {
+            let truncated_end = start + ml - 1;
+            let mut result: Vec<String> = (start..=truncated_end)
+                .map(|n| format!("{n}: {}", lines[n - 1]))
+                .collect();
+            result.push(format!(
+                "... truncated (symbol is {} lines, showing first {})",
+                sym_end.saturating_sub(sym_start) + 1,
+                ml
+            ));
+            return result.join("\n");
+        }
+    }
+
+    (start..=end)
+        .map(|n| format!("{n}: {}", lines[n - 1]))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum AroundSymbolResolutionError {
     NotFound,
@@ -1337,11 +1394,13 @@ enum AroundSymbolResolutionError {
     Ambiguous(Vec<u32>),
 }
 
-fn resolve_around_symbol_line(
+/// Resolve an `around_symbol` selector to the symbol's full 1-indexed line range
+/// `(start_line, end_line)`.  Both bounds are inclusive.
+fn resolve_around_symbol_range(
     file: &IndexedFile,
     around_symbol: &str,
     symbol_line: Option<u32>,
-) -> Result<u32, AroundSymbolResolutionError> {
+) -> Result<(u32, u32), AroundSymbolResolutionError> {
     let matching_symbols: Vec<&crate::domain::SymbolRecord> = file
         .symbols
         .iter()
@@ -1360,7 +1419,10 @@ fn resolve_around_symbol_line(
             .collect();
 
         return match exact_matches.as_slice() {
-            [symbol] => Ok(symbol.line_range.0.saturating_add(1)),
+            [symbol] => Ok((
+                symbol.line_range.0.saturating_add(1),
+                symbol.line_range.1.saturating_add(1),
+            )),
             [] => Err(AroundSymbolResolutionError::SelectorNotFound(symbol_line)),
             _ => Err(AroundSymbolResolutionError::Ambiguous(
                 dedup_symbol_candidate_lines(&exact_matches),
@@ -1369,7 +1431,10 @@ fn resolve_around_symbol_line(
     }
 
     match matching_symbols.as_slice() {
-        [symbol] => Ok(symbol.line_range.0.saturating_add(1)),
+        [symbol] => Ok((
+            symbol.line_range.0.saturating_add(1),
+            symbol.line_range.1.saturating_add(1),
+        )),
         _ => Err(AroundSymbolResolutionError::Ambiguous(
             dedup_symbol_candidate_lines(&matching_symbols),
         )),
@@ -2506,6 +2571,32 @@ pub fn format_token_savings(snap: &crate::sidecar::StatsSnapshot) -> String {
     lines.join("\n")
 }
 
+/// Format a "Tool Call Counts (this session)" section from per-tool invocation counts.
+///
+/// Input: `counts` — sorted slice of `(tool_name, count)` from `TokenStats::tool_call_counts()`.
+/// Output: a multi-line string. Returns empty string when `counts` is empty.
+///
+/// ```text
+/// ── Tool Call Counts (this session) ──
+/// search_text:        12
+/// get_file_context:    7
+/// get_symbol:          3
+/// ```
+pub fn format_tool_call_counts(counts: &[(String, usize)]) -> String {
+    if counts.is_empty() {
+        return String::new();
+    }
+
+    let mut lines = vec!["── Tool Call Counts (this session) ──".to_string()];
+    // Align counts by padding tool names to the width of the longest name.
+    let max_name_len = counts.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+    for (name, count) in counts {
+        lines.push(format!("{:<width$}  {}", name, count, width = max_name_len));
+    }
+
+    lines.join("\n")
+}
+
 /// Estimate tokens saved by a structured response vs raw file content.
 /// Returns a one-line footer string, or empty string if no meaningful savings.
 pub fn compact_savings_footer(response_chars: usize, raw_chars: usize) -> String {
@@ -3262,65 +3353,74 @@ mod tests {
         assert_eq!(captured_result, live_result);
     }
 
-        #[test]
-        fn test_health_report_lists_partial_parse_files() {
-            use std::time::Duration;
-            use crate::watcher::WatcherState;
+    #[test]
+    fn test_health_report_lists_partial_parse_files() {
+        use crate::watcher::WatcherState;
+        use std::time::Duration;
 
-            let stats = HealthStats {
-                file_count: 3,
-                symbol_count: 0,
-                parsed_count: 0,
-                partial_parse_count: 3,
-                failed_count: 0,
-                load_duration: Duration::from_millis(0),
-                watcher_state: WatcherState::Off,
-                events_processed: 0,
-                last_event_at: None,
-                debounce_window_ms: 200,
-                partial_parse_files: vec![
-                    "src/a.rs".to_string(),
-                    "src/b.rs".to_string(),
-                    "src/c.rs".to_string(),
-                ],
-            };
-            let report = health_report_from_stats("Ready", &stats);
-            assert!(report.contains("Partial parse files (3):"), "should contain header");
-            assert!(report.contains("  1. src/a.rs"), "should list first file");
-            assert!(report.contains("  2. src/b.rs"), "should list second file");
-            assert!(report.contains("  3. src/c.rs"), "should list third file");
-            assert!(!report.contains("... and"), "should not show overflow hint for 3 files");
-        }
+        let stats = HealthStats {
+            file_count: 3,
+            symbol_count: 0,
+            parsed_count: 0,
+            partial_parse_count: 3,
+            failed_count: 0,
+            load_duration: Duration::from_millis(0),
+            watcher_state: WatcherState::Off,
+            events_processed: 0,
+            last_event_at: None,
+            debounce_window_ms: 200,
+            partial_parse_files: vec![
+                "src/a.rs".to_string(),
+                "src/b.rs".to_string(),
+                "src/c.rs".to_string(),
+            ],
+        };
+        let report = health_report_from_stats("Ready", &stats);
+        assert!(
+            report.contains("Partial parse files (3):"),
+            "should contain header"
+        );
+        assert!(report.contains("  1. src/a.rs"), "should list first file");
+        assert!(report.contains("  2. src/b.rs"), "should list second file");
+        assert!(report.contains("  3. src/c.rs"), "should list third file");
+        assert!(
+            !report.contains("... and"),
+            "should not show overflow hint for 3 files"
+        );
+    }
 
-        #[test]
-        fn test_health_report_caps_partial_list_at_10() {
-            use std::time::Duration;
-            use crate::watcher::WatcherState;
+    #[test]
+    fn test_health_report_caps_partial_list_at_10() {
+        use crate::watcher::WatcherState;
+        use std::time::Duration;
 
-            let partial_parse_files: Vec<String> =
-                (1..=50).map(|i| format!("src/file{:02}.rs", i)).collect();
-            let stats = HealthStats {
-                file_count: 50,
-                symbol_count: 0,
-                parsed_count: 0,
-                partial_parse_count: 50,
-                failed_count: 0,
-                load_duration: Duration::from_millis(0),
-                watcher_state: WatcherState::Off,
-                events_processed: 0,
-                last_event_at: None,
-                debounce_window_ms: 200,
-                partial_parse_files,
-            };
-            let report = health_report_from_stats("Ready", &stats);
-            assert!(report.contains("Partial parse files (50):"), "should show count of 50");
-            assert!(report.contains("  10."), "should list up to entry 10");
-            assert!(!report.contains("  11."), "should not list entry 11");
-            assert!(
-                report.contains("... and 40 more partial files"),
-                "should show overflow hint for 40 remaining"
-            );
-        }
+        let partial_parse_files: Vec<String> =
+            (1..=50).map(|i| format!("src/file{:02}.rs", i)).collect();
+        let stats = HealthStats {
+            file_count: 50,
+            symbol_count: 0,
+            parsed_count: 0,
+            partial_parse_count: 50,
+            failed_count: 0,
+            load_duration: Duration::from_millis(0),
+            watcher_state: WatcherState::Off,
+            events_processed: 0,
+            last_event_at: None,
+            debounce_window_ms: 200,
+            partial_parse_files,
+        };
+        let report = health_report_from_stats("Ready", &stats);
+        assert!(
+            report.contains("Partial parse files (50):"),
+            "should show count of 50"
+        );
+        assert!(report.contains("  10."), "should list up to entry 10");
+        assert!(!report.contains("  11."), "should not list entry 11");
+        assert!(
+            report.contains("... and 40 more partial files"),
+            "should show overflow hint for 40 remaining"
+        );
+    }
 
     // --- what_changed_result tests ---
 
@@ -3717,6 +3817,144 @@ mod tests {
         );
 
         assert_eq!(result, "3: fn connect() {}");
+    }
+
+    // --- B2: around_symbol returns full indexed span ---
+
+    #[test]
+    fn test_around_symbol_returns_full_multiline_body() {
+        // 25-line function to verify we get the full body, not just 3-7 lines
+        let mut lines_vec: Vec<String> = Vec::new();
+        lines_vec.push("// preamble".to_string());
+        lines_vec.push("fn big_function() {".to_string());
+        for i in 0..20 {
+            lines_vec.push(format!("    let x{i} = {i};"));
+        }
+        lines_vec.push("}".to_string());
+        lines_vec.push("// postamble".to_string());
+        let content_str = lines_vec.join("\n");
+        let content = content_str.as_bytes();
+
+        // Symbol spans lines 1..22 (0-indexed), i.e. "fn big_function() {" through "}"
+        let (key, file) = make_file(
+            "src/main.rs",
+            content,
+            vec![make_symbol("big_function", SymbolKind::Function, 0, 1, 22)],
+        );
+        let index = make_index(vec![(key, file)]);
+
+        let result = file_content_from_indexed_file_with_context(
+            index.capture_shared_file("src/main.rs").unwrap().as_ref(),
+            search::ContentContext::around_symbol("big_function", None, None),
+        );
+
+        let result_lines: Vec<&str> = result.lines().collect();
+        // Symbol is lines 2..23 (1-indexed), default context_lines=0
+        assert_eq!(
+            result_lines.len(),
+            22,
+            "should return all 22 lines of the symbol"
+        );
+        assert!(result_lines[0].contains("fn big_function()"));
+        assert!(result_lines[21].contains("}"));
+    }
+
+    #[test]
+    fn test_around_symbol_with_max_lines_truncates() {
+        let content =
+            b"line 1\nfn connect() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}\nline 7";
+        let (key, file) = make_file(
+            "src/main.rs",
+            content,
+            // Symbol spans lines 1..5 (0-indexed), i.e. 6 lines: "fn connect() {" through "}"
+            vec![make_symbol("connect", SymbolKind::Function, 0, 1, 5)],
+        );
+        let index = make_index(vec![(key, file)]);
+
+        let result = file_content_from_indexed_file_with_context(
+            index.capture_shared_file("src/main.rs").unwrap().as_ref(),
+            search::ContentContext::around_symbol_with_max_lines("connect", None, None, Some(3)),
+        );
+
+        let result_lines: Vec<&str> = result.lines().collect();
+        assert_eq!(result_lines.len(), 4); // 3 content lines + truncation hint
+        assert!(result_lines[0].contains("fn connect()"));
+        assert!(result_lines[3].contains("truncated"));
+        assert!(result_lines[3].contains("showing first 3"));
+    }
+
+    #[test]
+    fn test_around_symbol_context_lines_extends_range() {
+        let content = b"line 1\nline 2\nfn connect() {\n    body;\n}\nline 6\nline 7";
+        let (key, file) = make_file(
+            "src/main.rs",
+            content,
+            // Symbol spans lines 2..4 (0-indexed)
+            vec![make_symbol("connect", SymbolKind::Function, 0, 2, 4)],
+        );
+        let index = make_index(vec![(key, file)]);
+
+        // context_lines=2 should add 2 lines before and after the symbol
+        let result = file_content_from_indexed_file_with_context(
+            index.capture_shared_file("src/main.rs").unwrap().as_ref(),
+            search::ContentContext::around_symbol("connect", None, Some(2)),
+        );
+
+        let result_lines: Vec<&str> = result.lines().collect();
+        // Symbol is lines 3-5 (1-indexed), context extends to 1-7
+        assert_eq!(result_lines.len(), 7);
+        assert!(result_lines[0].contains("line 1"));
+        assert!(result_lines[6].contains("line 7"));
+    }
+
+    #[test]
+    fn test_around_symbol_not_found_returns_error() {
+        let content = b"fn connect() {}\nline 2";
+        let (key, file) = make_file(
+            "src/main.rs",
+            content,
+            vec![make_symbol("connect", SymbolKind::Function, 0, 0, 0)],
+        );
+        let index = make_index(vec![(key, file)]);
+
+        let result = file_content_from_indexed_file_with_context(
+            index.capture_shared_file("src/main.rs").unwrap().as_ref(),
+            search::ContentContext::around_symbol("nonexistent", None, None),
+        );
+
+        assert!(
+            result.contains("No symbol")
+                || result.contains("not found")
+                || result.contains("Not found"),
+            "should indicate symbol not found, got: {result}"
+        );
+        assert!(
+            result.contains("nonexistent"),
+            "error should name the missing symbol, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_around_symbol_includes_doc_comments_in_indexed_range() {
+        // Doc comment is on line 0, function signature on line 1, body on lines 2-3
+        let content = b"/// Doc comment\nfn connect() {\n    body;\n}\nline 5";
+        let (key, file) = make_file(
+            "src/main.rs",
+            content,
+            // Symbol range includes the doc comment line (0..3)
+            vec![make_symbol("connect", SymbolKind::Function, 0, 0, 3)],
+        );
+        let index = make_index(vec![(key, file)]);
+
+        let result = file_content_from_indexed_file_with_context(
+            index.capture_shared_file("src/main.rs").unwrap().as_ref(),
+            search::ContentContext::around_symbol("connect", None, None),
+        );
+
+        let result_lines: Vec<&str> = result.lines().collect();
+        assert_eq!(result_lines.len(), 4);
+        assert!(result_lines[0].contains("/// Doc comment"));
+        assert!(result_lines[3].contains("}"));
     }
 
     // --- guard messages ---

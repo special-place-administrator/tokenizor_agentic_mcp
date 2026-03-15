@@ -195,6 +195,15 @@ impl ContentContext {
         symbol_line: Option<u32>,
         context_lines: Option<u32>,
     ) -> Self {
+        Self::around_symbol_with_max_lines(around_symbol, symbol_line, context_lines, None)
+    }
+
+    pub fn around_symbol_with_max_lines(
+        around_symbol: impl Into<String>,
+        symbol_line: Option<u32>,
+        context_lines: Option<u32>,
+        max_lines: Option<u32>,
+    ) -> Self {
         Self {
             start_line: None,
             end_line: None,
@@ -204,7 +213,7 @@ impl ContentContext {
             symbol_line,
             context_lines,
             chunk_index: None,
-            max_lines: None,
+            max_lines,
             show_line_numbers: false,
             header: false,
         }
@@ -530,13 +539,15 @@ impl FileContentOptions {
         around_symbol: impl Into<String>,
         symbol_line: Option<u32>,
         context_lines: Option<u32>,
+        max_lines: Option<u32>,
     ) -> Self {
         Self {
             path_scope: PathScope::exact(path),
-            content_context: ContentContext::around_symbol(
+            content_context: ContentContext::around_symbol_with_max_lines(
                 around_symbol,
                 symbol_line,
                 context_lines,
+                max_lines,
             ),
         }
     }
@@ -1856,6 +1867,7 @@ mod tests {
             "connect",
             Some(3),
             Some(1),
+            None,
         );
 
         assert_eq!(

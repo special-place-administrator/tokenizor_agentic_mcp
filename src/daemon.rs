@@ -1184,6 +1184,8 @@ async fn execute_tool_call(
     tool_name: &str,
     params: serde_json::Value,
 ) -> anyhow::Result<String> {
+    runtime.token_stats.record_tool_call(tool_name);
+
     let server = TokenizorServer::new(
         Arc::clone(&runtime.index),
         runtime.project_name,
