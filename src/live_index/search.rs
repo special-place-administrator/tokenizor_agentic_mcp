@@ -1839,7 +1839,7 @@ mod tests {
     #[test]
     fn test_explicit_path_read_around_line_options_are_exact() {
         let options =
-            FileContentOptions::for_explicit_path_read_around_line("src/lib.rs", 3, Some(1));
+            FileContentOptions::for_explicit_path_read_around_line("src/lib.rs", 3, Some(1), false, false);
 
         assert_eq!(
             options.path_scope,
@@ -1847,7 +1847,7 @@ mod tests {
         );
         assert_eq!(
             options.content_context,
-            ContentContext::around_line(3, Some(1))
+            ContentContext::around_line(3, Some(1), false, false)
         );
     }
 
@@ -1857,6 +1857,8 @@ mod tests {
             "src/lib.rs",
             "needle",
             Some(1),
+            false,
+            false,
         );
 
         assert_eq!(
@@ -1865,7 +1867,7 @@ mod tests {
         );
         assert_eq!(
             options.content_context,
-            ContentContext::around_match("needle", Some(1))
+            ContentContext::around_match("needle", Some(1), false, false)
         );
     }
 
@@ -1888,6 +1890,8 @@ mod tests {
             Some(3),
             Some(1),
             None,
+            false,
+            false,
         );
 
         assert_eq!(

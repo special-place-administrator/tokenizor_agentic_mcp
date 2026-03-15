@@ -556,6 +556,10 @@ pub struct ExploreInput {
     /// 3 = adds call chains and type dependency edges for top symbols.
     #[serde(default, deserialize_with = "lenient_u32")]
     pub depth: Option<u32>,
+    /// When true, include results from vendor, generated, and gitignored files.
+    /// By default these are hidden to reduce noise (default false).
+    #[serde(default, deserialize_with = "lenient_bool")]
+    pub include_noise: Option<bool>,
 }
 
 /// Input for `get_co_changes`.
@@ -964,6 +968,16 @@ fn file_content_options_from_input(
             chunk_index,
             max_lines,
         ));
+    }
+
+    // Reject show_line_numbers / header for contextual reads (around_line, around_match).
+    // These flags are only supported for full-file or explicit-range (start_line/end_line) reads.
+    if (input.show_line_numbers.is_some() || input.header.is_some())
+        && (input.around_line.is_some() || input.around_match.is_some())
+    {
+        return Err(
+            "Invalid get_file_content request: `show_line_numbers` and `header` are only supported for full-file reads or explicit-range reads (`start_line`/`end_line`).".to_string(),
+        );
     }
 
     if let Some(raw_around_match) = input.around_match.as_deref() {
@@ -2394,6 +2408,38 @@ impl TokenizorServer {
         let symbol_hits: Vec<(String, String, String)> =
             ranked.into_iter().map(|(k, _)| k).collect();
 
+        // Noise filtering: hide vendor/generated/gitignored files by default.
+        let include_noise = params.0.include_noise.unwrap_or(false);
+        let mut noise_hidden: usize = 0;
+        let (symbol_hits, text_hits) = if !include_noise {
+            let noise_policy = search::NoisePolicy::hide_classified_noise();
+            let filtered_symbols: Vec<(String, String, String)> = symbol_hits
+                .into_iter()
+                .filter(|(_, _, path)| {
+                    let class = search::NoisePolicy::classify_path(path, None);
+                    let hide = noise_policy.should_hide(class);
+                    if hide {
+                        noise_hidden += 1;
+                    }
+                    !hide
+                })
+                .collect();
+            let filtered_text: Vec<(String, String, usize)> = text_hits
+                .into_iter()
+                .filter(|(path, _, _)| {
+                    let class = search::NoisePolicy::classify_path(path, None);
+                    let hide = noise_policy.should_hide(class);
+                    if hide {
+                        noise_hidden += 1;
+                    }
+                    !hide
+                })
+                .collect();
+            (filtered_symbols, filtered_text)
+        } else {
+            (symbol_hits, text_hits)
+        };
+
         // Count files by symbol/text presence
         let mut file_counts: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
@@ -2486,7 +2532,7 @@ impl TokenizorServer {
             }
         }
 
-        format::explore_result_view(
+        let mut output = format::explore_result_view(
             &label,
             &symbol_hits,
             &text_hits,
@@ -2495,7 +2541,15 @@ impl TokenizorServer {
             &symbol_impls,
             &symbol_deps,
             depth,
-        )
+        );
+
+        if noise_hidden > 0 {
+            output.push_str(&format!(
+                "\n\nNote: {noise_hidden} result(s) from vendor/generated files hidden. Use include_noise=true to include."
+            ));
+        }
+
+        output
     }
 
     /// Symbol-level diff between two git refs. Shows +added, -removed, ~modified symbols per changed
@@ -5579,6 +5633,7 @@ mod tests {
                 query: "error handling".to_string(),
                 limit: Some(5),
                 depth: None,
+                include_noise: None,
             }))
             .await;
         assert!(
@@ -5602,6 +5657,7 @@ mod tests {
                 query: "process data".to_string(),
                 limit: Some(5),
                 depth: None,
+                include_noise: None,
             }))
             .await;
         assert!(
@@ -5618,6 +5674,7 @@ mod tests {
                 query: "".to_string(),
                 limit: None,
                 depth: None,
+                include_noise: None,
             }))
             .await;
         assert!(
@@ -5645,6 +5702,7 @@ mod tests {
                 query: "error handling".to_string(),
                 limit: Some(5),
                 depth: Some(2),
+                include_noise: None,
             }))
             .await;
         assert!(
@@ -5676,6 +5734,7 @@ mod tests {
                 query: "burst debounce".to_string(),
                 limit: Some(10),
                 depth: None,
+                include_noise: None,
             }))
             .await;
         assert!(
@@ -5703,6 +5762,7 @@ mod tests {
                 query: "watcher".to_string(),
                 limit: Some(10),
                 depth: None,
+                include_noise: None,
             }))
             .await;
         assert!(
@@ -5730,6 +5790,7 @@ mod tests {
                 query: "error handling in the watcher".to_string(),
                 limit: Some(10),
                 depth: None,
+                include_noise: None,
             }))
             .await;
         assert!(
@@ -5757,11 +5818,112 @@ mod tests {
                 query: "error handling".to_string(),
                 limit: Some(10),
                 depth: None,
+                include_noise: None,
             }))
             .await;
         assert!(
             result.contains("TokenizorError"),
             "exact concept should find error symbols: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_explore_hides_vendor_noise_by_default() {
+        // Vendor file should be filtered out when include_noise is false (default).
+        let vendor_content = b"pub fn vendor_func() {}\n";
+        let vendor_sym = SymbolRecord {
+            name: "vendor_func".to_string(),
+            kind: SymbolKind::Function,
+            depth: 0,
+            sort_order: 0,
+            byte_range: (0, vendor_content.len() as u32),
+            line_range: (0, 0),
+            doc_byte_range: None,
+        };
+        let src_content = b"pub fn process_error() {}\n";
+        let src_sym = SymbolRecord {
+            name: "process_error".to_string(),
+            kind: SymbolKind::Function,
+            depth: 0,
+            sort_order: 0,
+            byte_range: (0, src_content.len() as u32),
+            line_range: (0, 0),
+            doc_byte_range: None,
+        };
+        let (vkey, vfile) = make_file("vendor/somelib/lib.rs", vendor_content, vec![vendor_sym]);
+        let (skey, sfile) = make_file("src/error.rs", src_content, vec![src_sym]);
+        let server = make_server(make_live_index_ready(vec![(vkey, vfile), (skey, sfile)]));
+        let result = server
+            .explore(Parameters(super::ExploreInput {
+                query: "error handling".to_string(),
+                limit: Some(10),
+                depth: None,
+                include_noise: None,
+            }))
+            .await;
+        assert!(
+            !result.contains("vendor_func"),
+            "vendor symbol should be hidden by default: {result}"
+        );
+        assert!(
+            result.contains("process_error"),
+            "src symbol should still appear: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_explore_includes_vendor_when_include_noise_true() {
+        let vendor_content = b"pub struct VendorError {}\n";
+        let vendor_sym = SymbolRecord {
+            name: "VendorError".to_string(),
+            kind: SymbolKind::Struct,
+            depth: 0,
+            sort_order: 0,
+            byte_range: (0, vendor_content.len() as u32),
+            line_range: (0, 0),
+            doc_byte_range: None,
+        };
+        let (vkey, vfile) = make_file("vendor/somelib/lib.rs", vendor_content, vec![vendor_sym]);
+        let server = make_server(make_live_index_ready(vec![(vkey, vfile)]));
+        let result = server
+            .explore(Parameters(super::ExploreInput {
+                query: "error handling".to_string(),
+                limit: Some(10),
+                depth: None,
+                include_noise: Some(true),
+            }))
+            .await;
+        assert!(
+            result.contains("VendorError"),
+            "vendor symbol should appear with include_noise=true: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_explore_noise_hint_shown_when_results_hidden() {
+        let vendor_content = b"pub struct VendorError {}\n";
+        let vendor_sym = SymbolRecord {
+            name: "VendorError".to_string(),
+            kind: SymbolKind::Struct,
+            depth: 0,
+            sort_order: 0,
+            byte_range: (0, vendor_content.len() as u32),
+            line_range: (0, 0),
+            doc_byte_range: None,
+        };
+        let (vkey, vfile) = make_file("vendor/somelib/lib.rs", vendor_content, vec![vendor_sym]);
+        let server = make_server(make_live_index_ready(vec![(vkey, vfile)]));
+        let result = server
+            .explore(Parameters(super::ExploreInput {
+                query: "error handling".to_string(),
+                limit: Some(10),
+                depth: None,
+                include_noise: None,
+            }))
+            .await;
+        assert!(
+            result.contains("vendor/generated files hidden") && result.contains("include_noise=true"),
+            "should show noise hint when results are hidden: {result}"
         );
     }
 

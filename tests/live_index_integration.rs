@@ -778,7 +778,7 @@ fn test_get_file_content_with_around_line() {
 
     let result = format::file_content_from_indexed_file_with_context(
         file.as_ref(),
-        ContentContext::around_line(3, Some(1)),
+        ContentContext::around_line(3, Some(1), false, false),
     );
 
     assert_eq!(result, "2: line two\n3: line three\n4: line four");
@@ -802,7 +802,7 @@ fn test_get_file_content_with_around_match() {
 
     let result = format::file_content_from_indexed_file_with_context(
         file.as_ref(),
-        ContentContext::around_match("todo", Some(1)),
+        ContentContext::around_match("todo", Some(1), false, false),
     );
 
     assert_eq!(result, "1: line one\n2: TODO first\n3: line three");
