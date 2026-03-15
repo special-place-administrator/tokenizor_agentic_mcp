@@ -810,9 +810,10 @@ pub(crate) fn execute_batch_rename(
         ranges.dedup();
     }
 
-    // Build uncertain warning lines sorted by file then line.
+    // Build uncertain warning lines sorted by file then line, deduped.
     let mut sorted_uncertain = qualified_uncertain.clone();
     sorted_uncertain.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    sorted_uncertain.dedup();
     let uncertain_lines: Vec<String> = sorted_uncertain
         .iter()
         .map(|(path, line, ctx)| format!("  {}:{}  {}", path, line, ctx))
@@ -899,7 +900,7 @@ pub(crate) fn execute_batch_rename(
         let mut rollback_failures: Vec<String> = Vec::new();
         for &wi in &written {
             let sf = &staged[wi];
-            if let Err(rb_err) = std::fs::write(&sf.abs_path, &sf.original) {
+            if let Err(rb_err) = atomic_write_file(&sf.abs_path, &sf.original) {
                 rollback_failures.push(format!("  {}: {rb_err}", sf.path));
                 continue;
             }
@@ -1353,15 +1354,10 @@ pub fn find_qualified_usages(identifier: &str, source: &str) -> Vec<QualifiedMat
                     let mut search_start = 0usize;
                     while let Some(pos) = rest[search_start..].find(identifier) {
                         let abs_col = col + search_start + pos;
-                        let preceded_by_colon = abs_col >= 2 && &line[abs_col - 2..abs_col] == "::"
-                            || abs_col >= 2 && line_bytes[abs_col - 1] == b':';
-                        let followed_by_colon = abs_col + id_len + 1 < line_bytes.len()
+                        let preceded = abs_col >= 2 && &line[abs_col - 2..abs_col] == "::";
+                        let followed = abs_col + id_len + 2 <= line.len()
                             && &line[abs_col + id_len..abs_col + id_len + 2] == "::";
-                        let preceded_2 = abs_col >= 2 && &line[abs_col - 2..abs_col] == "::";
-                        let followed_2 = abs_col + id_len + 2 <= line.len()
-                            && &line[abs_col + id_len..abs_col + id_len + 2] == "::";
-                        let _ = (preceded_by_colon, followed_by_colon);
-                        if preceded_2 || followed_2 {
+                        if preceded || followed {
                             let ctx_start = abs_col.saturating_sub(20);
                             let ctx_end = (abs_col + id_len + 20).min(line.len());
                             results.push(QualifiedMatch {
