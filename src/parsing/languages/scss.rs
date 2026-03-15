@@ -61,6 +61,7 @@ fn walk_node(
                     &NO_DOC_SPEC,
                 );
             }
+            walk_children(node, source, depth + 1, sort_order, symbols);
         }
         "function_statement" => {
             if let Some(name) = find_identifier_child(node, source) {
@@ -69,21 +70,28 @@ fn walk_node(
                     &NO_DOC_SPEC,
                 );
             }
+            walk_children(node, source, depth + 1, sort_order, symbols);
         }
         // Skip @include, @use, @forward — call sites / imports, not definitions.
         "include_statement" | "use_statement" | "forward_statement" | "at_rule" => {}
         "media_statement" => {
             let name = at_rule_name(node, source);
-            push_symbol(
-                node, source, name, SymbolKind::Module, depth, sort_order, symbols, &NO_DOC_SPEC,
-            );
+            if !name.is_empty() {
+                push_symbol(
+                    node, source, name, SymbolKind::Module, depth, sort_order, symbols,
+                    &NO_DOC_SPEC,
+                );
+            }
             walk_children(node, source, depth + 1, sort_order, symbols);
         }
         "keyframes_statement" => {
             let name = at_rule_name(node, source);
-            push_symbol(
-                node, source, name, SymbolKind::Module, depth, sort_order, symbols, &NO_DOC_SPEC,
-            );
+            if !name.is_empty() {
+                push_symbol(
+                    node, source, name, SymbolKind::Module, depth, sort_order, symbols,
+                    &NO_DOC_SPEC,
+                );
+            }
             // Do NOT recurse — skip inner keyframe steps.
         }
         _ => {

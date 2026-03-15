@@ -71,21 +71,26 @@ fn walk_node(
         }
         "media_statement" => {
             let name = at_rule_name(node, source);
-            push_symbol(
-                node,
-                source,
-                name,
-                SymbolKind::Module,
-                depth,
-                sort_order,
-                symbols,
-                &NO_DOC_SPEC,
-            );
+            if !name.is_empty() {
+                push_symbol(
+                    node,
+                    source,
+                    name,
+                    SymbolKind::Module,
+                    depth,
+                    sort_order,
+                    symbols,
+                    &NO_DOC_SPEC,
+                );
+            }
             // Recurse to pick up nested rule_sets.
             walk_children(node, source, depth + 1, sort_order, symbols);
         }
         "keyframes_statement" => {
             let name = at_rule_name(node, source);
+            if name.is_empty() {
+                return;
+            }
             push_symbol(
                 node,
                 source,
