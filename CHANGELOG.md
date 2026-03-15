@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.30.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.29.1...v0.30.0) (2026-03-15)
+
+
+### Features
+
+* add AdmissionTier enum and size threshold constants ([48cc242](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/48cc242852a06b463119757408b911b41efcf493))
+* add binary content sniff with NUL, UTF-8, and control-byte heuristics ([e7bd071](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/e7bd0713957a611e0fabd42f3f6c0e68b042782f))
+* add extension denylist for admission control ([6159487](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/6159487c7468fcb037ae2ed6a603eeb9c56c02b9))
+* add SkippedFile struct and store integration for admission tiers ([b94aeeb](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/b94aeeb8758ccce92733fefc74a97858b6ccf978))
+* batch_rename supplemental qualified path scan with confidence classification ([e75f2d4](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/e75f2d40d657ea668660d3160c884feaf396ec96))
+* clean npm cache after install to reclaim disk space ([b1c4a35](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/b1c4a353fc1d1985c31e363d1be22f7f4e17a440))
+* implement admission gate with tiered file classification ([9e69e23](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/9e69e238f50b3364545fa3844cbb5b03ae7ad925))
+* show Tier 2 tags and Tier 3 footer in repo_map ([05d23eb](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/05d23eb7b23c06c607e6adacac00ae7edbb2c7dc))
+* Sprint 14 — trust fixes + tiered admission control ([b7a9296](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/b7a92963b3f9c55be08e73e04eba6bd70901b1bf))
+* wire admission gate into discovery walk ([51c73f7](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/51c73f7b125d13a88179d9e1e2cf535e28839888))
+
+
+### Bug Fixes
+
+* batch_rename atomic rollback on failure, batch_edit/batch_insert best-effort with correct index state ([6b332f3](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/6b332f3f18484a8e14ed35731961eac98311b18f))
+* reindex from disk after writes, not from in-memory buffer ([d605498](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/d6054988db18ad6cf82e3a82cca2c054a1c5f52b))
+
 ## [0.29.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.29.0...v0.29.1) (2026-03-15)
 
 
