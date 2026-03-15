@@ -184,8 +184,10 @@ pub struct GetSymbolsInput {
 /// Input for `search_symbols`.
 #[derive(Deserialize, Serialize, JsonSchema)]
 pub struct SearchSymbolsInput {
-    /// Search query (case-insensitive substring match).
-    pub query: String,
+    /// Search query (case-insensitive substring match). Optional when `kind` or `path_prefix` is
+    /// provided — omitting `query` enables browse mode.
+    #[serde(default)]
+    pub query: Option<String>,
     /// Optional kind filter using display names such as `fn`, `class`, or `interface`.
     pub kind: Option<String>,
     /// Optional relative path prefix scope, for example `src/` or `src/protocol`.
@@ -756,10 +758,18 @@ fn normalize_search_text_glob(input: Option<&str>) -> Option<String> {
 fn search_symbols_options_from_input(
     input: &SearchSymbolsInput,
 ) -> Result<search::SymbolSearchOptions, String> {
+    let is_browse = input
+        .query
+        .as_ref()
+        .map(|q| q.trim().is_empty())
+        .unwrap_or(true);
+    let default_limit = if is_browse { 20u32 } else { 50u32 };
     Ok(search::SymbolSearchOptions {
         path_scope: normalize_path_prefix(input.path_prefix.as_deref()),
         search_scope: search::SearchScope::Code,
-        result_limit: search::ResultLimit::new(input.limit.unwrap_or(50).min(100) as usize),
+        result_limit: search::ResultLimit::new(
+            input.limit.unwrap_or(default_limit).min(100) as usize
+        ),
         noise_policy: search::NoisePolicy {
             include_generated: input.include_generated.unwrap_or(false),
             include_tests: input.include_tests.unwrap_or(false),
@@ -1558,14 +1568,18 @@ impl TokenizorServer {
 
     /// Find symbols by name substring across the project — returns name, kind, file, line range.
     /// Use when you know part of a symbol name but not the file. Supports kind filter, language filter,
-    /// and path prefix scope.
+    /// and path prefix scope. Query is optional: omit it to browse by kind or path_prefix (at least
+    /// one of query, kind, or path_prefix is required).
     /// NOT for text content search (use search_text). NOT for file path search (use search_files).
     #[tool(
-        description = "Find symbols by name substring across the project — returns name, kind, file, line range. Use when you know part of a symbol name but not the file. Supports kind filter, language filter, and path prefix scope. NOT for text content search (use search_text). NOT for file path search (use search_files)."
+        description = "Find symbols by name substring across the project — returns name, kind, file, line range. Use when you know part of a symbol name but not the file. Supports kind filter, language filter, and path prefix scope. Query is optional — omit it to browse all symbols matching kind/path_prefix (browse mode defaults to limit=20, sorted by path+line). At least one of query, kind, or path_prefix is required. NOT for text content search (use search_text). NOT for file path search (use search_files)."
     )]
     pub(crate) async fn search_symbols(&self, params: Parameters<SearchSymbolsInput>) -> String {
-        if params.0.query.trim().is_empty() {
-            return "search_symbols requires a non-empty query. Provide a symbol name or substring to search for.".to_string();
+        let query_str = params.0.query.as_deref().unwrap_or("").trim();
+        let is_browse = query_str.is_empty();
+        if is_browse && params.0.kind.is_none() && params.0.path_prefix.is_none() {
+            return "search_symbols requires at least one of: query, kind, or path_prefix"
+                .to_string();
         }
         if let Some(result) = self.proxy_tool_call("search_symbols", &params.0).await {
             return result;
@@ -1574,17 +1588,23 @@ impl TokenizorServer {
             Ok(options) => options,
             Err(message) => return message,
         };
-        let result = {
+        let mut result = {
             let guard = self.index.read().expect("lock poisoned");
             loading_guard!(guard);
             search::search_symbols_with_options(
                 &guard,
-                &params.0.query,
+                query_str,
                 params.0.kind.as_deref(),
                 &options,
             )
         };
-        format::search_symbols_result_view(&result, &params.0.query)
+        // In browse mode, sort by file path then line number for deterministic output
+        if is_browse {
+            result
+                .hits
+                .sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
+        }
+        format::search_symbols_result_view(&result, query_str)
     }
 
     /// Full-text search across file contents — literal, OR-terms, or regex. Shows matches with
@@ -3905,7 +3925,7 @@ mod tests {
         let server = make_server(make_live_index_ready(vec![(key, file)]));
         let result = server
             .search_symbols(Parameters(super::SearchSymbolsInput {
-                query: "find".to_string(),
+                query: Some("find".to_string()),
                 kind: None,
                 path_prefix: None,
                 language: None,
@@ -3932,7 +3952,7 @@ mod tests {
         let server = make_server(make_live_index_ready(vec![(key, file)]));
         let result = server
             .search_symbols(Parameters(super::SearchSymbolsInput {
-                query: "job".to_string(),
+                query: Some("job".to_string()),
                 kind: Some("class".to_string()),
                 path_prefix: None,
                 language: None,
@@ -3973,7 +3993,7 @@ mod tests {
 
         let result = server
             .search_symbols(Parameters(super::SearchSymbolsInput {
-                query: "job".to_string(),
+                query: Some("job".to_string()),
                 kind: Some("class".to_string()),
                 path_prefix: None,
                 language: None,
@@ -4019,7 +4039,7 @@ mod tests {
 
         let result = server
             .search_symbols(Parameters(super::SearchSymbolsInput {
-                query: "job".to_string(),
+                query: Some("job".to_string()),
                 kind: Some("class".to_string()),
                 path_prefix: None,
                 language: None,
@@ -4065,7 +4085,7 @@ mod tests {
 
         let result = server
             .search_symbols(Parameters(super::SearchSymbolsInput {
-                query: "job".to_string(),
+                query: Some("job".to_string()),
                 kind: Some("class".to_string()),
                 path_prefix: None,
                 language: None,
@@ -4112,7 +4132,7 @@ mod tests {
 
         let result = server
             .search_symbols(Parameters(super::SearchSymbolsInput {
-                query: "job".to_string(),
+                query: Some("job".to_string()),
                 kind: Some("class".to_string()),
                 path_prefix: Some("src/ui".to_string()),
                 language: Some("TypeScript".to_string()),
@@ -4141,6 +4161,111 @@ mod tests {
         assert!(
             !result.contains("fn JobRunner"),
             "kind filter should exclude function: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_symbols_browse_by_kind_without_query() {
+        let sym_fn = make_symbol("do_work", SymbolKind::Function, 1, 5);
+        let sym_struct = make_symbol("Worker", SymbolKind::Class, 6, 10);
+        let (key, file) = make_file(
+            "src/protocol/worker.rs",
+            b"fn do_work() {}\nstruct Worker {}",
+            vec![sym_fn, sym_struct],
+        );
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server
+            .search_symbols(Parameters(super::SearchSymbolsInput {
+                query: None,
+                kind: Some("fn".to_string()),
+                path_prefix: Some("src/protocol/".to_string()),
+                language: None,
+                limit: None,
+                include_generated: None,
+                include_tests: None,
+            }))
+            .await;
+        assert!(
+            result.contains("do_work"),
+            "browse mode should return fn symbols, got: {result}"
+        );
+        assert!(
+            !result.contains("Worker"),
+            "browse mode kind filter should exclude structs, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_symbols_rejects_fully_unbounded() {
+        let sym = make_symbol("anything", SymbolKind::Function, 1, 5);
+        let (key, file) = make_file("src/lib.rs", b"fn anything() {}", vec![sym]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server
+            .search_symbols(Parameters(super::SearchSymbolsInput {
+                query: None,
+                kind: None,
+                path_prefix: None,
+                language: None,
+                limit: None,
+                include_generated: None,
+                include_tests: None,
+            }))
+            .await;
+        assert!(
+            result.contains("requires at least one of"),
+            "fully unbounded browse should be rejected, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_symbols_browse_default_limit_20() {
+        // Create 25 distinct symbols — browse mode should return only 20
+        let syms: Vec<_> = (1..=25)
+            .map(|i| make_symbol(&format!("sym_{i:02}"), SymbolKind::Function, i, i))
+            .collect();
+        let content = b"fn placeholder() {}";
+        let (key, file) = make_file("src/lib.rs", content, syms);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server
+            .search_symbols(Parameters(super::SearchSymbolsInput {
+                query: None,
+                kind: Some("fn".to_string()),
+                path_prefix: None,
+                language: None,
+                limit: None,
+                include_generated: None,
+                include_tests: None,
+            }))
+            .await;
+        assert!(
+            result.contains("20 matches in"),
+            "browse mode default limit should be 20, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_symbols_query_mode_still_defaults_to_50() {
+        // Create 55 distinct symbols — query mode should return 50
+        let syms: Vec<_> = (1..=55)
+            .map(|i| make_symbol(&format!("item_{i:02}"), SymbolKind::Function, i, i))
+            .collect();
+        let content = b"fn placeholder() {}";
+        let (key, file) = make_file("src/lib.rs", content, syms);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server
+            .search_symbols(Parameters(super::SearchSymbolsInput {
+                query: Some("item".to_string()),
+                kind: None,
+                path_prefix: None,
+                language: None,
+                limit: None,
+                include_generated: None,
+                include_tests: None,
+            }))
+            .await;
+        assert!(
+            result.contains("50 matches in"),
+            "query mode default limit should remain 50, got: {result}"
         );
     }
 
@@ -6066,10 +6191,11 @@ mod tests {
         let (key, file) = make_file("src/lib.rs", b"struct Foo {}", vec![sym]);
         let server = make_server(make_live_index_ready(vec![(key, file)]));
 
+        // Empty/whitespace query with no kind or path_prefix is fully unbounded — must be rejected
         for query in ["", "   ", "\t"] {
             let result = server
                 .search_symbols(Parameters(super::SearchSymbolsInput {
-                    query: query.to_string(),
+                    query: Some(query.to_string()),
                     kind: None,
                     path_prefix: None,
                     language: None,
@@ -6079,8 +6205,8 @@ mod tests {
                 }))
                 .await;
             assert!(
-                result.contains("non-empty query"),
-                "empty query '{query}' should be rejected, got: {result}"
+                result.contains("requires at least one of"),
+                "empty query '{query}' with no kind/path_prefix should be rejected, got: {result}"
             );
         }
     }
