@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.27.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.26.0...v0.27.0) (2026-03-15)
+
+
+### Features
+
+* add frontend asset parsing (HTML, CSS, SCSS) ([a91b625](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/a91b625739c997da8b0a1e5f8cf41b46979aeb65))
+* add Html, Css, Scss to LanguageId with extension mapping ([283c592](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/283c59214990c6f316247830c271d868be86a701))
+* add tree-sitter-html, tree-sitter-css, tree-sitter-scss dependencies ([3be5ee3](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/3be5ee3dd9544cd9ff03e8d5a3dfe579764547bb))
+* add unified edit_capability_for_language, rename check_edit_capability ([1742a17](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/1742a1744842f376c611a7ab8b5cd24e7d214803))
+* implement CSS symbol extractor with tests ([39719f4](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/39719f4962657e824f9a82b9c8040be48af71cfd))
+* implement HTML/Angular symbol extractor with tests ([4627b52](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/4627b520009e2c8395f39593644499cae428fe75))
+* implement SCSS symbol extractor with tests ([2112b1a](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/2112b1a7776db40d5d63ccd12da753fba085aaa9))
+* wire HTML, CSS, SCSS extractors into parsing pipeline ([e740f94](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/e740f947007acee5db43a321bb38152e1fed63cf))
+
+
+### Bug Fixes
+
+* recurse into mixin/function bodies, guard empty at-rule names ([8a8e717](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/8a8e7178c079078581ac8c6e339128814e16478a))
+
 ## [0.26.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.25.0...v0.26.0) (2026-03-14)
 
 
