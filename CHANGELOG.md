@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.28.2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.28.1...v0.28.2) (2026-03-15)
+
+
+### Bug Fixes
+
+* code review feedback — tests and safety fixes ([c2454ea](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/c2454ea2bbd1ec0c2f2acb357bd9f158fd101584))
+* review feedback — Q3 robust name extraction, Q6 UTF-8 safe truncation ([41e17d2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/41e17d23a4b4ce9e89d9fdfbceb5ba089a9880a0))
+
 ## [0.28.1](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.28.0...v0.28.1) (2026-03-15)
 
 
