@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.29.0](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.28.2...v0.29.0) (2026-03-15)
+
+
+### Features
+
+* analyze_file_impact shows clear status taxonomy (U4) ([263834f](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/263834f3d8dd2a4c22911eed69a506edb7c13bd6))
+* batch_edit dry_run mode (U5) ([4166196](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/41661963168aced0d37c7931628c3dcf49f6b550))
+* explore filters noise by default (U1) ([f14b702](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/f14b702b0a68ba6c88b5c96327cbdf5d701e5d72))
+* get_file_content mode enum for clearer API (U10) ([244be75](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/244be753b08275b80f3bd1d8a11214a74f642f03))
+* health shows partial parse file paths (U8) ([8560114](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/856011485f82605d41e93651748bf64db1486c91))
+* per-tool call counters in health output (U9) ([d41bfb5](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/d41bfb5730d07b2b0271ee1947eec0306f07375c))
+* richer verbosity=signature includes visibility and return type (U6) ([eef2926](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/eef2926f057e3020200bb13cc1dd47b9ee9bf76e))
+* search_symbols browse mode without query (U2) ([3326342](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/33263428425acd01a9cfba460d96d0b5534257b5))
+
+
+### Bug Fixes
+
+* add missing gitignore/noise_class field initializers across codebase ([c8088f9](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/c8088f9f0953b004e015c2a707db89dae3597ced))
+* add missing sibling_limit/overflow fields to initializers ([b25f4a5](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/b25f4a5a34a007ad9a56757cd1a62ce7c9f92157))
+* around_symbol returns full indexed symbol span (B2) ([3b06c2a](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/3b06c2a735ad3edd0ac691851a944d66797b06f9))
+* batch_edit shows ROLLED BACK message on failure (B4) ([3ab8358](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/3ab83587c7bbee77bd1f1cfe1b1980066630da8f))
+* batch_insert no extra blank line before function (B1) ([3409548](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/34095482b8275811cb5373003e367c0b07dcfec0))
+* show_line_numbers works with around_symbol and around_match (B3) ([4befe8a](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/4befe8a8f8e734e722088632c23ac81489bf42ce))
+
 ## [0.28.2](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.28.1...v0.28.2) (2026-03-15)
 
 
