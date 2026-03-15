@@ -4757,6 +4757,17 @@ public class PacketsController {
             resolve_module_path("crates/aap-core/src/domain/mod.rs", &LanguageId::Rust),
             Some("crate::domain".to_string())
         );
+        // Boundary: no false positives on non-src paths
+        assert_eq!(
+            resolve_module_path("benches/foo.rs", &LanguageId::Rust),
+            None,
+            "benches/ should not resolve"
+        );
+        assert_eq!(
+            resolve_module_path("my-src/lib.rs", &LanguageId::Rust),
+            None,
+            "my-src/ should not match /src/ component"
+        );
     }
 
     #[test]
