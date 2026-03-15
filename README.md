@@ -20,7 +20,7 @@ AI coding agents spend most of their token budget on orientation — reading fil
 
 ## How It Works
 
-Tokenizor maintains a live index of every file in your project. On startup, it parses all source files using tree-sitter grammars (16 languages), extracts symbols (functions, classes, structs, enums, traits, etc.), their byte ranges, and cross-references between them. This index stays current via a file watcher that re-indexes changed files with debouncing.
+Tokenizor maintains a live index of every file in your project. On startup, it parses all source files using tree-sitter grammars (19 source languages), config files using native Rust parsers (5 formats), and extracts symbols (functions, classes, structs, selectors, variables, keys, etc.), their byte ranges, and cross-references between them. This index stays current via a file watcher that re-indexes changed files with debouncing.
 
 **Why this is efficient for LLMs:**
 
@@ -45,13 +45,13 @@ The server does the graph traversal, the agent gets a focused answer. The index 
 
 **Key architectural decisions:**
 - **Symbol-addressed operations** — tools accept symbol names, not file content. The server resolves names to byte ranges via the index, eliminating the need for agents to track positions.
-- **Tree-sitter parsing** — deterministic, incremental parsing across 16 languages. Each symbol gets a byte range, line range, and (since v0.21.0) an attached doc comment range.
+- **Tree-sitter parsing** — deterministic, incremental parsing across 19 source languages plus native parsers for 5 config formats. Each symbol gets a byte range, line range, and an attached doc comment range.
 - **Persistent snapshots** — the index serializes to `.tokenizor/index.bin` for fast restarts (~88ms for a 326-file project).
 - **Daemon mode** — multiple terminal sessions share one index via a local loopback daemon. No redundant re-indexing.
 
 ## Token Savings — Measured
 
-Every applicable tool response includes a footer showing estimated tokens saved compared to reading the raw file. These are real measurements from Tokenizor's own codebase (326 files, 6805 symbols):
+Every applicable tool response includes a footer showing estimated tokens saved compared to reading the raw file. These are real measurements from Tokenizor's own codebase (~142 files, ~6600 symbols):
 
 | Operation | Raw file approach | Tokenizor | Savings |
 |-----------|------------------|-----------|---------|
@@ -66,7 +66,9 @@ Savings scale with file size. On large files (5000+ lines), `get_file_context` r
 
 Token savings are tracked per-session and reported by the `health` tool. Skeptical? Run a session with Tokenizor, check `health` for cumulative savings, then try the same tasks with raw file reads and compare. The numbers speak for themselves on any codebase.
 
-## Tools (24)
+## Tools
+
+17 unique tools + 7 backward-compatible aliases, organized by workflow stage. Edit tools accept symbol names — no need to read files first.
 
 ### Orientation
 
@@ -123,7 +125,7 @@ Token savings are tracked per-session and reported by the `health` tool. Skeptic
 | Tool | Purpose |
 |------|---------|
 | `batch_edit` | Apply multiple symbol-addressed edits atomically across files. All symbols validated before any writes. Overlap detection includes doc comment ranges |
-| `batch_rename` | Rename a symbol and update all references project-wide via the reverse index |
+| `batch_rename` | Rename a symbol and update all references project-wide — uses indexed references plus supplemental literal scan to catch path-qualified usages like `Type::new()` |
 | `batch_insert` | Insert the same code before/after multiple symbols across files |
 
 ### Indexing
@@ -173,9 +175,35 @@ Resource templates:
 
 ## Supported Languages
 
-Tree-sitter extractors for 16 languages: Rust, Python, JavaScript, TypeScript, Go, Java, C, C++, C#, Ruby, PHP, Swift, Kotlin, Dart, Perl, Elixir.
+### Source Languages (19)
+
+Tree-sitter extractors for 19 languages:
+
+| Tier | Languages |
+|------|-----------|
+| Quality Focus | Rust, Python, JavaScript, TypeScript, Go |
+| Broader | Java, C, C++, C#, Ruby, PHP, Swift, Kotlin, Dart, Perl, Elixir |
+| Frontend Assets | HTML, CSS, SCSS |
 
 Doc comment detection per language — `///`, `/** */`, `#`, `@doc` patterns are recognized and attached to their symbols during parsing.
+
+**HTML/Angular templates** are parsed with `tree-sitter-html`. Angular-specific constructs (`@if`, `@for`, `@switch`, `@defer`, `@let`, template refs `#name`) are extracted via supplemental text scanning. AST-backed extraction covers elements, custom elements (tag contains `-`), and `<ng-template>`.
+
+**CSS** extracts selectors, custom properties (`--var`), `@media`, and `@keyframes`. **SCSS** extends CSS with `$variable`, `@mixin`, and `@function` extraction; skips `@include`/`@use`/`@forward`.
+
+### Config Formats (5)
+
+Native Rust parsers for config files:
+
+| Format | Extensions | Symbols extracted |
+|--------|-----------|-------------------|
+| JSON | `.json` | Nested key paths (dot notation) |
+| TOML | `.toml` | Table headers, key paths, array-of-tables |
+| YAML | `.yaml`, `.yml` | Nested key paths |
+| Markdown | `.md` | Section headers (dot-joined hierarchy) |
+| Env | `.env` | Variable names |
+
+Config files have capability-gated editing: JSON, TOML, and YAML support structural edits (`replace_symbol_body`); Markdown and Env support scoped text edits only (`edit_within_symbol`). HTML, CSS, and SCSS are gated at text-edit-safe — `edit_within_symbol` works, but `replace_symbol_body` is blocked until grammar accuracy is validated on real projects.
 
 ## Installation
 
