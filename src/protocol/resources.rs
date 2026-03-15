@@ -213,6 +213,7 @@ impl TokenizorServer {
                     verbosity: None,
                     bundle: None,
                     sections: None,
+                    max_tokens: None,
                 }))
                 .await
             }

@@ -482,6 +482,11 @@ pub struct GetSymbolContextInput {
     /// Omit for default symbol-context mode. Pass empty array for all trace sections.
     #[serde(default)]
     pub sections: Option<Vec<String>>,
+    /// Optional max token budget for bundle mode. When set, truncates type dependency
+    /// resolution to stay within budget. Dependencies are resolved in order; excess
+    /// dependencies are listed as names only without full definitions.
+    #[serde(default, deserialize_with = "lenient_u64")]
+    pub max_tokens: Option<u64>,
 }
 
 /// Input for `analyze_file_impact`.
@@ -572,6 +577,10 @@ pub struct DiffSymbolsInput {
     /// Only files with a recognized programming language extension are included.
     #[serde(default, deserialize_with = "lenient_bool")]
     pub code_only: Option<bool>,
+    /// When true, show only per-file summary counts (+N added, -N removed, ~N modified)
+    /// without listing individual symbols. Like `git diff --stat` vs `git diff`.
+    #[serde(default, deserialize_with = "lenient_bool")]
+    pub compact: Option<bool>,
 }
 
 enum WhatChangedMode {
@@ -1345,7 +1354,21 @@ impl TokenizorServer {
                 (v, raw)
             };
             let verbosity = params.0.verbosity.as_deref().unwrap_or("full");
-            let result = format::context_bundle_result_view(&view, verbosity);
+            let mut result = format::context_bundle_result_view(&view, verbosity);
+            // Apply max_tokens truncation if requested
+            if let Some(max_tokens) = params.0.max_tokens {
+                let max_chars = (max_tokens as usize) * 4; // ~4 chars per token
+                if result.len() > max_chars {
+                    result.truncate(max_chars);
+                    // Find last complete line
+                    if let Some(last_nl) = result.rfind('\n') {
+                        result.truncate(last_nl + 1);
+                    }
+                    result.push_str(&format!(
+                        "\n... truncated at ~{max_tokens} tokens. Use without max_tokens for full output.\n"
+                    ));
+                }
+            }
             let saved = raw_chars.saturating_sub(result.len());
             let footer = format::compact_savings_footer(result.len(), raw_chars);
             self.record_read_savings((saved / 4) as u64);
@@ -1771,6 +1794,7 @@ impl TokenizorServer {
                         .to_string();
                 }
             }
+            let commit_count = temporal.stats.total_commits_analyzed;
             if let Some(history) = temporal.files.get(target_path.as_str()) {
                 let hits: Vec<SearchFilesHit> = history
                     .co_changes
@@ -1782,6 +1806,11 @@ impl TokenizorServer {
                         shared_commits: Some(entry.shared_commits),
                     })
                     .collect();
+                if hits.is_empty() && commit_count < 50 {
+                    return format!(
+                        "No co-change data for '{target_path}'. Git history has only {commit_count} commit(s) — temporal coupling analysis works best with 50+ commits."
+                    );
+                }
                 let total = hits.len();
                 return format::search_files_result_view(&SearchFilesView::Found {
                     query: format!("co-changes with {target_path}"),
@@ -1789,6 +1818,11 @@ impl TokenizorServer {
                     overflow_count: 0,
                     hits,
                 });
+            }
+            if commit_count < 50 {
+                return format!(
+                    "No git history found for '{target_path}'. Git history has only {commit_count} commit(s) — temporal coupling analysis works best with 50+ commits."
+                );
             }
             return format!(
                 "No git history found for '{target_path}'. Check the file path is correct."
@@ -2294,10 +2328,42 @@ impl TokenizorServer {
             }
         }
 
-        // Phase 3: Filter noise, sort by match count descending, truncate to limit
-        // Exclude explore.rs itself (CONCEPT_MAP contains concept keywords in its body)
+        // Phase 3: Filter noise, weight by kind and path, sort, truncate to limit.
+        // Exclude explore.rs itself (CONCEPT_MAP contains concept keywords in its body).
         match_counts.retain(|(_, _, path), _| !path.ends_with("protocol/explore.rs"));
-        let mut ranked: Vec<_> = match_counts.into_iter().collect();
+
+        // Score each symbol: match_count * kind_weight, penalized for doc/generated files.
+        let scored: Vec<((String, String, String), u64)> = match_counts
+            .into_iter()
+            .map(|((name, kind, path), count)| {
+                // Kind weight: definition-like symbols rank higher than incidental matches.
+                let kind_weight: u64 = match kind.as_str() {
+                    "fn" | "method" => 4,
+                    "struct" | "class" | "trait" | "interface" | "enum" => 4,
+                    "impl" | "mod" | "module" => 3,
+                    "const" | "type" => 2,
+                    "variable" | "let" => 1,
+                    "key" | "section" => 1,
+                    _ => 2, // "other" (selectors, etc.)
+                };
+                // Path penalty: doc, changelog, generated, planning files rank lower.
+                let path_lower = path.to_ascii_lowercase();
+                let path_penalty: u64 = if path_lower.contains("changelog")
+                    || path_lower.contains(".auto-claude")
+                    || path_lower.contains(".planning/")
+                    || path_lower.ends_with(".md")
+                    || path_lower.contains("/docs/")
+                {
+                    1 // heavy penalty: score / 4 effectively
+                } else {
+                    4 // no penalty
+                };
+                let score = (count as u64) * kind_weight * path_penalty;
+                ((name, kind, path), score)
+            })
+            .collect();
+
+        let mut ranked = scored;
         ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.0.cmp(&b.0.0)));
         ranked.truncate(limit);
         let symbol_hits: Vec<(String, String, String)> =
@@ -2484,7 +2550,13 @@ impl TokenizorServer {
             return format!("No file changes found between {base} and {target}.");
         }
 
-        format::diff_symbols_result_view(base, target, &changed_files, &repo)
+        format::diff_symbols_result_view(
+            base,
+            target,
+            &changed_files,
+            &repo,
+            params.0.compact.unwrap_or(false),
+        )
     }
 
     // ─── Edit tools (Tier 1) ─────────────────────────────────────────────────
@@ -3535,6 +3607,7 @@ mod tests {
                 verbosity: None,
                 bundle: None,
                 sections: None,
+                max_tokens: None,
             }))
             .await;
 
@@ -3588,6 +3661,7 @@ mod tests {
                 verbosity: None,
                 bundle: None,
                 sections: None,
+                max_tokens: None,
             }))
             .await;
 
@@ -3623,6 +3697,7 @@ mod tests {
                 verbosity: None,
                 bundle: None,
                 sections: None,
+                max_tokens: None,
             }))
             .await;
 
@@ -3683,6 +3758,7 @@ mod tests {
                 verbosity: None,
                 bundle: None,
                 sections: None,
+                max_tokens: None,
             }))
             .await;
 
@@ -5586,6 +5662,7 @@ mod tests {
                 verbosity: None,
                 bundle: None,
                 sections: Some(vec!["dependents".to_string()]),
+                max_tokens: None,
             }))
             .await;
 
@@ -5614,6 +5691,7 @@ mod tests {
                 verbosity: None,
                 bundle: None,
                 sections: Some(vec![]),
+                max_tokens: None,
             }))
             .await;
 
@@ -5732,6 +5810,7 @@ mod tests {
                 verbosity: None,
                 bundle: Some(true),
                 sections: None,
+                max_tokens: None,
             }))
             .await;
         assert_eq!(result, crate::protocol::format::empty_guard_message());
@@ -5750,6 +5829,7 @@ mod tests {
                 verbosity: None,
                 bundle: Some(true),
                 sections: None,
+                max_tokens: None,
             }))
             .await;
         assert!(result.contains("File not found"), "got: {result}");
@@ -5798,6 +5878,7 @@ mod tests {
                 verbosity: None,
                 bundle: Some(true),
                 sections: None,
+                max_tokens: None,
             }))
             .await;
 
@@ -5833,6 +5914,7 @@ mod tests {
                 verbosity: None,
                 bundle: Some(true),
                 sections: None,
+                max_tokens: None,
             }))
             .await;
 
