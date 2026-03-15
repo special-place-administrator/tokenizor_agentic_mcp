@@ -106,6 +106,7 @@ Before any code, define semantics for the three areas with API ambiguity risk.
 2. Classify files matching gitignore as `noise_class: Vendor | Generated | Ignored`
 3. Existing `NoisePolicy::hide_classified_noise()` gains gitignore awareness
 4. Do NOT remove gitignored files from the index — only tag them
+5. **Freshness rule:** `.gitignore` patterns are loaded at full reindex only. Mid-session changes to `.gitignore` do not trigger recomputation — users must re-index (or restart daemon) to pick up new ignore rules. This keeps the hot path simple.
 
 **Tests:**
 - Gitignored vendor dir filtered by default in explore
@@ -178,7 +179,10 @@ Before any code, define semantics for the three areas with API ambiguity risk.
 **File:** `src/protocol/tools.rs` (`analyze_file_impact` handler)
 
 **Fix:** When file hasn't changed, replace `"already matches"` with:
-- Status: `"indexed and unchanged"` / `"changed on disk since last index"` / `"content matches indexed version"`
+- Status (mutually exclusive):
+  - `"indexed and unchanged"` — file on disk matches indexed content
+  - `"changed on disk since last index"` — file differs, triggers re-index
+  - `"not found on disk"` — file was indexed but has been deleted
 - Last-indexed timestamp
 - Symbol count in file
 - Suggestion: `"Use what_changed to see recent modifications"`
@@ -205,6 +209,7 @@ Before any code, define semantics for the three areas with API ambiguity risk.
 - Dry-run on invalid edit produces same error as real edit
 - Index unchanged after dry-run
 - Dry-run output matches real edit output format (same fields, same structure)
+- Dry-run preview capped at 20 lines per edit. Larger diffs show first 20 lines + `"... truncated (N lines total)"`. Same cap applies to rollback output when many files are involved.
 
 ### U6: Richer `verbosity=signature`
 
@@ -228,6 +233,7 @@ Before any code, define semantics for the three areas with API ambiguity risk.
 - Count always shown
 - First 10 file paths listed
 - If >10: `"... and N more partial files"` (no `--verbose` flag — full list available via `search_symbols(kind=..., path_prefix=...)` or external tooling)
+- Listed paths are repo-relative, unique, and sorted alphabetically before taking the first 10 (deterministic across runs)
 
 **Tests:**
 - Health with 3 partial files lists all 3
