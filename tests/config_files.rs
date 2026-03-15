@@ -56,7 +56,11 @@ fn test_all_config_types_discovered_and_indexed() {
     // `from_extension` matches the extension "env", not the filename ".env".
     // Use `app.env` (which has extension "env") to exercise the Env code path
     // through the full LiveIndex pipeline.
-    write_file(dir.path(), "app.env", "DATABASE_URL=postgres://localhost/db\n");
+    write_file(
+        dir.path(),
+        "app.env",
+        "DATABASE_URL=postgres://localhost/db\n",
+    );
 
     let shared = LiveIndex::load(dir.path()).unwrap();
     let index = shared.read().unwrap();
@@ -66,13 +70,32 @@ fn test_all_config_types_discovered_and_indexed() {
         IndexState::Ready,
         "LiveIndex should be Ready after loading config files"
     );
-    assert_eq!(index.file_count(), 5, "should have all 5 config files indexed");
+    assert_eq!(
+        index.file_count(),
+        5,
+        "should have all 5 config files indexed"
+    );
 
-    assert!(index.get_file("config.json").is_some(), "config.json should be indexed");
-    assert!(index.get_file("config.toml").is_some(), "config.toml should be indexed");
-    assert!(index.get_file("config.yaml").is_some(), "config.yaml should be indexed");
-    assert!(index.get_file("README.md").is_some(), "README.md should be indexed");
-    assert!(index.get_file("app.env").is_some(), "app.env should be indexed");
+    assert!(
+        index.get_file("config.json").is_some(),
+        "config.json should be indexed"
+    );
+    assert!(
+        index.get_file("config.toml").is_some(),
+        "config.toml should be indexed"
+    );
+    assert!(
+        index.get_file("config.yaml").is_some(),
+        "config.yaml should be indexed"
+    );
+    assert!(
+        index.get_file("README.md").is_some(),
+        "README.md should be indexed"
+    );
+    assert!(
+        index.get_file("app.env").is_some(),
+        "app.env should be indexed"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -101,7 +124,10 @@ fn test_json_key_paths_extracted() {
     assert!(has_symbol(syms, "scripts.test"), "missing 'scripts.test'");
     assert!(has_symbol(syms, "scripts.build"), "missing 'scripts.build'");
     assert!(has_symbol(syms, "dependencies"), "missing 'dependencies'");
-    assert!(has_symbol(syms, "dependencies.express"), "missing 'dependencies.express'");
+    assert!(
+        has_symbol(syms, "dependencies.express"),
+        "missing 'dependencies.express'"
+    );
 
     // All config keys must have SymbolKind::Key
     for sym in syms {
@@ -120,7 +146,8 @@ fn test_json_key_paths_extracted() {
 
 #[test]
 fn test_toml_key_paths_extracted() {
-    let content = b"[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1.0\"\n";
+    let content =
+        b"[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1.0\"\n";
 
     let result = process_file("Cargo.toml", content, LanguageId::Toml);
     assert_eq!(result.outcome, FileOutcome::Processed);
@@ -129,7 +156,10 @@ fn test_toml_key_paths_extracted() {
     assert!(has_symbol(syms, "package"), "missing 'package'");
     assert!(has_symbol(syms, "package.name"), "missing 'package.name'");
     assert!(has_symbol(syms, "dependencies"), "missing 'dependencies'");
-    assert!(has_symbol(syms, "dependencies.serde"), "missing 'dependencies.serde'");
+    assert!(
+        has_symbol(syms, "dependencies.serde"),
+        "missing 'dependencies.serde'"
+    );
 
     for sym in syms {
         assert_eq!(
@@ -154,7 +184,10 @@ fn test_markdown_sections_extracted() {
 
     let syms = &result.symbols;
     assert!(has_symbol(syms, "Title"), "missing 'Title'");
-    assert!(has_symbol(syms, "Title.Getting Started"), "missing 'Title.Getting Started'");
+    assert!(
+        has_symbol(syms, "Title.Getting Started"),
+        "missing 'Title.Getting Started'"
+    );
     assert!(
         has_symbol(syms, "Title.Getting Started.Prerequisites"),
         "missing 'Title.Getting Started.Prerequisites'"
@@ -231,8 +264,7 @@ fn test_yaml_nested_keys_extracted() {
 #[test]
 fn test_markdown_duplicate_headers_disambiguated() {
     // Two sibling ## Installation headers — the second should get #2 suffix.
-    let content =
-        b"# Guide\n\n## Installation\n\nFirst way.\n\n## Installation\n\nSecond way.\n";
+    let content = b"# Guide\n\n## Installation\n\nFirst way.\n\n## Installation\n\nSecond way.\n";
 
     let result = process_file("guide.md", content, LanguageId::Markdown);
     assert_eq!(result.outcome, FileOutcome::Processed);

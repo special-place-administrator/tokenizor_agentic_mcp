@@ -1,9 +1,11 @@
 mod c;
 mod cpp;
 mod csharp;
+mod css;
 mod dart;
 mod elixir;
 mod go;
+mod html;
 mod java;
 mod javascript;
 mod kotlin;
@@ -12,6 +14,7 @@ mod php;
 mod python;
 mod ruby;
 mod rust;
+mod scss;
 mod swift;
 mod typescript;
 
@@ -133,6 +136,9 @@ pub fn extract_symbols(node: &Node, source: &str, language: &LanguageId) -> Vec<
         | LanguageId::Yaml
         | LanguageId::Markdown
         | LanguageId::Env => unreachable!("config types are handled before parse_source"),
+        LanguageId::Html => html::extract_symbols(node, source),
+        LanguageId::Css => css::extract_symbols(node, source),
+        LanguageId::Scss => scss::extract_symbols(node, source),
     }
 }
 
@@ -233,6 +239,16 @@ pub(super) fn find_first_named_child(
         }
     }
     None
+}
+
+/// Extract the at-rule name: text from the node start up to (but not
+/// including) the opening `{`, trimmed. Shared by CSS and SCSS extractors.
+pub(super) fn at_rule_name(node: &Node, source: &str) -> String {
+    let text = node.utf8_text(source.as_bytes()).unwrap_or("");
+    match text.find('{') {
+        Some(pos) => text[..pos].trim().to_string(),
+        None => text.trim().to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -512,5 +528,36 @@ mod tests {
             doc_text.contains("Javadoc"),
             "multi-line block comment text missing"
         );
+    }
+
+    #[test]
+    fn test_abi_smoke_html_grammar() {
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_html::LANGUAGE.into();
+        parser.set_language(&lang).expect("set HTML language");
+        let tree = parser
+            .parse("<div></div>", None)
+            .expect("parse HTML snippet");
+        assert!(!tree.root_node().has_error(), "root should not be error");
+    }
+
+    #[test]
+    fn test_abi_smoke_css_grammar() {
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_css::LANGUAGE.into();
+        parser.set_language(&lang).expect("set CSS language");
+        let tree = parser
+            .parse(".a { color: red; }", None)
+            .expect("parse CSS snippet");
+        assert!(!tree.root_node().has_error(), "root should not be error");
+    }
+
+    #[test]
+    fn test_abi_smoke_scss_grammar() {
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_scss::language();
+        parser.set_language(&lang).expect("set SCSS language");
+        let tree = parser.parse("$x: 1;", None).expect("parse SCSS snippet");
+        assert!(!tree.root_node().has_error(), "root should not be error");
     }
 }

@@ -149,6 +149,9 @@ fn parse_source(source: &str, language: &LanguageId) -> Result<ParseSourceOutput
         | LanguageId::Yaml
         | LanguageId::Markdown
         | LanguageId::Env => unreachable!("config types are handled before parse_source"),
+        LanguageId::Html => tree_sitter_html::LANGUAGE.into(),
+        LanguageId::Css => tree_sitter_css::LANGUAGE.into(),
+        LanguageId::Scss => tree_sitter_scss::language(),
     };
 
     parser
