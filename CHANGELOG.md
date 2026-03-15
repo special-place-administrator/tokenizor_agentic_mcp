@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.7](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.30.6...v0.30.7) (2026-03-15)
+
+
+### Bug Fixes
+
+* security patches, parser improvements, parallelism fixes, and review follow-ups ([2b1d5cb](https://github.com/special-place-administrator/tokenizor_agentic_mcp/commit/2b1d5cbafed5100ea833d0f4b41da41b1d87cb27))
+
 ## [0.30.6](https://github.com/special-place-administrator/tokenizor_agentic_mcp/compare/v0.30.5...v0.30.6) (2026-03-15)
 
 
