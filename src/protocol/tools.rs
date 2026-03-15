@@ -482,9 +482,10 @@ pub struct GetSymbolContextInput {
     /// Omit for default symbol-context mode. Pass empty array for all trace sections.
     #[serde(default)]
     pub sections: Option<Vec<String>>,
-    /// Optional max token budget for bundle mode. When set, truncates type dependency
-    /// resolution to stay within budget. Dependencies are resolved in order; excess
-    /// dependencies are listed as names only without full definitions.
+    /// Optional max token budget for bundle mode. When set, truncates the rendered
+    /// output at the nearest line boundary before the approximate token budget
+    /// (~4 chars per token). The full symbol body and sections are rendered first,
+    /// then cut if they exceed the budget.
     #[serde(default, deserialize_with = "lenient_u64")]
     pub max_tokens: Option<u64>,
 }
@@ -1355,15 +1356,19 @@ impl TokenizorServer {
             };
             let verbosity = params.0.verbosity.as_deref().unwrap_or("full");
             let mut result = format::context_bundle_result_view(&view, verbosity);
-            // Apply max_tokens truncation if requested
+            // Apply max_tokens truncation if requested.
+            // Truncates the rendered output (not selective dependency omission)
+            // at the nearest line boundary before the approximate token budget.
             if let Some(max_tokens) = params.0.max_tokens {
-                let max_chars = (max_tokens as usize) * 4; // ~4 chars per token
-                if result.len() > max_chars {
-                    result.truncate(max_chars);
-                    // Find last complete line
-                    if let Some(last_nl) = result.rfind('\n') {
-                        result.truncate(last_nl + 1);
-                    }
+                let max_bytes = (max_tokens as usize) * 4; // ~4 chars per token (conservative)
+                if result.len() > max_bytes {
+                    // Find the last newline before the byte budget to ensure
+                    // we truncate at a clean line boundary (also avoids UTF-8 mid-char panics).
+                    let truncate_at = result[..max_bytes]
+                        .rfind('\n')
+                        .map(|pos| pos + 1)
+                        .unwrap_or(max_bytes.min(result.len()));
+                    result.truncate(truncate_at);
                     result.push_str(&format!(
                         "\n... truncated at ~{max_tokens} tokens. Use without max_tokens for full output.\n"
                     ));
@@ -6976,5 +6981,47 @@ mod tests {
         ];
         let result = super::filter_paths_by_prefix_and_language(paths, None, None, true).unwrap();
         assert_eq!(result, vec!["src/main.rs", "src/lib.rs"]);
+    }
+
+    #[test]
+    fn test_normalize_search_text_glob() {
+        use super::normalize_search_text_glob;
+        // Bare filename → auto-prefix with **/
+        assert_eq!(
+            normalize_search_text_glob(Some("foo.rs")),
+            Some("**/foo.rs".to_string())
+        );
+        // Path with separator → no prefix
+        assert_eq!(
+            normalize_search_text_glob(Some("src/foo.rs")),
+            Some("src/foo.rs".to_string())
+        );
+        // Already has glob char → no prefix
+        assert_eq!(
+            normalize_search_text_glob(Some("*.rs")),
+            Some("*.rs".to_string())
+        );
+        assert_eq!(
+            normalize_search_text_glob(Some("[test]*.rs")),
+            Some("[test]*.rs".to_string())
+        );
+        assert_eq!(
+            normalize_search_text_glob(Some("src/**/*.ts")),
+            Some("src/**/*.ts".to_string())
+        );
+        // Leading ./ stripped, then bare → auto-prefix
+        assert_eq!(
+            normalize_search_text_glob(Some("./foo.rs")),
+            Some("**/foo.rs".to_string())
+        );
+        // Backslash replaced, leading / stripped, then bare → auto-prefix
+        assert_eq!(
+            normalize_search_text_glob(Some("\\foo.rs")),
+            Some("**/foo.rs".to_string())
+        );
+        // Empty / whitespace → None
+        assert_eq!(normalize_search_text_glob(Some("")), None);
+        assert_eq!(normalize_search_text_glob(Some("  ")), None);
+        assert_eq!(normalize_search_text_glob(None), None);
     }
 }

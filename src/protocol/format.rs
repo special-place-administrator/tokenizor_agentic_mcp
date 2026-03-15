@@ -1950,13 +1950,29 @@ fn render_context_bundle_found(view: &ContextBundleFoundView, verbosity: &str) -
         "struct" | "enum" | "class" | "interface" | "trait"
     );
     if is_struct_like && view.callers.total_count == 0 && view.callees.total_count == 0 {
+        // Extract the type name from the body's first line. Handles:
+        //   "pub struct Foo {" → "Foo"
+        //   "struct Foo<T>" → "Foo"
+        //   "pub(crate) struct Foo" → "Foo"
+        // Falls back to "..." if extraction produces something garbled.
+        let extracted_name = view
+            .body
+            .lines()
+            .next()
+            .and_then(|line| {
+                // Find the keyword (struct/enum/class/trait/interface), take the token after it
+                let words: Vec<&str> = line.split_whitespace().collect();
+                let keyword_pos = words.iter().position(|w| {
+                    matches!(*w, "struct" | "enum" | "class" | "trait" | "interface")
+                })?;
+                words.get(keyword_pos + 1).copied()
+            })
+            .map(|n| n.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_'))
+            .filter(|n| !n.is_empty() && !n.contains('(') && !n.contains('#'))
+            .unwrap_or("...");
         output.push_str(&format!(
             "\nTip: This {} has 0 direct callers/callees. Try `get_symbol_context` on its `impl` block or use `find_references(name=\"{}\")` to find usages.\n",
-            view.kind_label,
-            view.body.lines().next()
-                .and_then(|l| l.split_whitespace().nth(1))
-                .map(|n| n.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_'))
-                .unwrap_or("...")
+            view.kind_label, extracted_name
         ));
     }
     output
