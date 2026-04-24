@@ -307,8 +307,7 @@ pub struct SearchSymbolsInput {
 }
 
 /// Input for `search_text`.
-#[derive(Deserialize, Serialize, JsonSchema)]
-#[derive(Default)]
+#[derive(Deserialize, Serialize, JsonSchema, Default)]
 pub struct SearchTextInput {
     /// Search query (case-insensitive substring match unless `regex` is true).
     pub query: Option<String>,
@@ -1240,9 +1239,7 @@ fn normalize_file_content_aliases(input: &mut GetFileContentInput) -> Result<(),
     }
 
     if input.limit == Some(0) {
-        return Err(
-            "Invalid get_file_content request: `limit` must be 1 or greater.".to_string(),
-        );
+        return Err("Invalid get_file_content request: `limit` must be 1 or greater.".to_string());
     }
 
     let offset = input.offset.unwrap_or(0);
@@ -3305,7 +3302,12 @@ impl SymForgeServer {
     /// (files that historically change together with this file). Always call this after making edits.
     #[tool(
         description = "Call AFTER editing a file. Re-reads from disk, updates the index, reports added/removed/modified symbols and affected dependents. Set include_co_changes=true to also see git temporal coupling data (files that historically change together). Always call this after making edits to keep the index current.",
-        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     pub(crate) async fn analyze_file_impact(
         &self,
@@ -3801,7 +3803,12 @@ impl SymForgeServer {
         }
 
         let verbosity = params.0.verbosity.as_deref().unwrap_or("full");
-        let output = format::trace_symbol_result_view(&trace_view, &params.0.name, verbosity, params.0.max_tokens);
+        let output = format::trace_symbol_result_view(
+            &trace_view,
+            &params.0.name,
+            verbosity,
+            params.0.max_tokens,
+        );
         self.session_context.record_symbol(
             &params.0.path,
             &params.0.name,
@@ -3917,7 +3924,7 @@ impl SymForgeServer {
                 None => output,
             };
             let result = format::enforce_token_budget(result, params.0.max_tokens);
-        self.session_context.record_summary_output(
+            self.session_context.record_summary_output(
                 "search_files",
                 (result.len() / 4).min(u32::MAX as usize) as u32,
             );
@@ -4079,8 +4086,10 @@ impl SymForgeServer {
             if let Some(repo_root) = self.capture_repo_root() {
                 let db_path = repo_root.join(crate::paths::SYMFORGE_FRECENCY_DB_PATH);
                 if let Ok(store) = crate::live_index::frecency::FrecencyStore::open(&db_path) {
-                    let hit_paths: Vec<std::path::PathBuf> =
-                        hits.iter().map(|h| std::path::PathBuf::from(&h.path)).collect();
+                    let hit_paths: Vec<std::path::PathBuf> = hits
+                        .iter()
+                        .map(|h| std::path::PathBuf::from(&h.path))
+                        .collect();
                     let path_refs: Vec<&std::path::Path> =
                         hit_paths.iter().map(|p| p.as_path()).collect();
                     let now_ts = std::time::SystemTime::now()
@@ -4089,9 +4098,7 @@ impl SymForgeServer {
                         .unwrap_or(0);
                     if let Ok(scores) = store.bulk_scores(&path_refs, now_ts) {
                         let breakdowns =
-                            crate::live_index::search::score_hits_by_frecency_fusion(
-                                hits, &scores,
-                            );
+                            crate::live_index::search::score_hits_by_frecency_fusion(hits, &scores);
                         let taken = std::mem::take(hits);
                         *hits = crate::live_index::search::reorder_hits_by_frecency_fusion(
                             taken,
@@ -4241,11 +4248,73 @@ impl SymForgeServer {
         result
     }
 
+    /// Compact diagnostic: essential health fields only. Use when token budget matters.
+    #[tool(
+        description = "Compact diagnostic: essential index, watcher, admission, and token-savings health fields only. Prefer this when token budget matters; use health for full diagnostic lists.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    pub(crate) async fn health_compact(&self) -> String {
+        if let Some(result) = self.proxy_tool_call_without_params("health_compact").await {
+            return result;
+        }
+
+        let published = self.index.published_state();
+        let watcher_guard = self.watcher_info.lock();
+        let mut result =
+            format::health_report_compact_from_published_state(&published, &watcher_guard);
+
+        if let Some(ref stats) = self.token_stats {
+            let snap = stats.summary();
+            let total_saved =
+                snap.read_saved_tokens + snap.edit_saved_tokens + snap.grep_saved_tokens;
+            let total_fires =
+                snap.read_fires + snap.edit_fires + snap.write_fires + snap.grep_fires;
+            if total_fires > 0 {
+                result.push_str(&format!(
+                    "\nToken savings: ~{} tokens saved across {} hook fires",
+                    total_saved, total_fires
+                ));
+            }
+
+            let counts = stats.tool_call_counts();
+            let total_tool_calls: usize = counts.iter().map(|(_, count)| *count).sum();
+            if total_tool_calls > 0 {
+                result.push_str(&format!(
+                    "\nTool calls: {} recorded across {} tools",
+                    total_tool_calls,
+                    counts.len()
+                ));
+            }
+        }
+
+        let git_temporal = format::git_temporal_health_line(&self.index.git_temporal());
+        let git_temporal_summary = git_temporal
+            .lines()
+            .next()
+            .unwrap_or("Git temporal: unknown");
+        result.push_str(&format!(
+            "\n{} | Worktree misuse/hour: {}",
+            git_temporal_summary,
+            self.worktree_misuse.current_window_count()
+        ));
+
+        self.session_context.record_summary_output(
+            "health_compact",
+            (result.len() / 4).min(u32::MAX as usize) as u32,
+        );
+        result
+    }
+
     /// Reindex a directory from scratch — replaces the current index, restarts watcher, triggers
     /// git temporal analysis. Use when switching projects. Destructive to current index.
     #[tool(
         description = "Reindex a directory from scratch — replaces the current index, restarts watcher, triggers git temporal analysis. Use when switching projects. Destructive to current index. NOT for re-reading a single changed file (use analyze_file_impact). NOT for reading content from an existing index (use get_file_content).",
-        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     pub(crate) async fn index_folder(&self, params: Parameters<IndexFolderInput>) -> String {
         if let Some(result) = self.proxy_tool_call("index_folder", &params.0).await {
@@ -4670,7 +4739,10 @@ impl SymForgeServer {
                                 // fallback branch (non-indexed source files);
                                 // no-op unless SYMFORGE_FRECENCY=1.
                                 self.bump_frecency(&[PathBuf::from(&input.path)]);
-                                return format::cap_file_content_output(format!("{}{}", mode_annotation, body));
+                                return format::cap_file_content_output(format!(
+                                    "{}{}",
+                                    mode_annotation, body
+                                ));
                             }
                             Err(e) => {
                                 return format!("{} [error: could not read file: {e}]", input.path);
@@ -5797,7 +5869,13 @@ impl SymForgeServer {
         let max_score = ranked.first().map(|(_, s)| *s as f32).unwrap_or(1.0);
         let symbol_scores: Vec<f32> = ranked
             .iter()
-            .map(|(_, s)| if max_score > 0.0 { (*s as f32 / max_score).min(1.0) } else { 0.0 })
+            .map(|(_, s)| {
+                if max_score > 0.0 {
+                    (*s as f32 / max_score).min(1.0)
+                } else {
+                    0.0
+                }
+            })
             .collect();
         let symbol_hits: Vec<(String, String, String)> =
             ranked.into_iter().map(|(k, _)| k).collect();
@@ -6484,7 +6562,12 @@ impl SymForgeServer {
     /// NOT for removing a symbol entirely (use delete_symbol).
     #[tool(
         description = "Replace a symbol's entire definition with new source code. The index resolves the symbol's byte range server-side — no need to read the file first. Content is auto-indented to match the original symbol's indentation level. Use symbol_line to disambiguate overloaded names. NOT for small edits within a symbol (use edit_within_symbol). NOT for removing a symbol entirely (use delete_symbol).",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     pub(crate) async fn replace_symbol_body(
         &self,
@@ -6662,7 +6745,12 @@ impl SymForgeServer {
     /// NOT for replacing existing code (use replace_symbol_body or edit_within_symbol).
     #[tool(
         description = "Insert code before or after a named symbol. Set position='before' or 'after' (default 'after'). Content is auto-indented to match the target symbol's indentation level — provide unindented code. Use symbol_line to disambiguate overloaded names. NOT for replacing existing code (use replace_symbol_body or edit_within_symbol).",
-        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     pub(crate) async fn insert_symbol(
         &self,
@@ -6795,7 +6883,12 @@ impl SymForgeServer {
     /// NOT for replacing a symbol (use replace_symbol_body).
     #[tool(
         description = "Remove a symbol's entire definition and clean up surrounding blank lines. Use symbol_line to disambiguate overloaded names. NOT for replacing a symbol (use replace_symbol_body).",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     pub(crate) async fn delete_symbol(
         &self,
@@ -6921,7 +7014,12 @@ impl SymForgeServer {
     /// NOT for adding new symbols (use insert_before/after_symbol).
     #[tool(
         description = "Find-and-replace scoped to a symbol's byte range — won't affect code outside it. The LLM never needs to read the symbol body — just provide the old and new text. Set replace_all=true for every occurrence within the symbol. NOT for replacing the entire symbol (use replace_symbol_body). NOT for adding new symbols (use insert_before/after_symbol).",
-        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     pub(crate) async fn edit_within_symbol(
         &self,
@@ -7008,7 +7106,10 @@ impl SymForgeServer {
         let (new_body, count) = if params.0.replace_all {
             let count = body_str.matches(&normalized_old_str).count();
             if count > 0 {
-                (body_str.replace(&normalized_old_str, &normalized_new_str), count)
+                (
+                    body_str.replace(&normalized_old_str, &normalized_new_str),
+                    count,
+                )
             } else {
                 // Fallback: try whitespace-flexible matching.
                 match edit::try_whitespace_flexible_replace(
@@ -7152,7 +7253,12 @@ impl SymForgeServer {
     /// Set dry_run=true for a read-only preview that makes no file changes.
     #[tool(
         description = "Apply multiple symbol-addressed edits atomically across files. Each edit specifies a file, symbol, and operation (replace/insert_before/insert_after/delete/edit_within). Accepts either structured edits or shorthand strings like `src/lib.rs::helper => edit_within old >>> new`. All symbols are validated before any writes — if any resolution fails, no files are modified. Set dry_run=true for a READ-ONLY preview that shows what would change without writing (safe, no confirmation needed). Edits within the same file must target non-overlapping symbols. NOT for single-symbol edits (use replace_symbol_body, insert_symbol, etc.).",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     pub(crate) async fn batch_edit(&self, params: Parameters<edit::BatchEditInput>) -> String {
         if let Some(result) = self.proxy_tool_call("batch_edit", &params.0).await {
@@ -7221,7 +7327,12 @@ impl SymForgeServer {
     /// Set dry_run=true for a read-only preview that makes no file changes.
     #[tool(
         description = "Rename a symbol and update all references across the project. Finds the definition and all usage sites via the index's reverse reference map. Set dry_run=true for a READ-ONLY preview that lists affected files without writing any changes (safe, no confirmation needed). Applies confident matches transactionally across files; uncertain matches are surfaced for manual review instead of being modified. Common names (e.g. `new`, `get`) can still produce false positives — verify with what_changed afterward. NOT for replacing a symbol's body (use replace_symbol_body).",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     pub(crate) async fn batch_rename(&self, params: Parameters<edit::BatchRenameInput>) -> String {
         if let Some(result) = self.proxy_tool_call("batch_rename", &params.0).await {
@@ -7267,7 +7378,12 @@ impl SymForgeServer {
     /// Insert the same code at multiple symbol locations across files.
     #[tool(
         description = "Insert the same code before or after multiple symbols across the project. Useful for adding logging, instrumentation, or boilerplate to many locations at once. Accepts either structured targets or shorthand strings like `src/lib.rs::helper`. Code is auto-indented to match each target symbol. All targets are validated before any writes, and live execution applies transactionally across files with rollback on failure. Set dry_run=true for a READ-ONLY preview. NOT for inserting at a single location (use insert_symbol).",
-        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     pub(crate) async fn batch_insert(&self, params: Parameters<edit::BatchInsertInput>) -> String {
         if let Some(result) = self.proxy_tool_call("batch_insert", &params.0).await {
@@ -8599,7 +8715,8 @@ mod tests {
     async fn test_index_folder_can_reindex_same_root_twice_locally() {
         let repo = TempDir::new().expect("temp repo");
         fs::create_dir_all(repo.path().join("src")).expect("create src dir");
-        fs::write(repo.path().join("src/lib.rs"), "pub fn first() {}\n").expect("write initial file");
+        fs::write(repo.path().join("src/lib.rs"), "pub fn first() {}\n")
+            .expect("write initial file");
 
         let server = make_server(make_live_index_empty());
         let first = server
@@ -9874,6 +9991,20 @@ mod tests {
         assert!(result.contains("Status:"), "should have Status field");
         assert!(result.contains("Files:"), "should have Files field");
         assert!(result.contains("Symbols:"), "should have Symbols field");
+    }
+
+    #[tokio::test]
+    async fn test_health_compact_keeps_core_fields_small() {
+        let (key, file) = make_file("src/lib.rs", b"fn foo() {}", vec![]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server.health_compact().await;
+        assert!(result.contains("Status:"), "should have Status field");
+        assert!(result.contains("Files:"), "should have Files field");
+        assert!(result.contains("Symbols:"), "should have Symbols field");
+        assert!(
+            !result.contains("Partial parse files"),
+            "compact health should omit expanded path lists"
+        );
     }
 
     #[tokio::test]
@@ -13651,7 +13782,8 @@ mod tests {
     /// range extended past the doc unconditionally, silently deleting it.
     #[tokio::test]
     async fn test_replace_symbol_body_preserves_attached_doc_without_new_doc() {
-        let original = b"/// Adds two numbers.\npub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n";
+        let original =
+            b"/// Adds two numbers.\npub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n";
         let (_dir, server, file_path) = setup_edit_test(original);
 
         let input = crate::protocol::edit::ReplaceSymbolBodyInput {
@@ -13695,8 +13827,9 @@ mod tests {
             name: "add".to_string(),
             kind: None,
             symbol_line: None,
-            new_body: "/// New doc.\npub fn add(a: i32, b: i32) -> i32 {\n    a.saturating_add(b)\n}"
-                .to_string(),
+            new_body:
+                "/// New doc.\npub fn add(a: i32, b: i32) -> i32 {\n    a.saturating_add(b)\n}"
+                    .to_string(),
             dry_run: None,
             working_directory: None,
         };
@@ -13785,7 +13918,9 @@ mod tests {
             "new body must be written; disk was:\n{on_disk}"
         );
         assert_eq!(
-            on_disk.matches("/// Intro remark about the next item.").count(),
+            on_disk
+                .matches("/// Intro remark about the next item.")
+                .count(),
             1,
             "orphan doc must not duplicate; disk was:\n{on_disk}"
         );
@@ -13803,7 +13938,8 @@ mod tests {
         std::fs::create_dir_all(&src_dir).unwrap();
         let file_path = src_dir.join("math.ts");
         std::fs::write(&file_path, original).unwrap();
-        let parse_result = crate::parsing::process_file("src/math.ts", original, LanguageId::TypeScript);
+        let parse_result =
+            crate::parsing::process_file("src/math.ts", original, LanguageId::TypeScript);
         let indexed = IndexedFile::from_parse_result(parse_result, original.to_vec());
         let index = make_live_index_ready(vec![("src/math.ts".to_string(), indexed)]);
         let server = make_server_with_root(index, Some(dir.path().to_path_buf()));
@@ -13813,9 +13949,8 @@ mod tests {
             name: "add".to_string(),
             kind: None,
             symbol_line: None,
-            new_body:
-                "export function add(a: number, b: number): number {\n    return a + b;\n}"
-                    .to_string(),
+            new_body: "export function add(a: number, b: number): number {\n    return a + b;\n}"
+                .to_string(),
             dry_run: None,
             working_directory: None,
         };

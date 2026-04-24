@@ -988,10 +988,8 @@ pub fn search_text_with_options(
     // for case-insensitive searches.  Only used when: >1 term, not whole-word mode,
     // and all terms are ASCII (aho-corasick only does ASCII case folding).
     let all_ascii = normalized_terms.iter().all(|t| t.is_ascii());
-    let multi_term_ac = (normalized_terms.len() > 1
-        && !options.whole_word
-        && all_ascii)
-        .then(|| {
+    let multi_term_ac =
+        (normalized_terms.len() > 1 && !options.whole_word && all_ascii).then(|| {
             aho_corasick::AhoCorasick::builder()
                 .ascii_case_insensitive(!case_sensitive)
                 .build(&normalized_terms)
@@ -1367,6 +1365,25 @@ fn compute_test_ranges(file: &crate::live_index::IndexedFile) -> Vec<(u32, u32)>
         .collect()
 }
 
+fn attach_text_match_context(
+    index: &LiveIndex,
+    options: &TextSearchOptions,
+    file_matches: &mut TextFileMatches,
+) {
+    let Some(context) = options.context else {
+        return;
+    };
+    let Some(file) = index.get_file(&file_matches.path) else {
+        return;
+    };
+    let content_str = String::from_utf8_lossy(&file.content);
+    file_matches.rendered_lines = Some(build_context_rendered_lines(
+        &content_str,
+        &file_matches.matches,
+        context,
+    ));
+}
+
 fn collect_text_matches<F>(
     index: &LiveIndex,
     candidate_paths: Vec<String>,
@@ -1377,12 +1394,19 @@ fn collect_text_matches<F>(
 where
     F: FnMut(&str) -> bool,
 {
-    // First pass: count matches per file for relevance ranking.
-    let mut path_counts: Vec<(String, usize)> = Vec::new();
+    struct PathMatchBucket {
+        path: String,
+        visible_count: usize,
+        matches: Vec<TextLineMatch>,
+    }
+
+    // Single scan per file: count every visible hit for overflow reporting while
+    // retaining only the bounded match lines needed for output/ranking.
+    let mut buckets: Vec<PathMatchBucket> = Vec::new();
     let mut suppressed_by_noise: usize = 0;
     let mut all_visible_matches: usize = 0;
-    for path in &candidate_paths {
-        let file = match index.get_file(path) {
+    for path in candidate_paths {
+        let file = match index.get_file(&path) {
             Some(file) => file,
             None => continue,
         };
@@ -1396,8 +1420,9 @@ where
                 Vec::new()
             };
 
-        let mut count = 0usize;
+        let mut visible_count = 0usize;
         let mut suppressed = 0usize;
+        let mut matches: Vec<TextLineMatch> = Vec::new();
         for (line_idx, line) in content_str.lines().enumerate() {
             let line = line.trim_end_matches('\r');
             if !is_match(line) {
@@ -1414,74 +1439,8 @@ where
                     continue;
                 }
             }
-            count += 1;
-        }
-        suppressed_by_noise += suppressed;
-        all_visible_matches += count;
-        if count > 0 {
-            path_counts.push((path.clone(), count));
-        }
-    }
-
-    // Sort by match count descending, alphabetical tiebreak.
-    path_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-
-    // Second pass: collect actual matches from ranked files with limits.
-    let mut files: Vec<TextFileMatches> = Vec::new();
-    let mut total_matches = 0usize;
-
-    // When ranked, collect from all files (up to a safety cap) so the ranker
-    // can reorder across the full set.  The total_limit is applied *after*
-    // ranking to trim the final output.  Without this, high-match-count files
-    // exhaust the budget before diverse but important files are visited.
-    const RANKED_FILE_CAP: usize = 500;
-
-    for (file_idx, (path, _)) in path_counts.iter().enumerate() {
-        if options.ranked {
-            if file_idx >= RANKED_FILE_CAP {
-                break;
-            }
-        } else if total_matches >= options.total_limit {
-            break;
-        }
-        let file = match index.get_file(path) {
-            Some(file) => file,
-            None => continue,
-        };
-        let content_str = String::from_utf8_lossy(&file.content);
-        let per_file_limit = if options.ranked {
-            options.max_per_file
-        } else {
-            let remaining_total = options.total_limit.saturating_sub(total_matches);
-            options.max_per_file.min(remaining_total)
-        };
-
-        if per_file_limit == 0 {
-            break;
-        }
-
-        // Pre-compute Rust test module line ranges for noise filtering.
-        let test_ranges: Vec<(u32, u32)> =
-            if !options.noise_policy.include_tests && file.language == LanguageId::Rust {
-                compute_test_ranges(file)
-            } else {
-                Vec::new()
-            };
-
-        let mut matches: Vec<TextLineMatch> = Vec::new();
-        for (line_idx, line) in content_str.lines().enumerate() {
-            let line = line.trim_end_matches('\r');
-            if is_match(line) {
-                // Skip matches inside Rust #[cfg(test)] modules.
-                if !test_ranges.is_empty() {
-                    let line_num = line_idx as u32;
-                    if test_ranges
-                        .iter()
-                        .any(|&(start, end)| line_num >= start && line_num <= end)
-                    {
-                        continue;
-                    }
-                }
+            visible_count += 1;
+            if matches.len() < options.max_per_file {
                 matches.push(TextLineMatch {
                     line_number: line_idx + 1,
                     line: line.to_string(),
@@ -1499,23 +1458,71 @@ where
                             line_range: s.line_range,
                         }),
                 });
-                if matches.len() >= per_file_limit {
-                    break;
-                }
             }
         }
-
-        if !matches.is_empty() {
-            let rendered_lines = options
-                .context
-                .map(|context| build_context_rendered_lines(&content_str, &matches, context));
-            total_matches += matches.len();
-            files.push(TextFileMatches {
-                path: path.clone(),
+        suppressed_by_noise += suppressed;
+        all_visible_matches += visible_count;
+        if visible_count > 0 {
+            buckets.push(PathMatchBucket {
+                path,
+                visible_count,
                 matches,
-                rendered_lines,
-                callers: None,
             });
+        }
+    }
+
+    // Sort by match count descending, alphabetical tiebreak.
+    buckets.sort_by(|a, b| {
+        b.visible_count
+            .cmp(&a.visible_count)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+
+    let mut files: Vec<TextFileMatches> = Vec::new();
+    let mut total_matches = 0usize;
+
+    // When ranked, collect from all files (up to a safety cap) so the ranker
+    // can reorder across the full set.  The total_limit is applied *after*
+    // ranking to trim the final output.  Without this, high-match-count files
+    // exhaust the budget before diverse but important files are visited.
+    const RANKED_FILE_CAP: usize = 500;
+
+    for (file_idx, mut bucket) in buckets.into_iter().enumerate() {
+        if options.ranked {
+            if file_idx >= RANKED_FILE_CAP {
+                break;
+            }
+        } else if total_matches >= options.total_limit {
+            break;
+        }
+
+        let per_file_limit = if options.ranked {
+            options.max_per_file
+        } else {
+            let remaining_total = options.total_limit.saturating_sub(total_matches);
+            options.max_per_file.min(remaining_total)
+        };
+
+        if per_file_limit == 0 {
+            break;
+        }
+
+        if bucket.matches.len() > per_file_limit {
+            bucket.matches.truncate(per_file_limit);
+        }
+
+        if !bucket.matches.is_empty() {
+            total_matches += bucket.matches.len();
+            let mut file_matches = TextFileMatches {
+                path: bucket.path,
+                matches: bucket.matches,
+                rendered_lines: None,
+                callers: None,
+            };
+            if !options.ranked {
+                attach_text_match_context(index, options, &mut file_matches);
+            }
+            files.push(file_matches);
         }
     }
 
@@ -1549,6 +1556,9 @@ where
             true
         });
         total_matches = files.iter().map(|f| f.matches.len()).sum();
+        for file_matches in &mut files {
+            attach_text_match_context(index, options, file_matches);
+        }
     }
 
     TextSearchResult {
@@ -1659,10 +1669,7 @@ pub fn score_hits_by_frecency_fusion(
     hits: &[SearchFilesHit],
     frecency_scores: &HashMap<PathBuf, f64>,
 ) -> Vec<FrecencyFusionBreakdown> {
-    let max_frecency = frecency_scores
-        .values()
-        .copied()
-        .fold(0.0_f64, f64::max);
+    let max_frecency = frecency_scores.values().copied().fold(0.0_f64, f64::max);
     hits.iter()
         .map(|hit| {
             let path_match = tier_path_match_score(hit.tier);

@@ -135,20 +135,20 @@ impl SymForgeServer {
     }
 
     pub(crate) fn capture_repo_root(&self) -> Option<PathBuf> {
-    self.repo_root.read().clone()
-}
-
-/// Record a frecency bump for the given paths against the bound workspace.
-///
-/// No-op when no repo root is bound (the feature has nothing to anchor
-/// the per-workspace store to). Forwards to
-/// [`crate::live_index::frecency::bump`], which itself no-ops unless
-/// `SYMFORGE_FRECENCY=1`.
-pub(crate) fn bump_frecency(&self, paths: &[PathBuf]) {
-    if let Some(root) = self.capture_repo_root() {
-        crate::live_index::frecency::bump(&root, paths);
+        self.repo_root.read().clone()
     }
-}
+
+    /// Record a frecency bump for the given paths against the bound workspace.
+    ///
+    /// No-op when no repo root is bound (the feature has nothing to anchor
+    /// the per-workspace store to). Forwards to
+    /// [`crate::live_index::frecency::bump`], which itself no-ops unless
+    /// `SYMFORGE_FRECENCY=1`.
+    pub(crate) fn bump_frecency(&self, paths: &[PathBuf]) {
+        if let Some(root) = self.capture_repo_root() {
+            crate::live_index::frecency::bump(&root, paths);
+        }
+    }
 
     pub(crate) fn effective_repo_root_for_git_tools(&self) -> Option<PathBuf> {
         self.capture_repo_root()
@@ -379,9 +379,7 @@ pub(crate) fn bump_frecency(&self, paths: &[PathBuf]) {
         params: serde_json::Value,
     ) -> String {
         use rmcp::handler::server::wrapper::Parameters;
-        fn decode<T: serde::de::DeserializeOwned>(
-            params: serde_json::Value,
-        ) -> Result<T, String> {
+        fn decode<T: serde::de::DeserializeOwned>(params: serde_json::Value) -> Result<T, String> {
             serde_json::from_value(params).map_err(|e| format!("invalid tool parameters: {e}"))
         }
         macro_rules! call {
@@ -408,6 +406,7 @@ pub(crate) fn bump_frecency(&self, paths: &[PathBuf]) {
             "get_symbol" => call!(get_symbol, tools::GetSymbolInput),
             "get_symbol_context" => call!(get_symbol_context, tools::GetSymbolContextInput),
             "health" => self.health().await,
+            "health_compact" => self.health_compact().await,
             "conventions" => self.conventions().await,
             other => format!("dispatch_tool_for_tests: unknown tool '{other}'"),
         }

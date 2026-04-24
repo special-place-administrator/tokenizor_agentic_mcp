@@ -1090,6 +1090,52 @@ pub fn health_report_from_published_state(
     health_report_from_stats(published.status_label(), &stats)
 }
 
+pub fn health_report_compact_from_published_state(
+    published: &PublishedIndexState,
+    watcher: &crate::watcher::WatcherInfo,
+) -> String {
+    use crate::watcher::WatcherState;
+
+    let watcher_label = match &watcher.state {
+        WatcherState::Active if watcher.events_processed == 0 && watcher.overflow_count == 0 => {
+            "active/idle".to_string()
+        }
+        WatcherState::Active => format!(
+            "active (events: {}, overflows: {}, repairs: {})",
+            watcher.events_processed, watcher.overflow_count, watcher.stale_files_found
+        ),
+        WatcherState::Degraded => format!(
+            "degraded (events: {}, overflows: {}, repairs: {})",
+            watcher.events_processed, watcher.overflow_count, watcher.stale_files_found
+        ),
+        WatcherState::Off => "off".to_string(),
+    };
+    let (tier1, tier2, tier3) = published.tier_counts;
+    let mut output = format!(
+        "Status: {} | Files: {} indexed ({} parsed, {} partial, {} failed) | Symbols: {} | Loaded: {}ms\nWatcher: {} | Admission tiers: {}/{}/{} (indexed/metadata/skipped)",
+        published.status_label(),
+        published.file_count,
+        published.parsed_count,
+        published.partial_parse_count,
+        published.failed_count,
+        published.symbol_count,
+        published.load_duration.as_millis(),
+        watcher_label,
+        tier1,
+        tier2,
+        tier3,
+    );
+
+    if published.partial_parse_count > 0 || published.failed_count > 0 {
+        output.push_str(&format!(
+            "\nParse issues: {} partial, {} failed; use full health for path lists",
+            published.partial_parse_count, published.failed_count
+        ));
+    }
+
+    output
+}
+
 pub fn health_report_from_stats(status: &str, stats: &HealthStats) -> String {
     use crate::watcher::WatcherState;
 
@@ -2572,8 +2618,11 @@ pub fn trace_symbol_result_view(
             name,
         } => not_found_symbol_names(relative_path, symbol_names, name),
         crate::live_index::TraceSymbolView::Found(found) => {
-            let mut output =
-                render_context_bundle_found_with_max_tokens(&found.context_bundle, verbosity, max_tokens);
+            let mut output = render_context_bundle_found_with_max_tokens(
+                &found.context_bundle,
+                verbosity,
+                max_tokens,
+            );
 
             if !found.siblings.is_empty() {
                 output.push_str(&format_siblings(&found.siblings, 0));
@@ -3709,9 +3758,7 @@ pub fn format_frecency_top(entries: &[(std::path::PathBuf, f64)]) -> String {
 /// Gated at the call-site on `SYMFORGE_DEBUG_RANKING=1`. `entries` comes from
 /// `FrecencyStore::last_10_bumps` (already ordered newest-first). Empty input
 /// produces a short "no data yet" line.
-pub fn format_frecency_last_bumps(
-    entries: &[crate::live_index::frecency::BumpEntry],
-) -> String {
+pub fn format_frecency_last_bumps(entries: &[crate::live_index::frecency::BumpEntry]) -> String {
     let mut lines = vec!["── Last 10 frecency bumps ──".to_string()];
     if entries.is_empty() {
         lines.push("  (no frecency rows recorded yet)".to_string());
@@ -3794,7 +3841,10 @@ pub fn explore_result_view(input: ExploreResultViewInput<'_>) -> String {
         // Depth 2+: show enriched symbols with signatures
         lines.push(format!("Symbols ({} found):", symbol_hits.len()));
         for (i, (name, kind, path, signature, dependents)) in enriched_symbols.iter().enumerate() {
-            let score_suffix = symbol_scores.get(i).map(|s| format!("  [{:.2}]", s)).unwrap_or_default();
+            let score_suffix = symbol_scores
+                .get(i)
+                .map(|s| format!("  [{:.2}]", s))
+                .unwrap_or_default();
             if let Some(sig) = signature {
                 // Show first line of signature only to keep it compact
                 let first_line = sig.lines().next().unwrap_or(sig);
@@ -3808,8 +3858,12 @@ pub fn explore_result_view(input: ExploreResultViewInput<'_>) -> String {
         }
         // Show remaining non-enriched symbols in compact form
         if symbol_hits.len() > enriched_symbols.len() {
-            for (i, (name, kind, path)) in symbol_hits[enriched_symbols.len()..].iter().enumerate() {
-                let score_suffix = symbol_scores.get(enriched_symbols.len() + i).map(|s| format!("  [{:.2}]", s)).unwrap_or_default();
+            for (i, (name, kind, path)) in symbol_hits[enriched_symbols.len()..].iter().enumerate()
+            {
+                let score_suffix = symbol_scores
+                    .get(enriched_symbols.len() + i)
+                    .map(|s| format!("  [{:.2}]", s))
+                    .unwrap_or_default();
                 lines.push(format!("  {kind} {name}  {path}{score_suffix}"));
             }
         }
@@ -3818,7 +3872,10 @@ pub fn explore_result_view(input: ExploreResultViewInput<'_>) -> String {
         // Depth 1: original compact format
         lines.push(format!("Symbols ({} found):", symbol_hits.len()));
         for (i, (name, kind, path)) in symbol_hits.iter().enumerate() {
-            let score_suffix = symbol_scores.get(i).map(|s| format!("  [{:.2}]", s)).unwrap_or_default();
+            let score_suffix = symbol_scores
+                .get(i)
+                .map(|s| format!("  [{:.2}]", s))
+                .unwrap_or_default();
             lines.push(format!("  {kind} {name}  {path}{score_suffix}"));
         }
         lines.push(String::new());

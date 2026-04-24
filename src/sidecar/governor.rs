@@ -402,6 +402,112 @@ impl RequestGovernor {
         }
     }
 
+    /// Execute a non-abortable tool call under governor control.
+    ///
+    /// Use this for work dispatched to `spawn_blocking`: Tokio timeouts cannot
+    /// stop an already-running blocking closure, so releasing permits/write gates
+    /// on timeout would let later requests overlap with still-running work.
+    pub async fn execute_non_abortable<F, T>(
+        &self,
+        tool_name: &str,
+        fut: F,
+    ) -> Result<T, GovernorError>
+    where
+        F: std::future::Future<Output = T>,
+    {
+        let weight = classify_tool(tool_name);
+        let permits_needed = weight.permits();
+        let req_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let now = Instant::now();
+
+        self.stats.total_submitted.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut active = self.active.lock();
+            active.insert(
+                req_id,
+                RequestEntry {
+                    tool: tool_name.to_string(),
+                    weight,
+                    phase: RequestPhase::Queued,
+                    submitted_at: now,
+                    phase_started_at: now,
+                },
+            );
+        }
+
+        let permit = match tokio::time::timeout(
+            self.queue_timeout,
+            self.semaphore.acquire_many(permits_needed),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_closed)) => {
+                self.remove_request(req_id);
+                self.stats
+                    .total_queue_rejected
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(GovernorError::SemaphoreClosed);
+            }
+            Err(_elapsed) => {
+                self.remove_request(req_id);
+                self.stats
+                    .total_queue_rejected
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(GovernorError::QueueTimeout {
+                    request_id: RequestId(req_id),
+                    tool: tool_name.to_string(),
+                    waited: self.queue_timeout,
+                    weight,
+                    in_flight: self.active_count(),
+                });
+            }
+        };
+
+        let result = if weight.needs_write_gate() {
+            let _gate =
+                match tokio::time::timeout(self.queue_timeout, self.write_gate.write()).await {
+                    Ok(guard) => guard,
+                    Err(_elapsed) => {
+                        self.remove_request(req_id);
+                        drop(permit);
+                        self.stats
+                            .total_queue_rejected
+                            .fetch_add(1, Ordering::Relaxed);
+                        return Err(GovernorError::WriteGateTimeout {
+                            request_id: RequestId(req_id),
+                            tool: tool_name.to_string(),
+                        });
+                    }
+                };
+            self.transition_to_executing(req_id);
+            fut.await
+        } else {
+            let _gate = match tokio::time::timeout(self.queue_timeout, self.write_gate.read()).await
+            {
+                Ok(guard) => guard,
+                Err(_elapsed) => {
+                    self.remove_request(req_id);
+                    drop(permit);
+                    self.stats
+                        .total_queue_rejected
+                        .fetch_add(1, Ordering::Relaxed);
+                    return Err(GovernorError::WriteGateTimeout {
+                        request_id: RequestId(req_id),
+                        tool: tool_name.to_string(),
+                    });
+                }
+            };
+            self.transition_to_executing(req_id);
+            fut.await
+        };
+
+        self.remove_request(req_id);
+        drop(permit);
+        self.stats.total_completed.fetch_add(1, Ordering::Relaxed);
+        Ok(result)
+    }
+
     /// Transition a tracked request from Queued to Executing.
     fn transition_to_executing(&self, req_id: u64) {
         let mut active = self.active.lock();
@@ -552,6 +658,24 @@ mod tests {
             snap.in_flight.is_empty(),
             "timed-out request should be cleaned up"
         );
+    }
+
+    #[tokio::test]
+    async fn test_governor_non_abortable_waits_past_execution_timeout() {
+        let gov =
+            RequestGovernor::with_config(8, Duration::from_millis(10), Duration::from_secs(5));
+        let result = gov
+            .execute_non_abortable("get_symbol", async {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                42
+            })
+            .await;
+
+        assert_eq!(result.unwrap(), 42);
+        let snap = gov.snapshot();
+        assert_eq!(snap.total_completed, 1);
+        assert_eq!(snap.total_timed_out, 0);
+        assert!(snap.in_flight.is_empty());
     }
 
     #[tokio::test]

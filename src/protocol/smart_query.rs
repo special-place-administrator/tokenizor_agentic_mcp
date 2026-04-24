@@ -53,7 +53,14 @@ pub fn classify_intent(query: &str) -> QueryIntent {
 /// Strip leading articles ("the", "a", "an") from a query for cleaner routing.
 pub(crate) fn strip_leading_articles(q: &str) -> &str {
     let lower = q.as_bytes();
-    for (article, len) in &[(&b"the "[..], 4), (&b"The "[..], 4), (&b"a "[..], 2), (&b"A "[..], 2), (&b"an "[..], 3), (&b"An "[..], 3)] {
+    for (article, len) in &[
+        (&b"the "[..], 4),
+        (&b"The "[..], 4),
+        (&b"a "[..], 2),
+        (&b"A "[..], 2),
+        (&b"an "[..], 3),
+        (&b"An "[..], 3),
+    ] {
         if lower.starts_with(article) {
             return &q[*len..];
         }
@@ -864,8 +871,14 @@ mod tests {
 
     #[test]
     fn test_strip_leading_articles() {
-        assert_eq!(strip_leading_articles("the error handling"), "error handling");
-        assert_eq!(strip_leading_articles("The LiveIndex struct"), "LiveIndex struct");
+        assert_eq!(
+            strip_leading_articles("the error handling"),
+            "error handling"
+        );
+        assert_eq!(
+            strip_leading_articles("The LiveIndex struct"),
+            "LiveIndex struct"
+        );
         assert_eq!(strip_leading_articles("a config file"), "config file");
         assert_eq!(strip_leading_articles("an async handler"), "async handler");
         // Should NOT strip when not followed by space
@@ -877,6 +890,9 @@ mod tests {
     fn test_classify_strips_article_before_routing() {
         // "the error handling" should route the same as "error handling"
         let (intent, _) = classify_intent_with_match("the error handling");
-        assert!(matches!(intent, QueryIntent::Understand { .. } | QueryIntent::Explore { .. }));
+        assert!(matches!(
+            intent,
+            QueryIntent::Understand { .. } | QueryIntent::Explore { .. }
+        ));
     }
 }

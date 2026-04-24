@@ -44,6 +44,7 @@ pub struct DaemonHandle {
     pub port: u16,
     pub shutdown_tx: tokio::sync::oneshot::Sender<()>,
     pub state: SharedDaemonState,
+    server_task: tokio::task::JoinHandle<()>,
 }
 
 #[derive(Clone)]
@@ -201,6 +202,8 @@ pub struct DaemonHealth {
     pub session_count: usize,
     pub daemon_version: String,
     pub executable_path: String,
+    #[serde(default)]
+    pub pid: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -552,6 +555,7 @@ impl DaemonState {
             session_count: self.sessions.read().len(),
             daemon_version: self.identity.version.clone(),
             executable_path: self.identity.executable_path.clone(),
+            pid: Some(std::process::id()),
         }
     }
 }
@@ -776,6 +780,10 @@ async fn daemon_port_if_compatible(identity: &DaemonIdentity) -> anyhow::Result<
     let port = match read_daemon_port_file() {
         Ok(port) => port,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+            tracing::warn!("ignoring corrupt symforge daemon port file: {error}");
+            return Ok(None);
+        }
         Err(error) => return Err(error).context("reading daemon port file"),
     };
 
@@ -837,11 +845,16 @@ async fn stop_incompatible_recorded_daemon(identity: &DaemonIdentity) -> anyhow:
     let port = match read_daemon_port_file() {
         Ok(port) => port,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+            tracing::warn!("removing corrupt symforge daemon port file: {error}");
+            cleanup_daemon_runtime_files();
+            return Ok(());
+        }
         Err(error) => return Err(error).context("reading daemon port file"),
     };
 
     let Some(health) = daemon_health(port).await else {
-        cleanup_daemon_files();
+        cleanup_daemon_runtime_files();
         return Ok(());
     };
 
@@ -850,16 +863,34 @@ async fn stop_incompatible_recorded_daemon(identity: &DaemonIdentity) -> anyhow:
     }
 
     if let Ok(pid) = read_daemon_pid_file() {
-        if let Err(error) = terminate_process(pid) {
-            tracing::warn!(
-                pid,
-                "failed to terminate incompatible symforge daemon automatically: {error}"
-            );
+        if daemon_health_matches_recorded_pid(&health, pid) {
+            if let Err(error) = terminate_process(pid) {
+                tracing::warn!(
+                    pid,
+                    "failed to terminate incompatible symforge daemon automatically: {error}"
+                );
+            }
+            wait_for_daemon_unhealthy(port).await;
+        } else {
+            match health.pid {
+                Some(health_pid) => {
+                    tracing::warn!(
+                        recorded_pid = pid,
+                        daemon_pid = health_pid,
+                        "not terminating incompatible symforge daemon because the pid file does not match health"
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        recorded_pid = pid,
+                        "not terminating incompatible symforge daemon because health did not report a pid"
+                    );
+                }
+            }
         }
-        wait_for_daemon_unhealthy(port).await;
     }
 
-    cleanup_daemon_files();
+    cleanup_daemon_runtime_files();
     Ok(())
 }
 
@@ -951,6 +982,10 @@ fn daemon_health_matches(health: &DaemonHealth, identity: &DaemonIdentity) -> bo
     }
 
     stable_path_identity(&health.executable_path) == stable_path_identity(&identity.executable_path)
+}
+
+fn daemon_health_matches_recorded_pid(health: &DaemonHealth, recorded_pid: u32) -> bool {
+    health.pid == Some(recorded_pid)
 }
 
 fn stable_path_identity(path: &str) -> String {
@@ -1164,7 +1199,7 @@ pub fn build_router(state: SharedDaemonState) -> Router {
 pub async fn spawn_daemon(bind_host: &str) -> anyhow::Result<DaemonHandle> {
     let resolved_host =
         std::env::var("SYMFORGE_DAEMON_BIND").unwrap_or_else(|_| bind_host.to_string());
-    cleanup_daemon_files();
+    cleanup_daemon_runtime_files();
 
     let listener = TcpListener::bind(format!("{resolved_host}:0")).await?;
     let port = listener.local_addr()?.port();
@@ -1175,7 +1210,7 @@ pub async fn spawn_daemon(bind_host: &str) -> anyhow::Result<DaemonHandle> {
     let app = build_router(Arc::clone(&state));
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-    tokio::spawn(async move {
+    let server_task = tokio::spawn(async move {
         let shutdown_signal = async move {
             let _ = shutdown_rx.await;
         };
@@ -1187,13 +1222,14 @@ pub async fn spawn_daemon(bind_host: &str) -> anyhow::Result<DaemonHandle> {
             tracing::error!("daemon server error: {error}");
         }
 
-        cleanup_daemon_files();
+        cleanup_daemon_runtime_files();
     });
 
     Ok(DaemonHandle {
         port,
         shutdown_tx,
         state,
+        server_task,
     })
 }
 
@@ -1220,7 +1256,17 @@ pub async fn run_daemon_until_shutdown(bind_host: &str) -> anyhow::Result<()> {
         tokio::signal::ctrl_c().await?;
         tracing::info!("received Ctrl+C, shutting down");
     }
-    let _ = handle.shutdown_tx.send(());
+    let DaemonHandle {
+        shutdown_tx,
+        server_task,
+        ..
+    } = handle;
+    let _ = shutdown_tx.send(());
+    match tokio::time::timeout(tokio::time::Duration::from_secs(5), server_task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(join_err)) => tracing::warn!("daemon server task ended with join error: {join_err}"),
+        Err(_) => tracing::warn!("timed out waiting for daemon server task to shut down"),
+    }
     Ok(())
 }
 
@@ -1278,7 +1324,7 @@ async fn call_tool_handler(
         let session_id_owned = session_id.clone();
         return state
             .governor
-            .execute("index_folder", async move {
+            .execute_non_abortable("index_folder", async move {
                 tokio::task::spawn_blocking(move || {
                     state_for_index.index_folder_for_session(&session_id_owned, input)
                 })
@@ -1308,7 +1354,7 @@ async fn call_tool_handler(
     let tool_name_for_panic = tool_name.clone();
     match state
         .governor
-        .execute(&tool_name, async move {
+        .execute_non_abortable(&tool_name, async move {
             let handle = tokio::runtime::Handle::current();
             tokio::task::spawn_blocking(move || {
                 handle.block_on(execute_tool_call(runtime, &tool_name_owned, params))
@@ -1585,6 +1631,7 @@ async fn execute_tool_call(
             .search_files(Parameters(decode_params::<SearchFilesInput>(params)?))
             .await),
         "health" => Ok(server.health().await),
+        "health_compact" => Ok(server.health_compact().await),
         "index_folder" => Ok(server
             .index_folder(Parameters(decode_params::<IndexFolderInput>(params)?))
             .await),
@@ -1732,11 +1779,18 @@ pub(crate) fn read_daemon_port_file() -> io::Result<u16> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
+#[cfg(test)]
 fn cleanup_daemon_files() {
+    cleanup_daemon_runtime_files();
+    if let Ok(dir) = daemon_dir() {
+        let _ = std::fs::remove_file(dir.join(DAEMON_START_LOCK_FILE));
+    }
+}
+
+fn cleanup_daemon_runtime_files() {
     if let Ok(dir) = daemon_dir() {
         let _ = std::fs::remove_file(dir.join(DAEMON_PORT_FILE));
         let _ = std::fs::remove_file(dir.join(DAEMON_PID_FILE));
-        let _ = std::fs::remove_file(dir.join(DAEMON_START_LOCK_FILE));
     }
 }
 
@@ -2333,6 +2387,7 @@ mod tests {
             session_count: 0,
             daemon_version: "0.0.0".to_string(),
             executable_path: current_daemon_identity().executable_path,
+            pid: None,
         };
         let (port, shutdown_tx) = spawn_fake_health_server(health).await;
         std::fs::write(daemon_home.path().join(DAEMON_PORT_FILE), port.to_string())
@@ -2348,6 +2403,23 @@ mod tests {
         let _ = shutdown_tx.send(());
     }
 
+    #[test]
+    fn test_daemon_health_matches_recorded_pid_requires_exact_pid() {
+        let mut health = DaemonHealth {
+            project_count: 0,
+            session_count: 0,
+            daemon_version: current_daemon_identity().version,
+            executable_path: current_daemon_identity().executable_path,
+            pid: Some(42),
+        };
+
+        assert!(daemon_health_matches_recorded_pid(&health, 42));
+        assert!(!daemon_health_matches_recorded_pid(&health, 43));
+
+        health.pid = None;
+        assert!(!daemon_health_matches_recorded_pid(&health, 42));
+    }
+
     #[tokio::test]
     async fn test_stop_incompatible_recorded_daemon_cleans_port_file_without_pid() {
         let _env_lock = env_lock().await;
@@ -2359,6 +2431,7 @@ mod tests {
             session_count: 0,
             daemon_version: "0.0.0".to_string(),
             executable_path: current_daemon_identity().executable_path,
+            pid: None,
         };
         let (port, shutdown_tx) = spawn_fake_health_server(health).await;
         std::fs::write(daemon_home.path().join(DAEMON_PORT_FILE), port.to_string())
@@ -3057,12 +3130,14 @@ mod tests {
         let _ = std::fs::remove_file(&lock_path);
     }
 
-    #[test]
-    fn test_cleanup_daemon_files_removes_start_lock() {
+    #[tokio::test]
+    async fn test_cleanup_daemon_files_removes_start_lock() {
+        let _env_lock = env_lock().await;
         // Verify that cleanup_daemon_files removes the start lock file
         // alongside port and pid files. We test the function signature
         // and that it doesn't panic — actual file removal is best-effort.
         let dir = TempDir::new().expect("temp dir");
+        let _env_guard = EnvVarGuard::set("SYMFORGE_HOME", dir.path());
         let port_file = dir.path().join(DAEMON_PORT_FILE);
         let pid_file = dir.path().join(DAEMON_PID_FILE);
         let lock_file = dir.path().join(DAEMON_START_LOCK_FILE);
@@ -3071,15 +3146,51 @@ mod tests {
         std::fs::write(&pid_file, "99999").expect("write pid");
         std::fs::write(&lock_file, "").expect("write lock");
 
-        // We can't easily call cleanup_daemon_files directly here without
-        // setting SYMFORGE_HOME (which needs env serialization), so we
-        // verify the constant is used in the function by checking the file
-        // pattern. The real integration is covered by DL1 + DL4 code review.
-        // Instead, verify all three constants are distinct and non-empty.
-        assert!(!DAEMON_PORT_FILE.is_empty());
-        assert!(!DAEMON_PID_FILE.is_empty());
-        assert!(!DAEMON_START_LOCK_FILE.is_empty());
-        assert_ne!(DAEMON_PORT_FILE, DAEMON_START_LOCK_FILE);
-        assert_ne!(DAEMON_PID_FILE, DAEMON_START_LOCK_FILE);
+        cleanup_daemon_files();
+
+        assert!(!port_file.exists(), "cleanup removes port file");
+        assert!(!pid_file.exists(), "cleanup removes pid file");
+        assert!(!lock_file.exists(), "cleanup removes start lock file");
+    }
+
+    #[tokio::test]
+    async fn test_runtime_cleanup_preserves_start_lock() {
+        let _env_lock = env_lock().await;
+        let daemon_home = TempDir::new().expect("daemon home");
+        let _env_guard = EnvVarGuard::set("SYMFORGE_HOME", daemon_home.path());
+
+        let port_file = daemon_home.path().join(DAEMON_PORT_FILE);
+        let pid_file = daemon_home.path().join(DAEMON_PID_FILE);
+        let lock_file = daemon_home.path().join(DAEMON_START_LOCK_FILE);
+
+        std::fs::write(&port_file, "12345").expect("write port");
+        std::fs::write(&pid_file, "99999").expect("write pid");
+        std::fs::write(&lock_file, "").expect("write lock");
+
+        cleanup_daemon_runtime_files();
+
+        assert!(!port_file.exists(), "runtime cleanup removes port file");
+        assert!(!pid_file.exists(), "runtime cleanup removes pid file");
+        assert!(
+            lock_file.exists(),
+            "runtime cleanup must not release another process' start lock"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_corrupt_port_file_does_not_block_daemon_selection() {
+        let _env_lock = env_lock().await;
+        let daemon_home = TempDir::new().expect("daemon home");
+        let _env_guard = EnvVarGuard::set("SYMFORGE_HOME", daemon_home.path());
+
+        std::fs::write(daemon_home.path().join(DAEMON_PORT_FILE), "not-a-port")
+            .expect("write corrupt port");
+
+        let identity = current_daemon_identity();
+        let selected = daemon_port_if_compatible(&identity)
+            .await
+            .expect("corrupt port should be ignored, not fatal");
+
+        assert_eq!(selected, None);
     }
 }

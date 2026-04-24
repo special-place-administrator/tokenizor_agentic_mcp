@@ -5194,21 +5194,29 @@ fn uses_it() { Widget::default(); }
     #[test]
     fn body_starts_with_doc_comment_detects_common_doc_markers() {
         // Unambiguous doc markers across supported languages.
-        assert!(body_starts_with_doc_comment("/// rust outer line doc\nfn foo() {}"));
-        assert!(body_starts_with_doc_comment("//! rust inner line doc\nmod m {}"));
+        assert!(body_starts_with_doc_comment(
+            "/// rust outer line doc\nfn foo() {}"
+        ));
+        assert!(body_starts_with_doc_comment(
+            "//! rust inner line doc\nmod m {}"
+        ));
         assert!(body_starts_with_doc_comment(
             "/** jsdoc-style block\n * details\n */\nfn foo() {}"
         ));
         assert!(body_starts_with_doc_comment(
             "/*! rust inner block doc */\nmod m {}"
         ));
-        assert!(body_starts_with_doc_comment("#[doc = \"attr doc\"]\nfn foo() {}"));
+        assert!(body_starts_with_doc_comment(
+            "#[doc = \"attr doc\"]\nfn foo() {}"
+        ));
 
         // Leading blank lines should not defeat detection.
         assert!(body_starts_with_doc_comment("\n\n/// doc\nfn foo() {}"));
 
         // Leading indentation is allowed.
-        assert!(body_starts_with_doc_comment("    /// indented doc\n    fn foo() {}"));
+        assert!(body_starts_with_doc_comment(
+            "    /// indented doc\n    fn foo() {}"
+        ));
     }
 
     #[test]
@@ -5217,10 +5225,14 @@ fn uses_it() { Widget::default(); }
         assert!(!body_starts_with_doc_comment("fn foo() {}"));
 
         // Ordinary line comments — could be code annotations, not doc.
-        assert!(!body_starts_with_doc_comment("// regular comment\nfn foo() {}"));
+        assert!(!body_starts_with_doc_comment(
+            "// regular comment\nfn foo() {}"
+        ));
 
         // Python comment — Python docstrings are inside the body, not above.
-        assert!(!body_starts_with_doc_comment("# python comment\ndef foo(): pass"));
+        assert!(!body_starts_with_doc_comment(
+            "# python comment\ndef foo(): pass"
+        ));
 
         // Rust attributes — must not be misread as docs. This was the
         // concrete bug that would have duplicated `#[test]` during a

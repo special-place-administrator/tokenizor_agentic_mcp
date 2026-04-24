@@ -77,12 +77,8 @@ pub fn discover_files(root: &Path) -> Result<Vec<DiscoveredFile>> {
         })
         .collect();
 
-    // Sort case-insensitively by relative_path for deterministic ordering
-    files.sort_by(|a, b| {
-        a.relative_path
-            .to_lowercase()
-            .cmp(&b.relative_path.to_lowercase())
-    });
+    // Cache sort keys once instead of lowercasing paths on every comparator call.
+    files.sort_by_cached_key(|file| file.relative_path.to_lowercase());
 
     Ok(files)
 }
@@ -142,11 +138,8 @@ pub fn discover_all_files(root: &Path) -> Result<Vec<DiscoveredEntry>> {
         })
         .collect();
 
-    entries.sort_by(|a, b| {
-        a.relative_path
-            .to_lowercase()
-            .cmp(&b.relative_path.to_lowercase())
-    });
+    // Cache sort keys once instead of lowercasing paths on every comparator call.
+    entries.sort_by_cached_key(|entry| entry.relative_path.to_lowercase());
 
     Ok(entries)
 }

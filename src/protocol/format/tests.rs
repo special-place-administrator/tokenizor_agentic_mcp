@@ -531,7 +531,6 @@ fn test_search_text_result_view_renders_context_windows_with_separators() {
 fn test_search_text_result_view_group_by_symbol_keeps_duplicate_names_separate() {
     let rendered = search_text_result_view(
         Ok(search::TextSearchResult {
-
             label: "'needle'".to_string(),
             total_matches: 2,
             files: vec![search::TextFileMatches {
@@ -3276,7 +3275,10 @@ fn test_cap_exactly_at_limit_unchanged() {
     let s = "x".repeat(super::GET_FILE_CONTENT_MAX_BYTES);
     let result = super::cap_file_content_output(s.clone());
     assert_eq!(result.len(), super::GET_FILE_CONTENT_MAX_BYTES);
-    assert!(!result.contains("truncated"), "should not add footer at exact cap");
+    assert!(
+        !result.contains("truncated"),
+        "should not add footer at exact cap"
+    );
 }
 
 #[test]
@@ -3289,8 +3291,14 @@ fn test_cap_over_limit_truncates_and_adds_footer() {
         "capped output should be <= cap, got {} bytes",
         result.len()
     );
-    assert!(result.contains("truncated"), "should contain truncation footer");
-    assert!(result.contains("chunk_index"), "footer should suggest chunk_index");
+    assert!(
+        result.contains("truncated"),
+        "should contain truncation footer"
+    );
+    assert!(
+        result.contains("chunk_index"),
+        "footer should suggest chunk_index"
+    );
 }
 
 #[test]

@@ -131,10 +131,7 @@ pub fn suggest_next_steps(
             }
         }
         if snap.listed_symbols.len() > 10 {
-            lines.push(format!(
-                "  ... and {} more",
-                snap.listed_symbols.len() - 10
-            ));
+            lines.push(format!("  ... and {} more", snap.listed_symbols.len() - 10));
         }
         lines.push(String::new());
         lines.push("To load a symbol's full context, call:".to_string());

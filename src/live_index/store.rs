@@ -1005,18 +1005,18 @@ impl LiveIndex {
         // 4. Parse all admitted files in parallel via Rayon.
         let mut parse_results: Vec<(String, IndexedFile)> = indexing_thread_pool().install(|| {
             to_parse
-                .par_iter()
+                .into_par_iter()
                 .map(
                     |(relative_path, language, classification, bytes, mtime_secs)| {
                         let result = parsing::process_file_with_classification(
-                            relative_path,
-                            bytes,
-                            language.clone(),
-                            *classification,
+                            &relative_path,
+                            &bytes,
+                            language,
+                            classification,
                         );
-                        let indexed = IndexedFile::from_parse_result(result, bytes.clone())
-                            .with_mtime(*mtime_secs);
-                        (relative_path.clone(), indexed)
+                        let indexed =
+                            IndexedFile::from_parse_result(result, bytes).with_mtime(mtime_secs);
+                        (relative_path, indexed)
                     },
                 )
                 .collect()
