@@ -1346,7 +1346,7 @@ fn test_arcswap_concurrent_reads_under_writer_pressure() {
                         .map(|s| s.to_ascii_lowercase())
                         .unwrap_or_default();
                     let by_basename = guard.find_files_by_basename(&basename);
-                    if !by_basename.iter().any(|q| *q == p.as_str()) {
+                    if !by_basename.contains(&p.as_str()) {
                         inconsistencies.fetch_add(1, Ordering::Relaxed);
                     }
                 }

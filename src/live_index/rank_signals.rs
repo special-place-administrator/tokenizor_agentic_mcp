@@ -408,6 +408,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)] // intentional: lock-in tier ordering invariant
     fn path_match_tier_ordering_preserved_by_score() {
         // The migration's invariant: combine() yields Strong > Basename >
         // Prefix > Loose > no-match. This lock-in test fails loudly if a

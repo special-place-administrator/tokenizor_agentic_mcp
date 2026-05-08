@@ -225,11 +225,11 @@ async fn batch_edit_bumps_each_touched_file_once() {
     let entries = store.last_10_bumps().expect("last_10_bumps");
     let a_hits = entries
         .iter()
-        .find(|e| e.path == PathBuf::from("src/a.rs"))
+        .find(|e| e.path == Path::new("src/a.rs"))
         .map(|e| e.hit_count);
     let b_hits = entries
         .iter()
-        .find(|e| e.path == PathBuf::from("src/b.rs"))
+        .find(|e| e.path == Path::new("src/b.rs"))
         .map(|e| e.hit_count);
     assert_eq!(a_hits, Some(1), "src/a.rs should bump exactly once");
     assert_eq!(b_hits, Some(1), "src/b.rs should bump exactly once");
@@ -283,11 +283,11 @@ async fn batch_insert_bumps_each_target_once() {
     let entries = store.last_10_bumps().expect("last_10_bumps");
     let a_hits = entries
         .iter()
-        .find(|e| e.path == PathBuf::from("src/a.rs"))
+        .find(|e| e.path == Path::new("src/a.rs"))
         .map(|e| e.hit_count);
     let b_hits = entries
         .iter()
-        .find(|e| e.path == PathBuf::from("src/b.rs"))
+        .find(|e| e.path == Path::new("src/b.rs"))
         .map(|e| e.hit_count);
     assert_eq!(a_hits, Some(1), "src/a.rs should bump once");
     assert_eq!(b_hits, Some(1), "src/b.rs should bump once");
@@ -435,7 +435,7 @@ fn score_decays_to_half_after_seven_days() {
     let now: i64 = 1_700_000_000;
     let seven_days = 7 * 24 * 60 * 60;
 
-    store.bump(&[p.clone()], now - seven_days).expect("bump");
+    store.bump(std::slice::from_ref(&p), now - seven_days).expect("bump");
     let score = store.score(&p, now).expect("score");
 
     let delta = (score - 0.5).abs();
@@ -475,7 +475,7 @@ async fn recent_single_bump_outranks_old_ten_bumps() {
         let a = PathBuf::from("src/file_a_old.rs");
         let b = PathBuf::from("src/file_b_new.rs");
         for _ in 0..10 {
-            store.bump(&[a.clone()], six_months_ago).expect("bump a");
+            store.bump(std::slice::from_ref(&a), six_months_ago).expect("bump a");
         }
         store.bump(&[b], now).expect("bump b");
     }

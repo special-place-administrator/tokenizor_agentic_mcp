@@ -13,15 +13,15 @@
 //! of the three sites end-to-end:
 //!
 //!   1. `no_sidecar` — port file missing and daemon fallback fails.
-//!       Exercises `record_hook_outcome_with_detail(NoSidecar,
-//!       reason="sidecar_port_missing")`.
+//!      Exercises `record_hook_outcome_with_detail(NoSidecar,
+//!      reason="sidecar_port_missing")`.
 //!   2. `stale_port` — port file present but the listener never accepts,
-//!       so the subprocess's 50ms HTTP read times out. Exercises
-//!       `record_hook_outcome_with_detail(NoSidecar,
-//!       reason="sidecar_port_stale")`.
+//!      so the subprocess's 50ms HTTP read times out. Exercises
+//!      `record_hook_outcome_with_detail(NoSidecar,
+//!      reason="sidecar_port_stale")`.
 //!   3. `routed_success` — port file points at a minimal in-test TCP
-//!       responder that returns `HTTP/1.1 200 OK`. Exercises the plain
-//!       `record_hook_outcome(Routed)` call on the success path.
+//!      responder that returns `HTTP/1.1 200 OK`. Exercises the plain
+//!      `record_hook_outcome(Routed)` call on the success path.
 //!
 //! All three assert against the tab-separated substring format written by
 //! `append_hook_adoption_event*`: `<session>\t<workflow>\t<outcome>`. The

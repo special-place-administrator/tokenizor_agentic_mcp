@@ -414,7 +414,7 @@ mod tests {
     fn bump_inserts_new_path_with_hit_count_one() {
         let store = make_store();
         let p = PathBuf::from("src/foo.rs");
-        store.bump(&[p.clone()], 1_000).unwrap();
+        store.bump(std::slice::from_ref(&p), 1_000).unwrap();
         assert_eq!(store.score(&p, 1_000).unwrap(), 1.0);
     }
 
@@ -422,9 +422,9 @@ mod tests {
     fn bump_increments_existing_path() {
         let store = make_store();
         let p = PathBuf::from("src/foo.rs");
-        store.bump(&[p.clone()], 1_000).unwrap();
-        store.bump(&[p.clone()], 2_000).unwrap();
-        store.bump(&[p.clone()], 3_000).unwrap();
+        store.bump(std::slice::from_ref(&p), 1_000).unwrap();
+        store.bump(std::slice::from_ref(&p), 2_000).unwrap();
+        store.bump(std::slice::from_ref(&p), 3_000).unwrap();
         assert_eq!(store.score(&p, 3_000).unwrap(), 3.0);
     }
 
@@ -432,8 +432,8 @@ mod tests {
     fn bump_updates_last_access_ts() {
         let store = make_store();
         let p = PathBuf::from("src/foo.rs");
-        store.bump(&[p.clone()], 1_000).unwrap();
-        store.bump(&[p.clone()], 5_000).unwrap();
+        store.bump(std::slice::from_ref(&p), 1_000).unwrap();
+        store.bump(std::slice::from_ref(&p), 5_000).unwrap();
         let entries = store.last_10_bumps().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].last_access_ts, 5_000);
@@ -471,7 +471,7 @@ mod tests {
     fn score_decays_by_half_at_one_half_life() {
         let store = make_store();
         let p = PathBuf::from("src/foo.rs");
-        store.bump(&[p.clone()], 0).unwrap();
+        store.bump(std::slice::from_ref(&p), 0).unwrap();
         let score = store.score(&p, HALF_LIFE_SECS).unwrap();
         assert!(
             (score - 0.5).abs() < 1e-9,
@@ -483,7 +483,7 @@ mod tests {
     fn score_decays_to_quarter_at_two_half_lives() {
         let store = make_store();
         let p = PathBuf::from("src/foo.rs");
-        store.bump(&[p.clone()], 0).unwrap();
+        store.bump(std::slice::from_ref(&p), 0).unwrap();
         let score = store.score(&p, HALF_LIFE_SECS * 2).unwrap();
         assert!(
             (score - 0.25).abs() < 1e-9,
@@ -495,7 +495,7 @@ mod tests {
     fn score_is_stable_when_now_equals_last_access() {
         let store = make_store();
         let p = PathBuf::from("src/foo.rs");
-        store.bump(&[p.clone()], 12_345).unwrap();
+        store.bump(std::slice::from_ref(&p), 12_345).unwrap();
         assert_eq!(store.score(&p, 12_345).unwrap(), 1.0);
     }
 
@@ -504,7 +504,7 @@ mod tests {
         // If now_ts < last_access_ts (clock skew), score should not exceed hit_count.
         let store = make_store();
         let p = PathBuf::from("src/foo.rs");
-        store.bump(&[p.clone()], 10_000).unwrap();
+        store.bump(std::slice::from_ref(&p), 10_000).unwrap();
         assert_eq!(store.score(&p, 9_000).unwrap(), 1.0);
     }
 
@@ -516,9 +516,9 @@ mod tests {
         let recent = PathBuf::from("src/recent.rs");
         let six_months: i64 = 60 * 60 * 24 * 30 * 6;
         for _ in 0..10 {
-            store.bump(&[ancient.clone()], 0).unwrap();
+            store.bump(std::slice::from_ref(&ancient), 0).unwrap();
         }
-        store.bump(&[recent.clone()], six_months - 300).unwrap();
+        store.bump(std::slice::from_ref(&recent), six_months - 300).unwrap();
         let now = six_months;
         assert!(store.score(&recent, now).unwrap() > store.score(&ancient, now).unwrap());
     }
@@ -529,9 +529,9 @@ mod tests {
         let a = PathBuf::from("src/a.rs");
         let b = PathBuf::from("src/b.rs");
         let missing = PathBuf::from("src/missing.rs");
-        store.bump(&[a.clone()], 0).unwrap();
-        store.bump(&[b.clone()], 0).unwrap();
-        store.bump(&[b.clone()], 0).unwrap();
+        store.bump(std::slice::from_ref(&a), 0).unwrap();
+        store.bump(std::slice::from_ref(&b), 0).unwrap();
+        store.bump(std::slice::from_ref(&b), 0).unwrap();
         let now = HALF_LIFE_SECS;
         let paths: Vec<&Path> = vec![a.as_path(), b.as_path(), missing.as_path()];
         let bulk = store.bulk_scores(&paths, now).unwrap();
@@ -568,11 +568,11 @@ mod tests {
         let warm = PathBuf::from("warm.rs");
         let cold = PathBuf::from("cold.rs");
         // Same last_access_ts; hit counts differ.
-        store.bump(&[hot.clone()], 100).unwrap();
-        store.bump(&[hot.clone()], 100).unwrap();
-        store.bump(&[warm.clone()], 100).unwrap();
+        store.bump(std::slice::from_ref(&hot), 100).unwrap();
+        store.bump(std::slice::from_ref(&hot), 100).unwrap();
+        store.bump(std::slice::from_ref(&warm), 100).unwrap();
         // Cold: 1 hit, but decayed by 5 half-lives.
-        store.bump(&[cold.clone()], 100 - HALF_LIFE_SECS * 5).unwrap();
+        store.bump(std::slice::from_ref(&cold), 100 - HALF_LIFE_SECS * 5).unwrap();
         let top = store.top_frecent(3, 100).unwrap();
         assert_eq!(top.len(), 3);
         assert_eq!(top[0].0, hot);
@@ -595,7 +595,7 @@ mod tests {
     fn reset_first_session_noops_and_stores_head() {
         let store = make_store();
         let p = PathBuf::from("src/foo.rs");
-        store.bump(&[p.clone()], 0).unwrap();
+        store.bump(std::slice::from_ref(&p), 0).unwrap();
         let outcome = store
             .reset_or_halve_on_head_change(None, "abc123", Some(1_000))
             .unwrap();
@@ -608,7 +608,7 @@ mod tests {
     fn reset_same_head_noops() {
         let store = make_store();
         let p = PathBuf::from("src/foo.rs");
-        store.bump(&[p.clone()], 0).unwrap();
+        store.bump(std::slice::from_ref(&p), 0).unwrap();
         let outcome = store
             .reset_or_halve_on_head_change(Some("sha"), "sha", Some(0))
             .unwrap();
@@ -621,7 +621,7 @@ mod tests {
         let store = make_store();
         let p = PathBuf::from("src/foo.rs");
         for _ in 0..4 {
-            store.bump(&[p.clone()], 0).unwrap();
+            store.bump(std::slice::from_ref(&p), 0).unwrap();
         }
         let outcome = store
             .reset_or_halve_on_head_change(Some("old"), "new", Some(49))
@@ -635,7 +635,7 @@ mod tests {
         let store = make_store();
         let p = PathBuf::from("src/foo.rs");
         for _ in 0..10 {
-            store.bump(&[p.clone()], 0).unwrap();
+            store.bump(std::slice::from_ref(&p), 0).unwrap();
         }
         let outcome = store
             .reset_or_halve_on_head_change(Some("old"), "new", Some(50))
@@ -649,7 +649,7 @@ mod tests {
         let store = make_store();
         let p = PathBuf::from("src/foo.rs");
         for _ in 0..10 {
-            store.bump(&[p.clone()], 0).unwrap();
+            store.bump(std::slice::from_ref(&p), 0).unwrap();
         }
         let outcome = store
             .reset_or_halve_on_head_change(Some("old"), "new", Some(500))
@@ -663,7 +663,7 @@ mod tests {
         let store = make_store();
         let p = PathBuf::from("src/foo.rs");
         for _ in 0..10 {
-            store.bump(&[p.clone()], 0).unwrap();
+            store.bump(std::slice::from_ref(&p), 0).unwrap();
         }
         let outcome = store
             .reset_or_halve_on_head_change(Some("old"), "new", Some(501))
@@ -677,7 +677,7 @@ mod tests {
         let store = make_store();
         let p = PathBuf::from("src/foo.rs");
         for _ in 0..10 {
-            store.bump(&[p.clone()], 0).unwrap();
+            store.bump(std::slice::from_ref(&p), 0).unwrap();
         }
         let outcome = store
             .reset_or_halve_on_head_change(Some("old"), "new", None)
@@ -710,7 +710,7 @@ mod tests {
         let windows = PathBuf::from("src\\foo.rs");
         let unix = PathBuf::from("src/foo.rs");
         store.bump(&[windows], 0).unwrap();
-        store.bump(&[unix.clone()], 1_000).unwrap();
+        store.bump(std::slice::from_ref(&unix), 1_000).unwrap();
         assert_eq!(store.score(&unix, 1_000).unwrap(), 2.0);
         assert_eq!(store.last_10_bumps().unwrap().len(), 1);
     }
