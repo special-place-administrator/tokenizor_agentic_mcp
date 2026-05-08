@@ -1201,6 +1201,7 @@ fn symbol_context_text(
 
     let mut evidence_anchors: Vec<String> = Vec::new();
     for file in &files {
+        // safe: `files` is built from `map.keys()` immediately above; lookup cannot miss.
         let refs = map.get(file).unwrap();
         let mut sorted_refs = refs.clone();
         sorted_refs.sort_by_key(|(line, _, _)| *line);
@@ -1219,6 +1220,7 @@ fn symbol_context_text(
 
     for file in &files {
         body_lines.push(format!("── {} ──", file));
+        // safe: `files` is built from `map.keys()` above; lookup cannot miss.
         let refs = map.get(file).unwrap();
         let mut sorted_refs = refs.clone();
         sorted_refs.sort_by_key(|(line, _, _)| *line);
