@@ -273,6 +273,36 @@ impl FrecencyStore {
         Ok(outcome)
     }
 
+    /// Apply the graduated HEAD-change reset policy against `repo_root`'s git HEAD.
+    ///
+    /// Wraps `last_head` lookup + git HEAD resolution + commit-distance computation
+    /// around [`reset_or_halve_on_head_change`]. Used by both the explicit boot-time
+    /// `init_frecency_store` path and the lazy first-bump cache-miss path, so the
+    /// policy applies wherever the store is first opened for a session.
+    ///
+    /// All errors are mapped to `String` and any transient git failure (no repo,
+    /// detached HEAD, etc.) is silently dropped so the feature never breaks the
+    /// tool it hooks into.
+    pub fn apply_head_reset_policy(&self, repo_root: &Path) -> Result<(), String> {
+        let current_head = match crate::git::head_sha(repo_root) {
+            Ok(s) => s,
+            Err(_) => return Ok(()),
+        };
+        let stored_head = self.last_head().map_err(|e| e.to_string())?;
+        let distance = match stored_head.as_deref() {
+            Some(prev) if prev != current_head => {
+                match crate::git::commit_distance(prev, &current_head, repo_root) {
+                    Ok(opt) => opt,
+                    Err(_) => return Ok(()),
+                }
+            }
+            _ => None,
+        };
+        self.reset_or_halve_on_head_change(stored_head.as_deref(), &current_head, distance)
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// Read the last HEAD SHA this store recorded.
     pub fn last_head(&self) -> rusqlite::Result<Option<String>> {
         let conn = self.conn.lock().expect("frecency mutex poisoned");
@@ -342,6 +372,13 @@ pub fn bump(repo_root: &Path, paths: &[PathBuf]) {
 /// All same-process callers for a given workspace share the same `Arc` and
 /// thus the same connection mutex. Returns `None` if the store cannot be
 /// opened — bump is infallible at the call site, so we just drop the bump.
+///
+/// First cache-miss per repo applies the HEAD-change reset policy before
+/// inserting into the cache. This makes commitment-tool bumps the trigger
+/// for the policy (lazy), so `LiveIndex::load` does not open the DB at boot —
+/// discovery-only sessions leave no frecency footprint. The reset call
+/// happens INSIDE the cache mutex so two parallel bumps cannot race on
+/// policy application.
 fn cached_store_for(repo_root: &Path) -> Option<std::sync::Arc<FrecencyStore>> {
     use std::collections::HashMap;
     use std::sync::{Arc, OnceLock};
@@ -353,6 +390,9 @@ fn cached_store_for(repo_root: &Path) -> Option<std::sync::Arc<FrecencyStore>> {
         return Some(Arc::clone(existing));
     }
     let store = Arc::new(FrecencyStore::open(&key).ok()?);
+    // Apply HEAD-change reset on first open per repo per process. Errors are
+    // silently dropped: a transient git failure must not break the bump path.
+    let _ = store.apply_head_reset_policy(repo_root);
     guard.insert(key, Arc::clone(&store));
     Some(store)
 }

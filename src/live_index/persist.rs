@@ -389,24 +389,7 @@ pub fn init_frecency_store(project_root: &Path) {
 fn run_frecency_init(db_path: &Path, repo_root: &Path) -> Result<(), String> {
     let store = crate::live_index::frecency::FrecencyStore::open(db_path)
         .map_err(|e| e.to_string())?;
-    let current_head = match crate::git::head_sha(repo_root) {
-        Ok(s) => s,
-        Err(_) => return Ok(()),
-    };
-    let stored_head = store.last_head().map_err(|e| e.to_string())?;
-    let distance = match stored_head.as_deref() {
-        Some(prev) if prev != current_head => {
-            match crate::git::commit_distance(prev, &current_head, repo_root) {
-                Ok(opt) => opt,
-                Err(_) => return Ok(()),
-            }
-        }
-        _ => None,
-    };
-    store
-        .reset_or_halve_on_head_change(stored_head.as_deref(), &current_head, distance)
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    store.apply_head_reset_policy(repo_root)
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────

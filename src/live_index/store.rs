@@ -1103,7 +1103,12 @@ impl LiveIndex {
         index.rebuild_reverse_index();
         index.rebuild_path_indices();
 
-        super::persist::init_frecency_store(root);
+        // Hook registration must be unconditional so a flag flipped after
+        // boot still captures edits. The DB-touching reset-policy work is
+        // deferred to the first commitment-tool bump (lazy via
+        // `cached_store_for`) per ADR 0011 — discovery-only sessions leave
+        // no frecency footprint.
+        crate::live_index::frecency::ensure_bump_hook_registered();
         super::coupling::init_coupling_store(root);
 
         Ok(SharedIndexHandle::shared(index))
