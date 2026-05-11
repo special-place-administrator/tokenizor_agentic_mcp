@@ -6046,6 +6046,12 @@ impl SymForgeServer {
             ));
         }
 
+        if !output.is_empty() {
+            output.push_str(
+                "\n\nranked by: concept match + symbol-token alignment + path proximity + caller density"
+            );
+        }
+
         self.record_tool_savings_named(
             "explore",
             (output.len() * 10 / 4) as u64,
@@ -11844,6 +11850,36 @@ mod tests {
     }
 
     // ── Explore tool tests ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_explore_output_footer_documents_ranking() {
+        let sym = make_symbol("Error", SymbolKind::Enum, 0, 5);
+        let content = b"pub enum Error {\n    NotFound,\n}\n";
+        let (key, file) = make_file("src/error.rs", content, vec![sym]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server
+            .explore(Parameters(super::ExploreInput {
+                query: "error handling".to_string(),
+                limit: None,
+                depth: None,
+                include_noise: None,
+                language: None,
+                path_prefix: None,
+                estimate: None,
+                max_tokens: None,
+            }))
+            .await;
+        assert!(
+            result.contains("ranked by:"),
+            "explore output must include rank-signal footer; got:\n{result}"
+        );
+        assert!(
+            result.contains(
+                "concept match + symbol-token alignment + path proximity + caller density"
+            ),
+            "footer must enumerate the four ranking signals verbatim; got:\n{result}"
+        );
+    }
 
     #[tokio::test]
     async fn test_explore_concept_returns_results() {
