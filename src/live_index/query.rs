@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 use crate::domain::{LanguageId, ReferenceKind, ReferenceRecord, SymbolKind, SymbolRecord};
 use crate::watcher::{WatcherInfo, WatcherState};
 
-use super::search::PathScope;
+use super::search::{NoiseClass, NoisePolicy, PathScope};
 use super::store::{IndexState, IndexedFile, LiveIndex, ParseStatus};
 
 // ---------------------------------------------------------------------------
@@ -770,6 +770,26 @@ fn is_filtered_name(name: &str, language: &LanguageId) -> bool {
     };
 
     builtins.contains(&name)
+}
+
+/// Returns true when `path` lives under a vendored / third-party directory.
+/// Delegates to `NoisePolicy::classify_path` so the vendor-set stays
+/// single-sourced with the indexer's noise classifier.
+// Wired into search_text / explore output filtering in Task 2.2.
+#[allow(dead_code)]
+pub(crate) fn is_vendor_path(path: &str) -> bool {
+    matches!(NoisePolicy::classify_path(path, None), NoiseClass::Vendor)
+}
+
+/// Returns true when `path` is personal-tooling sidecar content under
+/// `.claude/gsd-*` or `.claude/get-shit-done/`. Excludes shared agent
+/// infrastructure like `.claude/CLAUDE.md`, `.claude/commands/`,
+/// `.claude/skills/`, `.claude/hooks/`, `.claude/agents/`.
+// Wired into search_text / explore output filtering in Task 2.2.
+#[allow(dead_code)]
+pub(crate) fn is_personal_tooling_path(path: &str) -> bool {
+    let lower = path.replace('\\', "/").to_ascii_lowercase();
+    lower.starts_with(".claude/gsd-") || lower.starts_with(".claude/get-shit-done/")
 }
 
 fn normalize_path_query(raw: &str) -> String {
@@ -5781,6 +5801,69 @@ public class PacketsController {
             !is_filtered_name("Object", &LanguageId::Rust),
             "TypeScript built-ins must not hide Rust type names"
         );
+    }
+
+    // --- is_vendor_path / is_personal_tooling_path (unit coverage) ---
+
+    #[test]
+    fn test_is_vendor_path_matches_vendor_dirs() {
+        use super::is_vendor_path;
+        assert!(is_vendor_path("vendor/tree-sitter-scss/src/parser.c"));
+        assert!(is_vendor_path("third_party/foo/bar.rs"));
+        assert!(is_vendor_path("node_modules/react/index.js"));
+        assert!(!is_vendor_path("src/parsing/mod.rs"));
+        assert!(!is_vendor_path("tests/vendor_smoke.rs")); // basename, not directory
+    }
+
+    #[test]
+    fn test_is_personal_tooling_path_matches_claude_dirs() {
+        use super::is_personal_tooling_path;
+        assert!(is_personal_tooling_path(".claude/gsd-local-patches/foo.md"));
+        assert!(is_personal_tooling_path(".claude/get-shit-done/bar.sh"));
+        assert!(!is_personal_tooling_path(".claude/CLAUDE.md")); // root-level claude config
+        assert!(!is_personal_tooling_path("src/lib.rs"));
+    }
+
+    #[test]
+    fn test_is_vendor_path_matches_extended_components() {
+        use super::is_vendor_path;
+        // Option B delegates to NoisePolicy::classify_path which catches the
+        // full 9-component set, not just plan's 4. Prove that here.
+        assert!(is_vendor_path(".venv/lib/python3.11/site.py"));
+        assert!(is_vendor_path("venv/lib/python3.11/site.py"));
+        assert!(is_vendor_path("project/site-packages/foo.py"));
+        assert!(is_vendor_path("ios/Pods/AFNetworking/foo.m"));
+        assert!(is_vendor_path("frontend/bower_components/jquery/jquery.js"));
+    }
+
+    #[test]
+    fn test_is_vendor_path_case_insensitive() {
+        use super::is_vendor_path;
+        assert!(is_vendor_path("Vendor/Foo.rs"));
+        assert!(is_vendor_path("NODE_MODULES/react/index.js"));
+    }
+
+    #[test]
+    fn test_is_vendor_path_windows_separator() {
+        use super::is_vendor_path;
+        assert!(is_vendor_path("vendor\\foo\\bar.rs"));
+        assert!(is_vendor_path("project\\node_modules\\react\\index.js"));
+    }
+
+    #[test]
+    fn test_is_personal_tooling_path_matches_gsd_variant() {
+        use super::is_personal_tooling_path;
+        assert!(is_personal_tooling_path(".claude/gsd-something-new/x.md"));
+        assert!(is_personal_tooling_path(".claude/gsd-anything/nested/file.sh"));
+    }
+
+    #[test]
+    fn test_is_personal_tooling_path_excludes_claude_commands() {
+        use super::is_personal_tooling_path;
+        assert!(!is_personal_tooling_path(".claude/commands/foo.sh"));
+        assert!(!is_personal_tooling_path(".claude/skills/x/SKILL.md"));
+        assert!(!is_personal_tooling_path(".claude/hooks/run.py"));
+        assert!(!is_personal_tooling_path(".claude/agents/explore.md"));
     }
 
     #[test]
