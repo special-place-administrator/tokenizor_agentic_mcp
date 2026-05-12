@@ -111,10 +111,28 @@ fn reload_cross_root_preserves_file_count() {
         });
 
         tokio::time::sleep(Duration::from_millis(1_300)).await;
+        let stale_generation = shared.current_project_generation();
         shared.reload(project_b.path()).expect("reload project b");
+
+        let slipped_paths: Vec<String> = {
+            let index = shared.read();
+            index.all_files().map(|(path, _)| path.clone()).collect()
+        };
+        assert_eq!(
+            slipped_paths.len(),
+            30,
+            "slipped doomed task should have read project B's path set"
+        );
 
         old_stop.store(true, Ordering::Release);
         old_task.abort();
+
+        for path in &slipped_paths {
+            assert!(
+                !shared.remove_file_at_generation(path, stale_generation),
+                "stale-generation remove should be rejected for slipped path: {path}"
+            );
+        }
 
         let new_stop = Arc::new(AtomicBool::new(false));
         let new_task = spawn_watcher_task(

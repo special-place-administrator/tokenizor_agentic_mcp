@@ -9,7 +9,7 @@ use notify::{EventKind, RecommendedWatcher as NotifyRecommendedWatcher, Recursiv
 use notify_debouncer_full::{
     DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer,
 };
-use tracing::{debug, error, warn};
+use tracing::{debug, error, trace, warn};
 
 use crate::domain::{FileClassification, LanguageId};
 use crate::live_index::store::{IndexedFile, SharedIndex};
@@ -149,6 +149,8 @@ pub(crate) enum ReindexResult {
     HashSkip,
     /// File was re-parsed and the index was updated.
     Reindexed,
+    /// ENOENT observed by `read_and_index`; caller decides whether to retry or treat as confirmed-absent.
+    NotFound,
     /// File was not found (ENOENT) — it has been removed from the index.
     Removed,
     /// File could not be read for a reason other than ENOENT.
@@ -219,26 +221,69 @@ pub(crate) fn maybe_reindex(
     abs_path: &Path,
     shared: &SharedIndex,
     language: LanguageId,
+    expected_gen: u64,
+) -> ReindexResult {
+    match read_and_index(
+        relative_path,
+        abs_path,
+        shared,
+        language.clone(),
+        expected_gen,
+    ) {
+        ReindexResult::NotFound => {}
+        other => return other,
+    }
+
+    let delays_ms = [50u64, 200, 500];
+    for delay_ms in delays_ms {
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        match read_and_index(
+            relative_path,
+            abs_path,
+            shared,
+            language.clone(),
+            expected_gen,
+        ) {
+            ReindexResult::NotFound => continue,
+            other => return other,
+        }
+    }
+
+    if shared.remove_file_at_generation(relative_path, expected_gen) {
+        warn!("watcher: file not found after retries, removed from index: {relative_path}");
+    } else {
+        trace!(
+            "watcher: file not found after retries, stale generation rejected remove: {relative_path}"
+        );
+    }
+    ReindexResult::Removed
+}
+
+fn read_and_index(
+    relative_path: &str,
+    abs_path: &Path,
+    shared: &SharedIndex,
+    language: LanguageId,
+    expected_gen: u64,
 ) -> ReindexResult {
     // 1. Read mtime BEFORE content to avoid TOCTOU: if the file is written
     //    between stat and read, we get an mtime that is older-or-equal to the
     //    content we actually parsed, so a future watcher event will correctly
     //    detect staleness. The reverse order (read then stat) can record a
     //    newer mtime paired with older content, permanently hiding the change.
-    let mtime_secs = std::fs::metadata(abs_path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let mtime_secs = match std::fs::metadata(abs_path) {
+        Ok(metadata) => metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ReindexResult::NotFound,
+        Err(_) => 0,
+    };
     let bytes = match std::fs::read(abs_path) {
         Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // ENOENT → treat as removal
-            shared.remove_file(relative_path);
-            warn!("watcher: file not found, removed from index: {relative_path}");
-            return ReindexResult::Removed;
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ReindexResult::NotFound,
         Err(e) => {
             warn!("watcher: failed to read {relative_path}: {e}");
             return ReindexResult::ReadError(e.to_string());
@@ -259,7 +304,7 @@ pub(crate) fn maybe_reindex(
             let needs_mtime_touch = existing.mtime_secs != mtime_secs && mtime_secs != 0;
             drop(index); // release read lock before potential write
             if needs_mtime_touch {
-                shared.touch_mtime(relative_path, mtime_secs);
+                shared.touch_mtime_at_generation(relative_path, mtime_secs, expected_gen);
             }
             debug!("watcher: hash-skip {relative_path}");
             return ReindexResult::HashSkip;
@@ -277,7 +322,7 @@ pub(crate) fn maybe_reindex(
     let indexed = IndexedFile::from_parse_result(result, bytes).with_mtime(mtime_secs);
 
     // 4. Acquire write lock and update
-    shared.update_file(relative_path.to_string(), indexed);
+    shared.update_file_at_generation(relative_path, indexed, expected_gen);
 
     debug!("watcher: re-indexed {relative_path}");
     ReindexResult::Reindexed
@@ -295,6 +340,16 @@ pub(crate) fn freshen_file_if_stale(
     relative_path: &str,
     abs_path: &Path,
     shared: &SharedIndex,
+) -> bool {
+    let expected_gen = shared.current_project_generation();
+    freshen_file_if_stale_at_generation(relative_path, abs_path, shared, expected_gen)
+}
+
+fn freshen_file_if_stale_at_generation(
+    relative_path: &str,
+    abs_path: &Path,
+    shared: &SharedIndex,
+    expected_gen: u64,
 ) -> bool {
     // 1. Stat the file on disk
     let disk_mtime = std::fs::metadata(abs_path)
@@ -327,7 +382,7 @@ pub(crate) fn freshen_file_if_stale(
     };
 
     debug!("freshness guard: stale file detected, re-indexing {relative_path}");
-    maybe_reindex(relative_path, abs_path, shared, language);
+    maybe_reindex(relative_path, abs_path, shared, language, expected_gen);
     true
 }
 
@@ -339,6 +394,7 @@ pub(crate) fn reconcile_stale_files_with_stop(
     repo_root: &Path,
     shared: &SharedIndex,
     should_stop: impl Fn() -> bool,
+    expected_gen: u64,
 ) -> usize {
     let paths: Vec<String> = {
         let index = shared.read();
@@ -351,7 +407,7 @@ pub(crate) fn reconcile_stale_files_with_stop(
             break;
         }
         let abs_path = repo_root.join(relative_path);
-        if freshen_file_if_stale(relative_path, &abs_path, shared) {
+        if freshen_file_if_stale_at_generation(relative_path, &abs_path, shared, expected_gen) {
             stale_count += 1;
         }
     }
@@ -390,7 +446,8 @@ pub(crate) fn reconcile_stale_files_with_stop(
 }
 
 pub(crate) fn reconcile_stale_files(repo_root: &Path, shared: &SharedIndex) -> usize {
-    reconcile_stale_files_with_stop(repo_root, shared, || false)
+    let expected_gen = shared.current_project_generation();
+    reconcile_stale_files_with_stop(repo_root, shared, || false, expected_gen)
 }
 
 // ---------------------------------------------------------------------------
@@ -445,6 +502,7 @@ pub(crate) fn process_events(
     burst_trackers: &mut HashMap<PathBuf, BurstTracker>,
     watcher_info: &Arc<Mutex<WatcherInfo>>,
     should_stop: &dyn Fn() -> bool,
+    expected_gen: u64,
 ) {
     for event in events {
         if should_stop() {
@@ -472,7 +530,7 @@ pub(crate) fn process_events(
 
             match event.kind {
                 EventKind::Remove(_) => {
-                    shared.remove_file(&relative_path);
+                    shared.remove_file_at_generation(&relative_path, expected_gen);
 
                     let mut info = watcher_info.lock();
                     info.events_processed += 1;
@@ -485,7 +543,7 @@ pub(crate) fn process_events(
                     tracker.update(now);
                     let debounce_ms = tracker.effective_debounce_ms();
 
-                    maybe_reindex(&relative_path, abs_path, shared, language);
+                    maybe_reindex(&relative_path, abs_path, shared, language, expected_gen);
 
                     let mut info = watcher_info.lock();
                     info.events_processed += 1;
@@ -518,6 +576,7 @@ pub async fn run_watcher_with_stop(
     watcher_info: Arc<Mutex<WatcherInfo>>,
     stop_token: Arc<AtomicBool>,
 ) {
+    let expected_gen = shared.current_project_generation();
     if stop_token.load(Ordering::Acquire) {
         let mut info = watcher_info.lock();
         info.state = WatcherState::Off;
@@ -594,11 +653,14 @@ pub async fn run_watcher_with_stop(
                         let root_clone = repo_root.clone();
                         let watcher_info_clone = watcher_info.clone();
                         let stop_for_reconcile = Arc::clone(&stop_token);
+                        let expected_gen_for_reconcile = expected_gen;
                         tokio::task::spawn_blocking(move || {
-                            let stale =
-                                reconcile_stale_files_with_stop(&root_clone, &shared_clone, || {
-                                    stop_for_reconcile.load(Ordering::Acquire)
-                                });
+                            let stale = reconcile_stale_files_with_stop(
+                                &root_clone,
+                                &shared_clone,
+                                || stop_for_reconcile.load(Ordering::Acquire),
+                                expected_gen_for_reconcile,
+                            );
                             if stop_for_reconcile.load(Ordering::Acquire) {
                                 return;
                             }
@@ -632,6 +694,7 @@ pub async fn run_watcher_with_stop(
                             let root_clone = repo_root.clone();
                             let watcher_info_clone = watcher_info.clone();
                             let stop_for_events = Arc::clone(&stop_token);
+                            let expected_gen_for_events = expected_gen;
                             let mut trackers = std::mem::take(&mut burst_trackers);
                             match tokio::task::spawn_blocking(move || {
                                 process_events(
@@ -641,6 +704,7 @@ pub async fn run_watcher_with_stop(
                                     &mut trackers,
                                     &watcher_info_clone,
                                     &|| stop_for_events.load(Ordering::Acquire),
+                                    expected_gen_for_events,
                                 );
                                 trackers
                             })
@@ -675,11 +739,13 @@ pub async fn run_watcher_with_stop(
                                 let root_clone = repo_root.clone();
                                 let watcher_info_clone = watcher_info.clone();
                                 let stop_for_reconcile = Arc::clone(&stop_token);
+                                let expected_gen_for_reconcile = expected_gen;
                                 tokio::task::spawn_blocking(move || {
                                     let stale = reconcile_stale_files_with_stop(
                                         &root_clone,
                                         &shared_clone,
                                         || stop_for_reconcile.load(Ordering::Acquire),
+                                        expected_gen_for_reconcile,
                                     );
                                     if stop_for_reconcile.load(Ordering::Acquire) {
                                         return;
@@ -765,6 +831,7 @@ pub fn restart_watcher(
 mod tests {
     use super::*;
     use std::time::Duration;
+    use tempfile::TempDir;
 
     // --- BurstTracker tests from Plan 01 (preserved) ---
 
@@ -1019,7 +1086,8 @@ mod tests {
         std::fs::write(&rs_path, updated_content).unwrap();
 
         // maybe_reindex detects a hash change and re-parses.
-        let result = maybe_reindex(rel_path, &rs_path, &shared, LanguageId::Rust);
+        let expected_gen = shared.current_project_generation();
+        let result = maybe_reindex(rel_path, &rs_path, &shared, LanguageId::Rust, expected_gen);
         assert_eq!(
             result,
             ReindexResult::Reindexed,
@@ -1084,11 +1152,107 @@ mod tests {
         };
 
         // File content unchanged — expect HashSkip.
-        let result = maybe_reindex(rel_path, &rs_path, &shared, LanguageId::Rust);
+        let expected_gen = shared.current_project_generation();
+        let result = maybe_reindex(rel_path, &rs_path, &shared, LanguageId::Rust, expected_gen);
         assert_eq!(
             result,
             ReindexResult::HashSkip,
             "unchanged content should produce HashSkip"
+        );
+    }
+
+    #[test]
+    fn test_maybe_reindex_retries_transient_not_found() {
+        let tmp = TempDir::new().unwrap();
+        let src_dir = tmp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let rel_path = "src/flaky.rs";
+        let abs_path = tmp.path().join(rel_path);
+        let content = b"fn flaky() -> usize { 1 }";
+        std::fs::write(&abs_path, content).unwrap();
+
+        let shared = crate::live_index::LiveIndex::load(tmp.path()).unwrap();
+        let expected_gen = shared.current_project_generation();
+        std::fs::remove_file(&abs_path).unwrap();
+
+        let restore_path = abs_path.clone();
+        let restore = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::fs::write(&restore_path, content).unwrap();
+        });
+
+        let result = maybe_reindex(rel_path, &abs_path, &shared, LanguageId::Rust, expected_gen);
+        restore.join().unwrap();
+
+        assert_ne!(
+            result,
+            ReindexResult::Removed,
+            "transient NotFound should be retried instead of removed immediately"
+        );
+        let index = shared.read();
+        assert!(
+            index.get_file(rel_path).is_some(),
+            "transiently missing file should remain indexed after retry succeeds"
+        );
+    }
+
+    #[test]
+    fn test_maybe_reindex_removes_persistent_not_found() {
+        let tmp = TempDir::new().unwrap();
+        let src_dir = tmp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let rel_path = "src/deleted.rs";
+        let abs_path = tmp.path().join(rel_path);
+        std::fs::write(&abs_path, b"fn deleted() {}").unwrap();
+
+        let shared = crate::live_index::LiveIndex::load(tmp.path()).unwrap();
+        let expected_gen = shared.current_project_generation();
+        std::fs::remove_file(&abs_path).unwrap();
+
+        let result = maybe_reindex(rel_path, &abs_path, &shared, LanguageId::Rust, expected_gen);
+
+        assert_eq!(
+            result,
+            ReindexResult::Removed,
+            "persistent NotFound should remove after bounded retries"
+        );
+        let index = shared.read();
+        assert!(
+            index.get_file(rel_path).is_none(),
+            "persistently missing file should be removed from the index"
+        );
+    }
+
+    #[test]
+    fn slipped_past_cancellation_fence_increments_counter() {
+        let project_a = TempDir::new().unwrap();
+        let project_b = TempDir::new().unwrap();
+        let a_src = project_a.path().join("src");
+        let b_src = project_b.path().join("src");
+        std::fs::create_dir_all(&a_src).unwrap();
+        std::fs::create_dir_all(&b_src).unwrap();
+        std::fs::write(a_src.join("a.rs"), b"fn a() {}").unwrap();
+        std::fs::write(b_src.join("b.rs"), b"fn b() {}").unwrap();
+
+        let shared = crate::live_index::LiveIndex::load(project_a.path()).unwrap();
+        let stale_gen = shared.current_project_generation();
+        let rejected_before = shared.current_rejected_stale_mutations();
+        shared.reload(project_b.path()).unwrap();
+
+        let stale = reconcile_stale_files_with_stop(project_a.path(), &shared, || false, stale_gen);
+
+        assert_eq!(
+            stale, 1,
+            "stale doomed reconcile should visit B's path once"
+        );
+        assert!(
+            shared.current_rejected_stale_mutations() > rejected_before,
+            "stale-generation watcher reconcile should be rejected by the fence"
+        );
+        let index = shared.read();
+        assert!(
+            index.get_file("src/b.rs").is_some(),
+            "B file should survive stale-generation reconcile"
         );
     }
 }
