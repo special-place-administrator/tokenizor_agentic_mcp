@@ -12,8 +12,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use tracing::debug;
+use tracing::{debug, trace};
 
+use crate::live_index::store::SharedIndex;
 use super::{CouplingStore, WalkerConfig, apply_head_delta, cold_build};
 
 pub const COUPLING_FLAG_ENV: &str = "SYMFORGE_COUPLING";
@@ -104,7 +105,16 @@ pub fn init_coupling_store(project_root: &Path) {
 /// branch via `tokio::task::spawn_blocking`. Runs entirely on the calling
 /// thread — no further spawn. Silently no-ops on flag-off, non-git project,
 /// or contested guard.
-pub fn refresh_on_reconcile_tick(project_root: &Path) {
+pub fn refresh_on_reconcile_tick(project_root: &Path, expected_gen: u64, shared: &SharedIndex) {
+    let current_gen = shared.current_project_generation();
+    if current_gen != expected_gen {
+        shared.note_rejected_stale_mutation();
+        trace!(
+            "coupling: pre-flight gen-check rejected; expected={expected_gen} current={current_gen}; not refreshing"
+        );
+        return;
+    }
+
     if !flag_on() {
         return;
     }
@@ -253,8 +263,10 @@ mod tests {
         clear_flag();
         let tmp = TempDir::new().unwrap();
         init_repo_with_root_commit(tmp.path());
+        let shared = crate::live_index::LiveIndex::empty();
+        let expected_gen = shared.current_project_generation();
 
-        refresh_on_reconcile_tick(tmp.path());
+        refresh_on_reconcile_tick(tmp.path(), expected_gen, &shared);
 
         let db_path = tmp.path().join(crate::paths::SYMFORGE_COUPLING_DB_PATH);
         assert!(
@@ -396,8 +408,10 @@ mod tests {
             .unwrap()
             .last_reference_ts()
             .unwrap();
+        let shared = crate::live_index::LiveIndex::empty();
+        let expected_gen = shared.current_project_generation();
 
-        refresh_on_reconcile_tick(tmp.path());
+        refresh_on_reconcile_tick(tmp.path(), expected_gen, &shared);
 
         let lrt_after = CouplingStore::open(&db_path)
             .unwrap()
@@ -422,8 +436,10 @@ mod tests {
         run_init(&db_path, tmp.path()).expect("seed");
         let head_b = add_commit(tmp.path(), "b", &[("z.txt", "z"), ("w.txt", "w")]);
         assert_ne!(head_a, head_b);
+        let shared = crate::live_index::LiveIndex::empty();
+        let expected_gen = shared.current_project_generation();
 
-        refresh_on_reconcile_tick(tmp.path());
+        refresh_on_reconcile_tick(tmp.path(), expected_gen, &shared);
 
         let s = CouplingStore::open(&db_path).unwrap();
         assert_eq!(
@@ -455,8 +471,10 @@ mod tests {
         // Take the workspace guard.
         let guard = guard_for(tmp.path());
         let _hold = try_acquire(guard).expect("test must win the guard");
+        let shared = crate::live_index::LiveIndex::empty();
+        let expected_gen = shared.current_project_generation();
 
-        refresh_on_reconcile_tick(tmp.path());
+        refresh_on_reconcile_tick(tmp.path(), expected_gen, &shared);
 
         let s = CouplingStore::open(&db_path).unwrap();
         assert_eq!(
@@ -467,7 +485,7 @@ mod tests {
         drop(_hold);
 
         // Sanity: once released, the tick advances.
-        refresh_on_reconcile_tick(tmp.path());
+        refresh_on_reconcile_tick(tmp.path(), expected_gen, &shared);
         let s = CouplingStore::open(&db_path).unwrap();
         assert_eq!(
             s.last_head().unwrap().as_deref(),

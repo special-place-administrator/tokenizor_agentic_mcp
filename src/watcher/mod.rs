@@ -709,12 +709,16 @@ pub async fn run_watcher_with_stop(
                         // per-workspace guard against concurrent refreshes.
                         let root_for_coupling = repo_root.clone();
                         let stop_for_coupling = Arc::clone(&stop_token);
+                        let expected_gen_for_coupling = expected_gen;
+                        let shared_for_coupling = shared.clone();
                         tokio::task::spawn_blocking(move || {
                             if stop_for_coupling.load(Ordering::Acquire) {
                                 return;
                             }
                             crate::live_index::coupling::refresh_on_reconcile_tick(
                                 &root_for_coupling,
+                                expected_gen_for_coupling,
+                                &shared_for_coupling,
                             );
                         });
                         last_reconcile = Instant::now();

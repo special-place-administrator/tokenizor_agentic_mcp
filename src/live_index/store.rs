@@ -523,8 +523,13 @@ impl SharedIndexHandle {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn current_rejected_stale_mutations(&self) -> u64 {
+    pub fn current_rejected_stale_mutations(&self) -> u64 {
         self.rejected_stale_mutations.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn note_rejected_stale_mutation(&self) {
+        self.rejected_stale_mutations
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn reload(&self, root: &Path) -> anyhow::Result<()> {

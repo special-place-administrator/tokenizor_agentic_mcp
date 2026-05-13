@@ -609,52 +609,73 @@ Closes the matrix-row-5 obligation surfaced by round-2 review's
 
 ---
 
-## Task H.1f: Best-effort pre-flight generation check for coupling_refresh (REDESIGNED 2026-05-12 round-3 verification)
+## Task H.1f: Best-effort pre-flight generation check for coupling_refresh (REDESIGNED 2026-05-12 round-3 verification; round-3.5 patched 2026-05-13 after CODEX2 dispatch defect + adversarial review)
 
-**Severity:** P2 (round-2 3-persona convergence on coupling-refresh row issues + round-3 feasibility verification showing original commit-boundary fence design infeasible). Round-3 source verification revealed that `refresh_on_reconcile_tick` (a) lives in `src/live_index/coupling/lifecycle.rs`, not `mod.rs`; (b) has signature `pub fn refresh_on_reconcile_tick(project_root: &Path)` with no `SharedIndexHandle` reference; (c) delegates to `run_init` → `cold_build`/`apply_head_delta` which stream writes throughout the walk rather than committing at a single boundary. The original H.1f design (commit-boundary fence) is infeasible without rewriting the CouplingStore API. **REDESIGNED to a best-effort pre-flight generation check** at task entry — catches the doomed-just-spawned case but accepts mid-walk reload corruption as a known residual exposure (annoying not catastrophic, per item 13 severity analysis). Lands in C-1 bucket after H.1a closes; parallel to H.1b/c/d/e.
+**Severity:** P2. Round-2 3-persona convergence on coupling-refresh row issues. Round-3 feasibility verification killed the original commit-boundary fence design (CouplingStore writes are streamed throughout the walk, no batch commit point). Round-3.5 (this version) corrects spec defects surfaced by a failed CODEX2 dispatch + two adversarial reviewers: (i) no exposed counter-increment accessor for `rejected_stale_mutations`; (ii) stale spawn-site line refs (569-575 is pre-H.1c; real site is 706-719); (iii) "mid-walk corruption" framing was imprecise — ground-truth: db is per-workspace path, doomed task writes to A's own db harmlessly while B's new tick writes to B's own db independently; the "residual" is wasted CPU completing a walk against a dormant workspace, not data corruption.
+
+Severity remains P2: COUPLING flag (`SYMFORGE_COUPLING`) is opt-in default-off through Phase 3 deployment. If/when the flag flips default-on, re-evaluate severity at that gate.
+
+Lands in C-1 bucket after H.1a closes; parallel to H.1b/c/d/e.
 
 **Files (allowed):**
 
-- Modify: `src/live_index/coupling/lifecycle.rs` — `refresh_on_reconcile_tick` accepts `expected_gen: u64` and `shared: &SharedIndex` parameters; performs a pre-flight gen-check at function entry; if mismatch, increment `rejected_stale_mutations` via H.1a counter accessor, log trace-only, return early without touching disk.
-- Modify: `src/live_index/coupling/mod.rs` — only if the new public signature requires a re-export update.
-- Modify: `src/watcher/mod.rs:569-575` spawn site — capture `expected_gen = shared.current_project_generation()` at spawn time; pass `expected_gen` + `shared.clone()` into the spawn closure. (Small overlap with H.1c's `src/watcher/mod.rs` scope — coordinate ordering so H.1f lands after or alongside H.1c.)
-- Create: `tests/coupling_refresh_generation_fence.rs` — deterministic generation-fence tests for the pre-flight check.
-- Forbidden: `src/live_index/store.rs`, `src/daemon.rs`, `src/protocol/tools.rs`, sidecar files, and any deep CouplingStore-internal files (`run_init`, `cold_build`, `apply_head_delta` bodies — those would require rewriting the streamed-write semantics out of scope for Phase H).
+- Modify: `src/live_index/coupling/lifecycle.rs` — `refresh_on_reconcile_tick` accepts `expected_gen: u64` and `shared: &SharedIndex` parameters; performs a pre-flight gen-check at function entry (BEFORE the `flag_on()` and `is_git_repo()` short-circuits at lines 108-113, so counter telemetry fires on doomed tasks regardless of repo state); if mismatch, calls the new `shared.note_rejected_stale_mutation()` method, logs `tracing::trace!` only (extend the existing `use tracing::debug;` import to `use tracing::{debug, trace};`), returns early without touching disk. Update all 5 in-crate test call sites (lines 257, 400, 426, 459, 470 — note 470 is the SECOND call inside `guard_skips_tick_when_held`) to construct a minimal `SharedIndex` via `Arc::new(SharedIndexHandle::new_for_test(...))` and pass dummy steady-state gen.
+- Modify: `src/live_index/coupling/mod.rs` — only if the new signature requires a re-export update (signature change alone usually does not break `pub use` at line 14; verify and adjust if needed).
+- Modify: `src/watcher/mod.rs:706-719` spawn site ONLY — at the inner reconcile branch's coupling-refresh `spawn_blocking` (existing local bindings: `root_for_coupling` at line 710, `stop_for_coupling` at line 711). Add `let expected_gen_for_coupling = expected_gen;` (REUSE the outer-scope `expected_gen` already captured at watcher line ~614 / passed as `expected_gen_for_reconcile` at line 691 — do NOT re-sample `shared.current_project_generation()` inside or near the coupling closure; re-sampling defeats the fence) and `let shared_for_coupling = shared.clone();` BEFORE the spawn closure at line 712. Pass both into the `refresh_on_reconcile_tick(...)` invocation at line 716-718. NO other watcher/mod.rs changes — H.1b/c/d territory closed.
+- Modify: `src/live_index/store.rs` — SURGICAL CARVE-OUT, ONLY for: (1) add new `pub(crate) fn note_rejected_stale_mutation(&self)` method on `SharedIndexHandle` that calls `self.rejected_stale_mutations.fetch_add(1, Ordering::Relaxed)` (mirror the internal increment at line 596/676/753); (2) bump `current_rejected_stale_mutations` from `pub(crate)` to `pub` (line 525-527) so the integration test in `tests/` can read it. NO other store.rs changes permitted; treat the rest of the file as forbidden.
+- Create: `tests/coupling_refresh_generation_fence.rs` — deterministic generation-fence tests for the pre-flight check. Mirror the unit-test scaffold pattern from `src/live_index/store.rs:1976 rejected_stale_mutations_counter_increments_on_fence_rejection`: construct a real `SharedIndex` via `LiveIndex::empty()` or the test helper used by H.1a's counter test; bump `project_generation` directly via the existing test helper rather than spinning up a real watcher. Init `root_a` and `root_b` as real git repos with `init_repo_with_root_commit`-style helpers; set `SYMFORGE_COUPLING=1` for the test scope (note: tests/ is an external crate so it does NOT share the in-crate `COUPLING_ENV_LOCK`; document this and either run this test serially via project-wide `--test-threads=1` policy or use a unique env-var manipulation guard).
+- Forbidden: `src/daemon.rs`, `src/protocol/tools.rs`, sidecar files, and deep CouplingStore-internal files (`run_init`, `cold_build`, `apply_head_delta` bodies — those would require rewriting streamed-write semantics out of scope for Phase H). Within `src/live_index/store.rs`, the rest of the file outside the two named surgical edits is forbidden.
 
-**Context:** Coupling refresh is invoked from the periodic reconcile tick via fire-and-forget `spawn_blocking` at `src/watcher/mod.rs:569-575`. The closure body (`refresh_on_reconcile_tick` in `coupling/lifecycle.rs:107-126`) walks git delta data and writes results to a workspace-scoped store via `run_init`, potentially taking seconds for a busy repo. Round-3 verification confirmed writes are streamed throughout the walk — there is no batch commit point to gate.
+**Context:** Coupling refresh is invoked from the periodic reconcile tick via fire-and-forget `spawn_blocking` at `src/watcher/mod.rs:706-719` (post-H.1c shape; the pre-H.1c line range 569-575 in earlier plan-doc drafts is stale). The closure body (`refresh_on_reconcile_tick` in `coupling/lifecycle.rs:107-126`) walks git delta data via `run_init` → `cold_build`/`apply_head_delta` (in `walker.rs:88, :129`) and writes results to a **per-workspace** SQLite store at `project_root.join(SYMFORGE_COUPLING_DB_PATH)` (lifecycle.rs:120). Per-workspace db means: a doomed task spawned with `root_for_coupling = A` opens A's db on disk, walks A's git data, and writes A-era data to A's db. B's new tick opens B's db (different path) and writes B-era data there. NO cross-workspace contamination occurs at the file-system level; the guard at lifecycle.rs:115-118 is per-`project_root` so inter-root tasks do not block each other. Round-3 verification confirmed writes are streamed throughout the walk — there is no batch commit point to gate.
 
 **Failure-mode coverage achieved by the redesigned H.1f:**
-- **Doomed-just-spawned**: a refresh task that hasn't yet started its walk when `reload(B)` fires — pre-flight check at task entry detects the gen mismatch and aborts immediately without writing anything. ✓ Covered.
-- **Mid-walk reload corruption**: a refresh task already partway through `run_init` when `reload(B)` fires — writes continue with A-era data until walk completes. ✗ **Accepted residual**. Corruption is annoying (one tick of stale coupling data until the next reconcile re-runs), not catastrophic (file index unaffected). Lesser severity than B-P0-1's destruction.
+- **Doomed-just-spawned**: a refresh task that hasn't yet started its walk when `reload(B)` fires — pre-flight check at task entry detects the gen mismatch and aborts immediately without touching disk. The new `note_rejected_stale_mutation()` increment makes the rejection observable in health output. ✓ Covered.
+- **Mid-walk doomed completion**: a refresh task already partway through `run_init` when `reload(B)` fires — the task continues writing A-era data to **A's per-workspace db** until walk completes. No cross-contamination with B's db. The doomed completion is wasted CPU + dormant-result-on-disk under A's path, not data corruption. If the user later revisits root A, A's db reflects A's HEAD at the time of the doomed walk (correct A-era data — the walk was honest, just unnecessary). ✗ **Accepted residual**. Severity rationale: wasted CPU on a workspace the user moved away from is annoying, not unsafe. Lesser severity than B-P0-1's destruction.
 
-Severity rationale (revised): the original "fence at commit boundary" design would have covered both failure modes but is infeasible without API rewrite. The redesigned pre-flight covers the more common doomed-just-spawned case at low complexity. Mid-walk corruption is documented residual exposure.
+Severity rationale (revised round-3.5): the original "fence at commit boundary" design would have ALSO covered the doomed-just-spawned case but is infeasible without API rewrite. The redesigned pre-flight covers doomed-just-spawned at low complexity. Mid-walk doomed-completion is documented as wasted-CPU residual.
+
+**Telemetry attribution non-goal:** `SharedIndexHandle::rejected_stale_mutations` is a single shared counter incremented by all fence surfaces (H.1a indexed-file writes, H.1a mtime touches, H.1e git_temporal, this H.1f coupling). Per-surface attribution is OUT OF SCOPE for H.1f. The per-surface signal is the trace-only log message (`coupling: pre-flight gen-check rejected; ...`). If per-surface counters are needed later, that's a separate task; do not bloat H.1f scope.
 
 **Spec:**
 
-- **objective:** `refresh_on_reconcile_tick(project_root, expected_gen, shared)` performs a pre-flight `shared.current_project_generation() == expected_gen` check at function entry. On mismatch: increment `rejected_stale_mutations` (H.1a telemetry), log trace-only, return without touching disk. On match: proceed with existing `run_init` body unchanged. A doomed coupling-refresh task that hasn't started its walk yet aborts before any disk work; a doomed task already in `run_init` continues to completion (accepted residual).
-- **non_goals:** No change to `run_init`, `cold_build`, `apply_head_delta`, or `CouplingStore` internals. No per-write fence inside the streamed walk. No CouplingStore API rewrite. No CancellationToken integration at the coupling layer (Layer 1 = pre-flight check, Layer 2 = pre-flight check, Layer 3 = not applicable).
+- **objective:** `refresh_on_reconcile_tick(project_root, expected_gen, shared)` performs a pre-flight `shared.current_project_generation() == expected_gen` check at function entry, BEFORE the `flag_on()` and `is_git_repo()` short-circuits. On mismatch: call `shared.note_rejected_stale_mutation()`, log `trace!` only, return without touching disk. On match: proceed with existing flag/git/guard short-circuits then `run_init` body unchanged. A doomed coupling-refresh task that hasn't started its walk yet aborts before any disk work; a doomed task already in `run_init` continues to completion on its own per-workspace db (accepted wasted-CPU residual).
+- **non_goals:** No change to `run_init`, `cold_build`, `apply_head_delta`, or `CouplingStore` internals. No per-write fence inside the streamed walk. No CouplingStore API rewrite. No CancellationToken integration at the coupling layer (Layer 1 = pre-flight check, Layer 2 = pre-flight check, Layer 3 = not applicable). No per-surface telemetry attribution.
 - **allowed_files:** as listed.
 - **forbidden_files:** as listed.
-- **interfaces touched:** `refresh_on_reconcile_tick` signature gains `expected_gen: u64` and `shared: &SharedIndex` parameters. Spawn site at `src/watcher/mod.rs:569-575` captures and passes both.
-- **invariants:** Pre-flight check increments `SharedIndexHandle::rejected_stale_mutations` (telemetry from H.1a round-2 walk item 12) on rejection so the doomed-task rejection is observable in health output. Existing coupling-store consumers see no change in API. The mid-walk residual is documented in matrix row 2.
+- **interfaces touched:** `refresh_on_reconcile_tick` signature gains `expected_gen: u64` and `shared: &SharedIndex` parameters. `SharedIndexHandle` gains 1 new `pub(crate) fn note_rejected_stale_mutation(&self)` method. `current_rejected_stale_mutations` getter visibility goes `pub(crate)` → `pub`. Spawn site at `src/watcher/mod.rs:706-719` captures and passes both new arguments using H.1c's already-captured `expected_gen`.
+- **invariants:** Pre-flight check calls `shared.note_rejected_stale_mutation()` on rejection so the doomed-task rejection increments the shared `rejected_stale_mutations` counter (observable in health output, attribution via trace log only). Existing coupling-store consumers see no change in API. Per-workspace db isolation is preserved (no cross-contamination between A's and B's coupling dbs). The wasted-CPU residual is documented in matrix row 2.
 - **acceptance_criteria:**
   - [ ] `cargo check` clean.
-  - [ ] `cargo clippy -- -D warnings` clean.
-  - [ ] Test `coupling_refresh_generation_fence::stale_refresh_aborts_pre_flight` — capture `gen_a`, call `reload(root_b)` (bumps to `gen_b`), then invoke `refresh_on_reconcile_tick(root_a, gen_a, &shared)`; assert the function returns early without writing to disk; assert `current_rejected_stale_mutations()` incremented.
-  - [ ] Test `coupling_refresh_generation_fence::current_refresh_proceeds_normally` — under steady-state (no reload), assert refresh proceeds and writes to disk as expected.
-  - [ ] Existing coupling-store tests still pass.
-- **evidence_required:** `cargo test -p symforge --test coupling_refresh_generation_fence -- --test-threads=1` green; full test suite green.
-- **stop_conditions:** STOP if `refresh_on_reconcile_tick` cannot accept `&SharedIndex` (e.g., circular dependency between coupling and live_index modules). STOP if the deterministic stale-refresh test cannot be made reliable. STOP if H.1c hasn't landed yet — H.1c provides the `expected_gen` capture pattern in `run_watcher`; H.1f reuses it.
+  - [ ] `cargo clippy -- -D warnings` clean (note: `tracing::trace!` must be in scope — extend import).
+  - [ ] Test `coupling_refresh_generation_fence::stale_refresh_aborts_pre_flight` — bump `shared.project_generation` to simulate a reload; call `refresh_on_reconcile_tick(root_a, stale_gen, &shared)`; assert the function returns early (no disk write — coupling DB file at `root_a.join(SYMFORGE_COUPLING_DB_PATH)` does NOT exist post-call); assert `current_rejected_stale_mutations()` incremented by exactly 1.
+  - [ ] Test `coupling_refresh_generation_fence::current_refresh_proceeds_normally` — steady-state (no reload, `expected_gen == shared.current_project_generation()`); assert refresh proceeds and writes the coupling DB to disk (file exists at expected path). Requires `SYMFORGE_COUPLING=1` and a real git repo via `init_repo_with_root_commit`-style helper.
+  - [ ] Existing coupling-store tests still pass (all 5 in-crate `refresh_on_reconcile_tick` test call sites updated for new signature, semantics preserved).
+  - [ ] Existing H.1a counter test at `store.rs:1976` still passes (no regression on the `note_rejected_stale_mutation` increment path).
+- **evidence_required:** `cargo test -p symforge --test coupling_refresh_generation_fence -- --test-threads=1` green; full test suite green; clippy strict-warn green.
+- **stop_conditions:** STOP if `refresh_on_reconcile_tick` cannot accept `&SharedIndex` due to circular imports (unlikely: `coupling/` is a child module of `live_index/`; the import `use crate::live_index::store::SharedIndex` is safe). STOP if the deterministic stale-refresh test cannot be made reliable. STOP if any required edit falls outside the named allowed-files or outside the surgical scope within `src/live_index/store.rs`. STOP if `SharedIndexHandle::new_for_test` or equivalent test helper does not exist — surface for guidance rather than constructing a complex test scaffold ad-hoc.
 
 **Steps:**
 
 - [ ] **Step 1: Invoke `superpowers:test-driven-development`.**
-- [ ] **Step 2: Read** `src/live_index/coupling/lifecycle.rs:107-126` to confirm `refresh_on_reconcile_tick` shape; confirm no circular import issue with `crate::live_index::store::SharedIndex`.
-- [ ] **Step 3: Modify `refresh_on_reconcile_tick`** to accept `expected_gen: u64` and `shared: &SharedIndex`. At function entry (before any disk work), call `shared.current_project_generation()`; if `!= expected_gen`, increment counter via the H.1a accessor pattern, log trace-only `coupling: pre-flight gen-check rejected; expected={expected_gen} current={current}; not refreshing`, return.
-- [ ] **Step 4: Modify the spawn site at `src/watcher/mod.rs:569-575`** — capture `expected_gen = shared.current_project_generation()` and `shared_clone = shared.clone()` BEFORE the spawn closure; pass both into `refresh_on_reconcile_tick` invocation inside the closure.
-- [ ] **Step 5: Write the two acceptance tests.**
-- [ ] **Step 6: Run new test + full suite + clippy.**
-- [ ] **Step 7: HALT for review.** Produce verification report; await authorization to commit. **Note the accepted residual (mid-walk reload corruption)** explicitly in the commit message and acceptance verification so the limitation is captured in agentmemory for future contributors.
+- [ ] **Step 2: Read** `src/live_index/coupling/lifecycle.rs:107-126` (target function), `src/live_index/store.rs:444, :525-527, :596, :676, :753, :1976-1998` (counter field + getter + existing internal increment sites + H.1a counter test for scaffold), `src/watcher/mod.rs:614-720` (the post-H.1c run_watcher loop, including the `expected_gen` capture site and the coupling spawn at 706-719).
+- [ ] **Step 3a: In `src/live_index/store.rs`** — add `pub(crate) fn note_rejected_stale_mutation(&self)` method on `SharedIndexHandle` near the existing `current_rejected_stale_mutations` getter (~line 525-527). Body: `self.rejected_stale_mutations.fetch_add(1, Ordering::Relaxed);`. Bump the getter visibility from `pub(crate) fn current_rejected_stale_mutations` to `pub fn current_rejected_stale_mutations`. No other store.rs changes.
+- [ ] **Step 3b: In `src/live_index/coupling/lifecycle.rs`** — modify `refresh_on_reconcile_tick` signature to `pub fn refresh_on_reconcile_tick(project_root: &Path, expected_gen: u64, shared: &SharedIndex)`. Add `use crate::live_index::store::SharedIndex;` to the imports (and bump `use tracing::debug;` to `use tracing::{debug, trace};`). At the VERY TOP of the function body (BEFORE the `if !flag_on()` and `if !is_git_repo()` short-circuits), insert:
+    ```rust
+    let current_gen = shared.current_project_generation();
+    if current_gen != expected_gen {
+        shared.note_rejected_stale_mutation();
+        trace!(
+            "coupling: pre-flight gen-check rejected; expected={expected_gen} current={current_gen}; not refreshing"
+        );
+        return;
+    }
+    ```
+  Then leave the existing `flag_on`/`is_git_repo`/`guard_for`/`try_acquire`/`run_init` chain unchanged.
+- [ ] **Step 4: Modify spawn site at `src/watcher/mod.rs:706-719`** — at lines 710-711 (existing `root_for_coupling`/`stop_for_coupling` captures), add `let expected_gen_for_coupling = expected_gen;` (REUSE the outer-scope `expected_gen` already captured at watcher line ~614 — do NOT re-sample) and `let shared_for_coupling = shared.clone();`. Update the `refresh_on_reconcile_tick(&root_for_coupling)` call at line 716-718 to `refresh_on_reconcile_tick(&root_for_coupling, expected_gen_for_coupling, &shared_for_coupling)`. NO other watcher/mod.rs changes.
+- [ ] **Step 4.5: Update 5 in-crate test call sites in lifecycle.rs** (lines ~257, 400, 426, 459, 470 — note 470 is the SECOND call inside `guard_skips_tick_when_held`). For each, construct a minimal `SharedIndex` via `Arc::new(SharedIndexHandle::new_for_test(...))` (or whichever test-helper exists; if none, mirror the construction at `store.rs:1976` setup), capture `let gen = shared.current_project_generation()`, and pass `(tmp.path(), gen, &shared)`. Semantics-preserving — existing tests assert pre-existing flag/guard/HEAD behavior; the steady-state gen-match means the new pre-flight check passes and execution proceeds to the existing code path.
+- [ ] **Step 5: Write the two acceptance tests** in `tests/coupling_refresh_generation_fence.rs`. Mirror the scaffold from `src/live_index/store.rs:1976`. For the stale test, bump `shared.project_generation` synchronously via the existing test helper (NO real watcher spawn) so the function-level test is deterministic.
+- [ ] **Step 6: Run full verification gates** — `cargo check`, `cargo test --all-targets -- --test-threads=1`, `cargo build --release`, `cargo clippy -- -D warnings`, then `cargo clean` at task boundary.
+- [ ] **Step 7: HALT for review.** Produce verification report; await authorization to commit. Note the accepted wasted-CPU residual (mid-walk doomed-completion to A's per-workspace db) explicitly in the commit message so the limitation is captured in agentmemory for future contributors.
 
 **Verification commands:**
 
@@ -668,15 +689,36 @@ cargo clippy -- -D warnings
 **Commit message:**
 
 ```
-feat(live-index): generation-fence coupling_refresh publication path
+feat(live-index): pre-flight generation fence for coupling_refresh
 
-Adds expected_gen parameter to refresh_on_reconcile_tick; gates store-write
-commit on current_project_generation() match at commit boundary. Doomed
-coupling-refresh task aborts before writing A-era data to B's workspace
-store after reload.
+Adds expected_gen + shared parameters to refresh_on_reconcile_tick;
+pre-flight gen-check at function entry (before flag/git/guard
+short-circuits) aborts the doomed-just-spawned case without disk
+writes, incrementing the shared rejected_stale_mutations counter
+via the new pub(crate) SharedIndexHandle::note_rejected_stale_mutation
+accessor (added in this commit). Getter visibility bumped pub(crate)
+-> pub to allow integration tests in tests/ crate.
 
-Closes matrix-row-2 residual exposure flagged by round-2 3-persona
-convergence (coherence + scope + adversarial).
+Closes matrix-row-2 doomed-just-spawned exposure flagged by round-2
+3-persona convergence (coherence + scope + adversarial). Round-3.5
+patch consumes feasibility + adversarial reviewer findings:
+- spawn-site line refs updated 569-575 -> 706-719 (post-H.1c)
+- expected_gen REUSED from H.1c's outer-scope capture (not re-sampled)
+- store.rs surgical carve-out (1 new pub(crate) method + 1 visibility
+  bump) replaces the original blanket forbid that contradicted the
+  counter-increment requirement
+- gen-check placed BEFORE flag/is_git_repo short-circuits so telemetry
+  fires regardless of repo state
+
+Accepted residual (wasted-CPU, not data corruption): a refresh task
+already inside run_init when reload(B) fires continues writing
+A-era data to A's per-workspace coupling db until the walk completes.
+Ground-truth verified 2026-05-13: coupling db is per-workspace path
+(project_root.join(SYMFORGE_COUPLING_DB_PATH)), so doomed completion
+writes to A's own db with no cross-contamination to B's db. The
+result sits dormant on disk under A's path; on future revisit to A,
+run_init reads correct A-era data. P2 severity contingent on
+SYMFORGE_COUPLING=1 remaining opt-in default-off through Phase 3.
 ```
 
 ---
