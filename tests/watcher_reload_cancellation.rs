@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use serde_json::json;
+use symforge::daemon::{OpenProjectRequest, spawn_daemon};
 use symforge::live_index::{LiveIndex, SharedIndex};
 use symforge::watcher::{WatcherInfo, run_watcher_with_stop};
 use tempfile::TempDir;
@@ -212,5 +214,68 @@ fn reload_signals_token_before_new_watcher() {
         old_task.abort();
         new_stop.store(true, Ordering::Release);
         new_task.abort();
+    });
+}
+
+#[test]
+fn index_folder_for_session_signals_token_before_drop() {
+    run_with_single_blocking_thread(async {
+        let _interval = EnvVarGuard::set("SYMFORGE_RECONCILE_INTERVAL", "1");
+        let project_a = TempDir::new().expect("project a");
+        let project_b = TempDir::new().expect("project b");
+        let _a_paths = write_project_files(project_a.path(), "a_file", 40);
+        let b_paths = write_project_files(project_b.path(), "b_file", 25);
+
+        let daemon = spawn_daemon("127.0.0.1").await.expect("spawn daemon");
+        let open = daemon
+            .state
+            .open_project_session(OpenProjectRequest {
+                project_root: project_a.path().display().to_string(),
+                client_name: "watcher-rebind-test".to_string(),
+                pid: Some(std::process::id()),
+            })
+            .expect("open project session");
+
+        tokio::time::sleep(Duration::from_millis(1_300)).await;
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!(
+                "http://127.0.0.1:{}/v1/sessions/{}/tools/index_folder",
+                daemon.port, open.session_id
+            ))
+            .json(&json!({ "path": project_b.path().display().to_string() }))
+            .send()
+            .await
+            .expect("call daemon index_folder")
+            .error_for_status()
+            .expect("index_folder status")
+            .text()
+            .await
+            .expect("index_folder body");
+        assert!(
+            response.starts_with("Indexed "),
+            "daemon index_folder should succeed, got: {response}"
+        );
+
+        tokio::time::sleep(Duration::from_millis(3_200)).await;
+
+        let projects = daemon.state.list_projects();
+        assert_eq!(
+            projects.len(),
+            1,
+            "session rebind should remove the old project after moving the session"
+        );
+        let health = daemon
+            .state
+            .project_health(&projects[0].project_id)
+            .expect("target project health");
+        assert_eq!(
+            health.file_count,
+            b_paths.len(),
+            "target project should retain all files after the old project is dropped"
+        );
+
+        let _ = daemon.shutdown_tx.send(());
     });
 }

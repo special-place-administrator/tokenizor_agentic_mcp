@@ -181,16 +181,50 @@ fn freshen_sidecar_path_if_stale(
     state: &SidecarState,
     relative_path: &str,
 ) -> ContextSourceAuthority {
+    let expected_gen = state.index.current_project_generation();
+    freshen_sidecar_path_if_stale_at_generation(state, relative_path, expected_gen)
+}
+
+fn safe_sidecar_path_for_freshen(
+    repo_root: &std::path::Path,
+    relative_path: &str,
+) -> Result<std::path::PathBuf, String> {
+    let relative = std::path::Path::new(relative_path);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(format!("path '{relative_path}' is outside the repository"));
+    }
+
+    match edit::safe_repo_path(repo_root, relative_path) {
+        Ok(path) => Ok(path),
+        Err(_) => {
+            let canon_root = repo_root
+                .canonicalize()
+                .map_err(|e| format!("cannot resolve repo root: {e}"))?;
+            Ok(canon_root.join(relative))
+        }
+    }
+}
+
+fn freshen_sidecar_path_if_stale_at_generation(
+    state: &SidecarState,
+    relative_path: &str,
+    expected_gen: u64,
+) -> ContextSourceAuthority {
     let Some(repo_root) = &state.repo_root else {
         return ContextSourceAuthority::CurrentIndex;
     };
-    let Ok(abs_path) = edit::safe_repo_path(repo_root, relative_path) else {
+    let Ok(abs_path) = safe_sidecar_path_for_freshen(repo_root, relative_path) else {
         return ContextSourceAuthority::CurrentIndex;
     };
-    if watcher::freshen_file_if_stale(relative_path, &abs_path, &state.index) {
-        ContextSourceAuthority::DiskRefreshed
-    } else {
-        ContextSourceAuthority::CurrentIndex
+    match watcher::freshen_file_if_stale(relative_path, &abs_path, &state.index, expected_gen) {
+        watcher::FreshenResult::Fresh => ContextSourceAuthority::CurrentIndex,
+        watcher::FreshenResult::StaleReindexed => ContextSourceAuthority::DiskRefreshed,
+        watcher::FreshenResult::StaleRemoved => ContextSourceAuthority::DiskRefreshed,
+        watcher::FreshenResult::GenerationMismatch => ContextSourceAuthority::CurrentIndex,
     }
 }
 
@@ -1005,10 +1039,9 @@ async fn handle_edit_impact(
                 // Look the symbol up in the POST-edit file by name+byte_range so
                 // overloaded names do not confuse the walker.
                 let parent_type: Option<String> = post_file.as_ref().and_then(|file| {
-                    find_record_matching_snapshot(file, sym)
-                        .and_then(|record| {
-                            crate::protocol::edit::find_parent_impl_type(file, record)
-                        })
+                    find_record_matching_snapshot(file, sym).and_then(|record| {
+                        crate::protocol::edit::find_parent_impl_type(file, record)
+                    })
                 });
 
                 // When we know the parent type, collect the set of files that
@@ -2184,6 +2217,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn freshen_sidecar_path_if_stale_generation_mismatch_preserves_valid_file() {
+        let project_a = tempfile::tempdir().unwrap();
+        let project_b = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project_a.path().join("src")).unwrap();
+        std::fs::create_dir_all(project_b.path().join("src")).unwrap();
+        std::fs::write(project_a.path().join("src/a.rs"), "pub fn a() {}\n").unwrap();
+        std::fs::write(project_b.path().join("src/b.rs"), "pub fn b() {}\n").unwrap();
+
+        let index = LiveIndex::load(project_a.path()).unwrap();
+        let stale_gen = index.current_project_generation();
+        index.reload(project_b.path()).unwrap();
+        let state = SidecarState {
+            index,
+            token_stats: TokenStats::new(),
+            repo_root: Some(project_a.path().to_path_buf()),
+            symbol_cache: Arc::new(RwLock::new(HashMap::new())),
+        };
+
+        let source_authority =
+            freshen_sidecar_path_if_stale_at_generation(&state, "src/b.rs", stale_gen);
+
+        assert!(matches!(
+            source_authority,
+            ContextSourceAuthority::CurrentIndex
+        ));
+        assert!(state.index.read().get_file("src/b.rs").is_some());
+    }
+
     // -----------------------------------------------------------------------
     // health_handler
     // -----------------------------------------------------------------------
@@ -2518,20 +2580,8 @@ mod tests {
 
     #[test]
     fn test_find_record_matching_snapshot_matches_on_name_kind_and_byte_range() {
-        let impl_record = make_symbol_with_range(
-            "impl Foo",
-            SymbolKind::Impl,
-            0,
-            (1, 5),
-            (0, 200),
-        );
-        let new_method = make_symbol_with_range(
-            "new",
-            SymbolKind::Function,
-            1,
-            (2, 3),
-            (50, 80),
-        );
+        let impl_record = make_symbol_with_range("impl Foo", SymbolKind::Impl, 0, (1, 5), (0, 200));
+        let new_method = make_symbol_with_range("new", SymbolKind::Function, 1, (2, 3), (50, 80));
         let file = make_indexed_file(
             "src/foo.rs",
             vec![impl_record, new_method.clone()],

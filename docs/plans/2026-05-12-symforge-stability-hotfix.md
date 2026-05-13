@@ -447,25 +447,28 @@ cargo clippy -- -D warnings
 
 **Files (allowed):**
 
-- Modify: `src/protocol/tools.rs` — `SymForgeServer::index_folder` path; `freshen_exact_path_for_targeted_retrieval`, `prepare_exact_path_for_edit`, `prepare_batch_paths_for_edit`.
-- Modify: `src/watcher/mod.rs` — `restart_watcher` signature so it can abort the prior watcher cooperatively.
+- Modify: `src/protocol/tools.rs` — `SymForgeServer::index_folder` path; `freshen_exact_path_for_targeted_retrieval`, `prepare_exact_path_for_edit`, `prepare_batch_paths_for_edit`. Define `EditError` enum (derives `thiserror::Error`) near the existing freshen helpers (~line 1659).
+- Modify: `src/protocol/mod.rs` — added 2026-05-12 after round-3 adversarial + architecture review. Add ONE `watcher_handle: Arc<Mutex<Option<crate::watcher::WatcherHandle>>>` field to `SymForgeServer` struct (line 46); initialize as `Arc::new(Mutex::new(None))` in `new` (line 79) and `new_daemon_proxy` (line 102). No other changes in mod.rs. Test helpers `make_server` / `make_server_with_root` in `tools.rs:7771/7785`, `resources.rs:422/481`, `prompts.rs:477` already call `SymForgeServer::new(...)` (audit 2026-05-12) so they remain untouched as long as `::new` signature stays the same.
+- Modify: `src/watcher/mod.rs` — `restart_watcher` signature so it can abort the prior watcher cooperatively. Define new public newtype `WatcherHandle { task: JoinHandle<()>, stop_token: Arc<AtomicBool> }` co-located with the existing watcher infrastructure; this is the ownership-pair type returned by `restart_watcher` and stored by callers.
 - Modify: `src/sidecar/handlers.rs` — `freshen_sidecar_path_if_stale`.
 - Create: `tests/watcher_index_folder_leak.rs` — repro for SymForgeServer leak.
-- Forbidden: `src/daemon.rs` (already covered by H.1b), `src/live_index/store.rs`.
+- Forbidden: `src/daemon.rs` (already covered by H.1b), `src/live_index/store.rs`. `ProjectInstance`-side unification of the (task, stop_token) pair into `WatcherHandle` is deferred to a follow-up task — H.1d only refactors the new server-side surface.
 
 **Spec:**
 
 - **objective:** No code path holds two concurrent watchers writing into the same `SharedIndexHandle`. Per-request `freshen_file_if_stale` callers either reject the request on root-mismatch or use the fenced API.
-- **non_goals:** Do NOT remove `restart_watcher` entirely — that breaks compatibility. Modify it to accept a prior `JoinHandle` + token.
+- **non_goals:** Do NOT remove `restart_watcher` entirely — that breaks compatibility. Modify it to accept a prior `WatcherHandle` (newtype bundling task + stop_token) so it can signal-and-bounded-await before spawning. Do NOT unify the `ProjectInstance` (daemon.rs) task+token pair with `WatcherHandle` in this task — that is a follow-up (forbidden file).
 - **allowed_files:** as listed.
 - **forbidden_files:** as listed.
-- **interfaces touched:** `restart_watcher` signature gains `prev: Option<(JoinHandle<()>, CancellationToken)>`. `SymForgeServer` may need to track its own watcher handle (currently spawned-and-forgotten on the server side; verify).
+- **interfaces touched:** `src/watcher/mod.rs` gains public newtype `WatcherHandle { task: JoinHandle<()>, stop_token: Arc<AtomicBool> }` (Arc<AtomicBool> chosen for consistency with the H.1b/H.1c watcher stop-token plumbing already shipped — NOT `tokio_util::sync::CancellationToken`). `restart_watcher` signature gains `prev: Option<WatcherHandle>` and returns `WatcherHandle`. `SymForgeServer` (in `src/protocol/mod.rs`) gains ONE field `watcher_handle: Arc<Mutex<Option<WatcherHandle>>>` (single field bundling the pair, not two; `Arc<Mutex<...>>` mandatory because `SymForgeServer` is `#[derive(Clone)]` and `Mutex<Option<JoinHandle>>` is not Clone). `tools.rs` gains `EditError` enum with `thiserror::Error` derive, two variants `PathNotFound { path: PathBuf }` + `SessionStale { path: PathBuf }`. Helper-boundary contract preserved: `prepare_exact_path_for_edit`, `prepare_batch_paths_for_edit`, `freshen_exact_path_for_targeted_retrieval` continue to return `Result<_, String>` to callers — internal `EditError` is `format!("{e}")`-converted at the helper boundary; the 11 existing callsites at `tools.rs:6708/6895/7029/7160/7398/7523` and retrieval callsites at `3079/4764/4857` are untouched (audit 2026-05-12 confirmed all use `Err(e) => return e` pure-passthrough, no substring matching).
 - **invariants:** At most one active watcher per `SharedIndexHandle`. Per-request freshen calls cannot drive a remove without consulting the current project generation.
 - **acceptance_criteria:**
   - [ ] New test `watcher_index_folder_leak::repeated_index_folder_preserves_file_count` — call `SymForgeServer::index_folder` twice on different roots, wait > reconcile interval, assert second root's file count is intact.
   - [ ] Augment one of the sidecar integration tests (or add a new one) to assert that a concurrent root reassign during `freshen_sidecar_path_if_stale` does not remove a valid file.
   - [ ] New tests added 2026-05-12 per round-2 adversarial review ADV-R2-04, verifying each of the three callsites preserves its distinct success-path contract after fence migration: `prepare_exact_path_for_edit_returns_err_on_confirmed_absent`; `freshen_exact_path_for_targeted_retrieval_removes_on_confirmed_absent_with_fence`; `prepare_batch_paths_for_edit_partial_succeeds_with_skipped_paths`. Plus `freshen_helper_returns_generation_mismatch_when_gen_stale` to exercise the new `FreshenResult::GenerationMismatch` variant.
   - [ ] **Session-rebind surface audit** (added 2026-05-12 round-2 walk item 8): cross-check that H.1b Step 9's modification of `index_folder_for_session` at `src/daemon.rs:504-508` has correctly signaled the removed project's stop token before the `ProjectInstance` drops. Add new test `index_folder_for_session_signals_token_before_drop` (lives in H.1d's test file rather than H.1b's, so H.1d's audit is the cross-task safety net): drive `index_folder_for_session` against an existing project, intercept the token signal, assert the removed project's doomed `spawn_blocking` reconcile children observe the cancellation before their next iteration. If H.1b's Step 9 modification is missing or incomplete when H.1d starts, escalate to plan owner at HALT (do NOT silently extend H.1d's allowed_files to cover daemon.rs).
+  - [ ] **Exhaustive-match guardrail** (added 2026-05-12 round-3 adversarial review ADV-H1D-06): the `FreshenResult` enum carries `#[must_use]`, and every callsite in the three public helpers matches all four variants explicitly. No `_ =>` wildcard arms, no `if let Some(...) = ...` shortcuts that silently drop unhandled variants. Verify by grepping the post-implementation diff for `FreshenResult::` — each callsite must list all four variants. This compile-time guardrail prevents future drift from silently degrading the per-callsite contract.
+  - [ ] **`#[derive(Clone)]` preservation** (added 2026-05-12 round-3 adversarial review ADV-H1D-02): post-implementation `cargo check` must compile `SymForgeServer`'s existing `#[derive(Clone)]` without modification. The new `watcher_handle` field MUST be `Arc<Mutex<Option<WatcherHandle>>>` (Arc-wrapped) because `Mutex<...>` is not Clone. Plain `Mutex<Option<JoinHandle<()>>>` would compile-fail and any hand-implemented Clone would silently lose shared-state semantics.
   - [ ] `cargo clippy -- -D warnings` clean.
 - **evidence_required:**
   ```
@@ -473,31 +476,50 @@ cargo clippy -- -D warnings
   cargo test -p symforge --test sidecar_integration -- --test-threads=1
   cargo test --all-targets -- --test-threads=1
   ```
-- **stop_conditions:** STOP if `SymForgeServer` lacks a place to hold the prior watcher handle (may require minor struct changes; if so, document and proceed). STOP if any sidecar test that previously relied on the racy behavior breaks.
+- **stop_conditions:** STOP if `SymForgeServer` lacks a place to hold the prior watcher handle. Round-3 adversarial review (2026-05-12) confirmed via grep audit that no test files perform struct-literal `SymForgeServer { ... }` init — all paths go through `SymForgeServer::new(...)` — so the field addition is contained to `src/protocol/mod.rs` with `::new` signature preserved. STOP if any sidecar test that previously relied on the racy behavior breaks. STOP if the `WatcherHandle` newtype placement in `src/watcher/mod.rs` collides with an existing symbol of the same name (grep first; rename to `WatcherTaskHandle` if necessary). STOP if `parking_lot::Mutex` cannot be used for `watcher_handle` because some code path requires holding the lock across `.await` — switch to `tokio::sync::Mutex` and document the deviation.
 
 **Steps:**
 
 - [ ] **Step 1: Invoke `superpowers:systematic-debugging`.** This is partly investigative — confirm via Read that `SymForgeServer` does not currently retain its watcher JoinHandle, then design the minimal addition.
-- [ ] **Step 2: Modify `SymForgeServer`** to retain `watcher_task: Mutex<Option<JoinHandle<()>>>` and `watcher_stop_token: Mutex<Option<CancellationToken>>`. (Mutex because `SymForgeServer` is `Arc`-shared in handlers.)
-- [ ] **Step 3: Modify `SymForgeServer::index_folder`** to: signal previous token, await previous handle with bounded timeout, bump shared index project_generation via reload, then call `restart_watcher` with a fresh token.
-- [ ] **Step 4: Modify `restart_watcher`** signature to accept `prev: Option<(JoinHandle<()>, CancellationToken)>`. Internally: if `prev` is `Some`, signal-and-bounded-wait before spawning the new task. Otherwise, today's behavior (which is now guaranteed to be the first call only).
+- [ ] **Step 2a: Define `WatcherHandle` newtype** in `src/watcher/mod.rs`. Public visibility. Two fields: `task: tokio::task::JoinHandle<()>` and `stop_token: Arc<AtomicBool>`. No Clone derive (JoinHandle is `!Clone`). Doc-comment names the invariant: "Owned together: signal stop_token, then bounded-await task. See H.1b's `abort_watcher_task` for the canonical shutdown sequence." This newtype is the ownership-pair type for any caller spawning a watcher.
+- [ ] **Step 2b: Modify `SymForgeServer`** in `src/protocol/mod.rs` to add ONE new field: `watcher_handle: Arc<Mutex<Option<crate::watcher::WatcherHandle>>>`. `Arc<Mutex<...>>` is mandatory — `SymForgeServer` is `#[derive(Clone)]` and a bare `Mutex<Option<JoinHandle>>` is not Clone. The pattern matches the existing `watcher_info: Arc<Mutex<WatcherInfo>>` field at mod.rs:51. Initialize as `Arc::new(parking_lot::Mutex::new(None))` in both constructors (`new` at line 79 and `new_daemon_proxy` at line 102). **Add an inline doc comment at the field** stating "MUST NOT be held across `.await`. Use `.lock().take()` and `.lock().replace(...)` around any async work — parking_lot Mutex is non-async and held-across-await would deadlock the runtime." Also document Some-vs-None semantics: "Some only in local-stdio mode where SymForgeServer owns its own watcher. None in daemon-proxy mode and daemon-degraded mode."
+- [ ] **Step 3: Modify `SymForgeServer::index_folder`** at `tools.rs:4394` to sequence: (1) `.lock().take()` on `watcher_handle` to extract `Option<WatcherHandle>`, drop the guard immediately; (2) if `Some`, signal the stop_token via `stop_token.store(true, Ordering::Release)`; (3) `tokio::time::timeout(Duration::from_secs(2), handle.task).await` for bounded-await join — log at warn-level on timeout but continue (don't block reload on a hung watcher); (4) call `self.index.reload(canonical_root)?` (which bumps project_generation per H.1a); (5) call new `restart_watcher(root, shared, watcher_info, prev=None)` (always None here — we already aborted the prior handle in step 1-3); (6) `.lock().replace(Some(new_handle))` to store. Verify with `grep -n` that no other path in tools.rs's index_folder mutates `watcher_handle` — the 2-second timeout and signal-await order are unguarded against re-entry. The 2-second timeout matches the H.1b convention for cooperative shutdown.
+- [ ] **Step 4: Modify `restart_watcher`** signature in `src/watcher/mod.rs`. New shape: `pub fn restart_watcher(repo_root: PathBuf, shared: SharedIndex, watcher_info: Arc<Mutex<WatcherInfo>>, prev: Option<WatcherHandle>) -> WatcherHandle`. Internally: if `prev` is `Some`, signal `prev.stop_token` and bounded-await `prev.task` with `tokio::time::timeout(Duration::from_secs(2), ...)` before spawning the new task — log at warn on timeout, abort the task as backstop. Spawn the new task via `run_watcher_with_stop(repo_root, shared, watcher_info, new_token)` from H.1b. Return `WatcherHandle { task: new_handle, stop_token: new_token }`. The no-prev callers (server-side index_folder always passes None now that it pre-aborts in step 1-3 above; any other callers in daemon.rs are forbidden territory) get today's behavior unchanged. Verify backward-compat wrapper: H.1b kept a 0-arg `restart_watcher` wrapper for non-forbidden callers. Audit those callers; if any exist, either update the wrapper to pass `prev=None` to the new signature OR introduce `restart_watcher_with_prev` and keep the old wrapper unchanged. Prefer the wrapper-update path if no daemon.rs callers reference the old shape.
 - [ ] **Step 5: Modify the three `freshen_exact_path_for_targeted_retrieval`-family callers** as follows. **Capture order matters** (round-2 feasibility review FEAS-R2-03): capture `expected_gen = server.index.current_project_generation()` FIRST, then call `server.capture_repo_root()` SECOND. The reverse order creates a race where a concurrent `index_folder` sets a new repo_root and bumps generation between the two reads, producing a `(stale_root, current_gen)` pair the fence cannot reject. Capturing gen first means any concurrent reload between the two reads produces `(current_root, stale_gen)`, which the fence correctly rejects. Thread `expected_gen` through `freshen_file_if_stale` (helper signature gains `expected_gen: u64`), and call `remove_file_at_generation` for confirmed-absent paths. **Do NOT silently skip remove on NotFound** — that alternative (originally proposed and rejected 2026-05-12 per round-1 adversarial review ADV-01 + feasibility review) would mask legitimate user-driven deletions until the next reconcile sweep (up to 30s later) and allow the same tool call that deleted a file to return ghost entries. Generation-fencing addresses both root-mismatch safety (per-request roots stale across `index_folder`) and legitimate-deletion correctness; the refuse-on-NotFound alternative addresses only the former.
 
-  **Enriched `FreshenResult` shape** (round-2 adversarial review ADV-R2-04): the shared helper `freshen_file_if_stale` returns an enriched enum rather than a single boolean to prevent future refactors from accidentally flattening the three callsites' distinct success-path contracts:
+  **Enriched `FreshenResult` shape** (round-2 adversarial review ADV-R2-04): the shared internal helper `freshen_file_if_stale` returns an enriched enum rather than a single boolean to prevent future refactors from accidentally flattening the three callsites' distinct success-path contracts:
 
   ```rust
-  pub enum FreshenResult {
+  #[must_use]
+  pub(crate) enum FreshenResult {
       Fresh,                          // indexed mtime matches disk
-      Stale_Reindexed,                // re-read + re-parsed; index updated
-      Stale_Removed,                  // confirmed absent; remove_file_at_generation succeeded
+      StaleReindexed,                 // re-read + re-parsed; index updated
+      StaleRemoved,                   // confirmed absent; remove_file_at_generation succeeded
       GenerationMismatch,             // fence rejected; caller's gen is stale
   }
   ```
 
-  Per-callsite contracts each map this enum to existing semantics:
-  - `prepare_exact_path_for_edit`: `Fresh`/`Stale_Reindexed` → continue with the edit; `Stale_Removed` → return `Err(EditError::PathNotFound)` so the edit tool aborts; `GenerationMismatch` → return `Err(EditError::SessionStale)` indicating the session needs to refresh its repo_root.
-  - `freshen_exact_path_for_targeted_retrieval`: any variant → continue; the side-effect of `Stale_Removed` is the desired index-consistency outcome.
-  - `prepare_batch_paths_for_edit`: `Fresh`/`Stale_Reindexed` → include path in the batch; `Stale_Removed` → skip path with a soft warning; `GenerationMismatch` → abort the whole batch with `Err(EditError::SessionStale)`.
+  Variants renamed to canonical UpperCamelCase (PascalCase) per Rust style; the original spec language `Stale_Reindexed` etc. used snake_case which clippy would flag. `#[must_use]` is mandatory — round-3 adversarial review ADV-H1D-06 flagged that without it, a future caller forgetting an arm on the 4-variant enum compile-passes silently. Visibility is `pub(crate)` so test modules can match on variants; outside the crate the enum is invisible.
+
+  **`EditError` enum** (defined in `tools.rs` near line 1659):
+
+  ```rust
+  #[derive(Debug, thiserror::Error)]
+  pub(crate) enum EditError {
+      #[error("Error: file not found at {path}")]
+      PathNotFound { path: std::path::PathBuf },
+      #[error("Error: session stale at {path} — call index_folder to refresh repo_root")]
+      SessionStale { path: std::path::PathBuf },
+  }
+  ```
+
+  `thiserror::Error` derive provides `Display` so `format!("{e}")` at the helper boundary yields the user-facing string. `thiserror` is already in the codebase (referenced in test fixtures at tools.rs:12091/12126). Helper-boundary contract: the three public helpers (`prepare_exact_path_for_edit`, `prepare_batch_paths_for_edit`, `freshen_exact_path_for_targeted_retrieval`) continue to return `Result<_, String>` — internal `EditError` is `format!("{e}")`-converted at the helper boundary. The 11 existing callsites at `tools.rs:6708/6895/7029/7160/7398/7523/3079/4764/4857` are untouched.
+
+  **Per-callsite contracts** — each public helper exhaustively matches on `FreshenResult` (no `_ =>` wildcard arms; the `#[must_use]` + exhaustive-match discipline is an acceptance criterion below):
+
+  - `prepare_exact_path_for_edit`: `Fresh`/`StaleReindexed` → continue with the edit; `StaleRemoved` → return `Err(format!("{}", EditError::PathNotFound { path }))` so the edit tool aborts; `GenerationMismatch` → return `Err(format!("{}", EditError::SessionStale { path }))` indicating the session needs to refresh its repo_root.
+  - `freshen_exact_path_for_targeted_retrieval`: any of the four variants → continue (returns `()` or its existing return type); the side-effect of `StaleRemoved` is the desired index-consistency outcome. Exhaustive match still required (compile-time guardrail), even though every arm body is `()`.
+  - `prepare_batch_paths_for_edit`: `Fresh`/`StaleReindexed` → include path in the batch; `StaleRemoved` → skip path with a soft warning (continue iterating); `GenerationMismatch` → abort the whole batch with `Err(format!("{}", EditError::SessionStale { path }))`.
 - [ ] **Step 6: Modify `freshen_sidecar_path_if_stale`** at `src/sidecar/handlers.rs:180` analogously.
 - [ ] **Step 7: Run new tests.**
 - [ ] **Step 8: Run full test suite + clippy.**

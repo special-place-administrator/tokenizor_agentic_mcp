@@ -157,6 +157,14 @@ pub(crate) enum ReindexResult {
     ReadError(String),
 }
 
+#[must_use]
+pub(crate) enum FreshenResult {
+    Fresh,
+    StaleReindexed,
+    StaleRemoved,
+    GenerationMismatch,
+}
+
 /// Strip `\\?\` Windows extended-length path prefix and normalize backslashes.
 ///
 /// Returns the relative forward-slash path if `abs_path` is inside `repo_root`,
@@ -334,23 +342,19 @@ fn read_and_index(
 /// index. If they differ (or the file is not yet indexed), re-indexes it
 /// immediately before the caller proceeds.
 ///
-/// Returns `true` if the file was stale and was re-indexed, `false` if it was
-/// already up to date or could not be checked (e.g. unsupported language).
+/// Returns a structured freshness outcome so callers can distinguish a
+/// confirmed deletion from a stale project-generation mismatch.
 pub(crate) fn freshen_file_if_stale(
     relative_path: &str,
     abs_path: &Path,
     shared: &SharedIndex,
-) -> bool {
-    let expected_gen = shared.current_project_generation();
-    freshen_file_if_stale_at_generation(relative_path, abs_path, shared, expected_gen)
-}
-
-fn freshen_file_if_stale_at_generation(
-    relative_path: &str,
-    abs_path: &Path,
-    shared: &SharedIndex,
     expected_gen: u64,
-) -> bool {
+) -> FreshenResult {
+    if shared.current_project_generation() != expected_gen {
+        let _ = shared.remove_file_at_generation(relative_path, expected_gen);
+        return FreshenResult::GenerationMismatch;
+    }
+
     // 1. Stat the file on disk
     let disk_mtime = std::fs::metadata(abs_path)
         .and_then(|m| m.modified())
@@ -369,21 +373,45 @@ fn freshen_file_if_stale_at_generation(
     };
 
     if disk_mtime == 0 && indexed_mtime == 0 {
-        return false; // both unknown — treat as fresh to avoid churn
+        return FreshenResult::Fresh; // both unknown — treat as fresh to avoid churn
     }
     if disk_mtime != 0 && disk_mtime == indexed_mtime {
-        return false; // already fresh
+        return FreshenResult::Fresh; // already fresh
     }
 
     // 3. Stale — re-index
     let language = match supported_language(abs_path) {
         Some(l) => l,
-        None => return false,
+        None => return FreshenResult::Fresh,
     };
 
     debug!("freshness guard: stale file detected, re-indexing {relative_path}");
-    maybe_reindex(relative_path, abs_path, shared, language, expected_gen);
-    true
+    let result = maybe_reindex(relative_path, abs_path, shared, language, expected_gen);
+    if shared.current_project_generation() != expected_gen {
+        let _ = shared.remove_file_at_generation(relative_path, expected_gen);
+        return FreshenResult::GenerationMismatch;
+    }
+
+    match result {
+        ReindexResult::HashSkip | ReindexResult::Reindexed | ReindexResult::ReadError(_) => {
+            FreshenResult::StaleReindexed
+        }
+        ReindexResult::NotFound | ReindexResult::Removed => FreshenResult::StaleRemoved,
+    }
+}
+
+fn freshen_file_if_stale_at_generation(
+    relative_path: &str,
+    abs_path: &Path,
+    shared: &SharedIndex,
+    expected_gen: u64,
+) -> bool {
+    matches!(
+        freshen_file_if_stale(relative_path, abs_path, shared, expected_gen),
+        FreshenResult::StaleReindexed
+            | FreshenResult::StaleRemoved
+            | FreshenResult::GenerationMismatch
+    )
 }
 
 /// Walk all indexed files and re-index any whose on-disk mtime differs from
@@ -462,6 +490,13 @@ pub struct WatcherHandle {
     _debouncer: Debouncer<NotifyRecommendedWatcher, RecommendedCache>,
     /// Receive end of the synchronous channel from the notify callback.
     pub event_rx: std::sync::mpsc::Receiver<DebounceEventResult>,
+}
+
+/// Owned together: signal `stop_token`, then bounded-await `task`.
+/// See H.1b's `abort_watcher_task` for the canonical shutdown sequence.
+pub struct WatcherTaskHandle {
+    pub task: tokio::task::JoinHandle<()>,
+    pub stop_token: Arc<AtomicBool>,
 }
 
 /// Create a new debouncer watching `repo_root` recursively.
@@ -807,7 +842,7 @@ pub async fn run_watcher(
     run_watcher_with_stop(repo_root, shared, watcher_info, stop_token).await;
 }
 
-/// Spawn a new watcher task, cancelling implicit by JoinHandle drop.
+/// Spawn a new watcher task.
 ///
 /// Called by `index_folder` after a full reload to restart the watcher
 /// on the new root path.
@@ -815,12 +850,29 @@ pub fn restart_watcher(
     repo_root: PathBuf,
     shared: SharedIndex,
     watcher_info: Arc<Mutex<WatcherInfo>>,
-) -> tokio::task::JoinHandle<()> {
+    prev: Option<WatcherTaskHandle>,
+) -> WatcherTaskHandle {
     {
         let mut info = watcher_info.lock();
         info.state = WatcherState::Off;
     }
-    tokio::spawn(run_watcher(repo_root, shared, watcher_info))
+    let stop_token = Arc::new(AtomicBool::new(false));
+    let stop_for_task = Arc::clone(&stop_token);
+    let task = tokio::spawn(async move {
+        if let Some(prev) = prev {
+            prev.stop_token.store(true, Ordering::Release);
+            let mut old_task = prev.task;
+            if tokio::time::timeout(Duration::from_secs(2), &mut old_task)
+                .await
+                .is_err()
+            {
+                warn!("watcher: previous watcher did not stop within 2s; aborting task");
+                old_task.abort();
+            }
+        }
+        run_watcher_with_stop(repo_root, shared, watcher_info, stop_for_task).await;
+    });
+    WatcherTaskHandle { task, stop_token }
 }
 
 // ---------------------------------------------------------------------------

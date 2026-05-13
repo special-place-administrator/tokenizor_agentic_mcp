@@ -16,6 +16,8 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use axum::http::StatusCode;
 use rmcp::handler::server::wrapper::Parameters;
@@ -1663,13 +1665,51 @@ fn freshen_exact_path_for_targeted_retrieval(
     let search::PathScope::Exact(relative_path) = path_scope else {
         return false;
     };
+    let expected_gen = server.index.current_project_generation();
     let Some(repo_root) = server.capture_repo_root() else {
         return false;
     };
-    let Ok(abs_path) = edit::safe_repo_path(&repo_root, relative_path) else {
+    let Ok(abs_path) = safe_repo_path_for_freshen(&repo_root, relative_path) else {
         return false;
     };
-    watcher::freshen_file_if_stale(relative_path, &abs_path, &server.index)
+    match watcher::freshen_file_if_stale(relative_path, &abs_path, &server.index, expected_gen) {
+        watcher::FreshenResult::Fresh => false,
+        watcher::FreshenResult::StaleReindexed => true,
+        watcher::FreshenResult::StaleRemoved => true,
+        watcher::FreshenResult::GenerationMismatch => false,
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum EditError {
+    #[error("Error: file not found at {path}")]
+    PathNotFound { path: std::path::PathBuf },
+    #[error("Error: session stale at {path} — call index_folder to refresh repo_root")]
+    SessionStale { path: std::path::PathBuf },
+}
+
+fn safe_repo_path_for_freshen(
+    repo_root: &std::path::Path,
+    relative_path: &str,
+) -> Result<PathBuf, String> {
+    let relative = std::path::Path::new(relative_path);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(format!("path '{relative_path}' is outside the repository"));
+    }
+
+    match edit::safe_repo_path(repo_root, relative_path) {
+        Ok(path) => Ok(path),
+        Err(_) => {
+            let canon_root = repo_root
+                .canonicalize()
+                .map_err(|e| format!("cannot resolve repo root: {e}"))?;
+            Ok(canon_root.join(relative))
+        }
+    }
 }
 
 fn edit_capability_label(
@@ -1688,43 +1728,69 @@ fn prepare_exact_path_for_edit(
     server: &SymForgeServer,
     relative_path: &str,
 ) -> Result<(PathBuf, edit_format::EditSourceAuthority), String> {
+    let expected_gen = server.index.current_project_generation();
     let repo_root = server
         .capture_repo_root()
         .ok_or_else(|| "Error: no repository root configured.".to_string())?;
     let abs_path =
-        edit::safe_repo_path(&repo_root, relative_path).map_err(|e| format!("Error: {e}"))?;
+        safe_repo_path_for_freshen(&repo_root, relative_path).map_err(|e| format!("Error: {e}"))?;
     let source_authority =
-        if watcher::freshen_file_if_stale(relative_path, &abs_path, &server.index) {
-            edit_format::EditSourceAuthority::DiskRefreshed
-        } else {
-            edit_format::EditSourceAuthority::CurrentIndex
+        match watcher::freshen_file_if_stale(relative_path, &abs_path, &server.index, expected_gen)
+        {
+            watcher::FreshenResult::Fresh => edit_format::EditSourceAuthority::CurrentIndex,
+            watcher::FreshenResult::StaleReindexed => {
+                edit_format::EditSourceAuthority::DiskRefreshed
+            }
+            watcher::FreshenResult::StaleRemoved => {
+                return Err(format!("{}", EditError::PathNotFound { path: abs_path }));
+            }
+            watcher::FreshenResult::GenerationMismatch => {
+                return Err(format!("{}", EditError::SessionStale { path: abs_path }));
+            }
         };
     Ok((abs_path, source_authority))
 }
 
 fn prepare_batch_paths_for_edit(
     server: &SymForgeServer,
-    repo_root: &std::path::Path,
     relative_paths: &[String],
-) -> Result<edit_format::EditSourceAuthority, String> {
+) -> Result<(PathBuf, edit_format::EditSourceAuthority), String> {
+    let expected_gen = server.index.current_project_generation();
+    let repo_root = server
+        .capture_repo_root()
+        .ok_or_else(|| "Error: no repository root configured.".to_string())?;
     let mut unique_paths = relative_paths.to_vec();
     unique_paths.sort();
     unique_paths.dedup();
 
     let mut refreshed = false;
     for relative_path in unique_paths {
-        let abs_path =
-            edit::safe_repo_path(repo_root, &relative_path).map_err(|e| format!("Error: {e}"))?;
-        if watcher::freshen_file_if_stale(&relative_path, &abs_path, &server.index) {
-            refreshed = true;
+        let abs_path = safe_repo_path_for_freshen(&repo_root, &relative_path)
+            .map_err(|e| format!("Error: {e}"))?;
+        match watcher::freshen_file_if_stale(&relative_path, &abs_path, &server.index, expected_gen)
+        {
+            watcher::FreshenResult::Fresh => {}
+            watcher::FreshenResult::StaleReindexed => {
+                refreshed = true;
+            }
+            watcher::FreshenResult::StaleRemoved => {
+                tracing::warn!(
+                    path = %abs_path.display(),
+                    "skipping missing path during batch edit preparation"
+                );
+            }
+            watcher::FreshenResult::GenerationMismatch => {
+                return Err(format!("{}", EditError::SessionStale { path: abs_path }));
+            }
         }
     }
 
-    Ok(if refreshed {
+    let source_authority = if refreshed {
         edit_format::EditSourceAuthority::DiskRefreshed
     } else {
         edit_format::EditSourceAuthority::CurrentIndex
-    })
+    };
+    Ok((repo_root, source_authority))
 }
 
 fn prepare_project_wide_rename(
@@ -4391,7 +4457,7 @@ impl SymForgeServer {
             open_world_hint = false
         )
     )]
-    pub(crate) async fn index_folder(&self, params: Parameters<IndexFolderInput>) -> String {
+    pub async fn index_folder(&self, params: Parameters<IndexFolderInput>) -> String {
         if let Some(result) = self.proxy_tool_call("index_folder", &params.0).await {
             // The daemon has rebound the session to the new project. Update our
             // local repo_root so that local-fallback tools (what_changed,
@@ -4421,6 +4487,20 @@ impl SymForgeServer {
                 root.display()
             );
         }
+        let previous_watcher = self.watcher_handle.lock().take();
+        if let Some(previous_watcher) = previous_watcher {
+            previous_watcher.stop_token.store(true, Ordering::Release);
+            let mut previous_task = previous_watcher.task;
+            if tokio::time::timeout(Duration::from_secs(2), &mut previous_task)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    "watcher: previous watcher did not stop within 2s before index reload"
+                );
+                previous_task.abort();
+            }
+        }
         let index = Arc::clone(&self.index);
         let reload_root = root.clone();
         match tokio::task::spawn_blocking(move || index.reload(&reload_root)).await {
@@ -4432,11 +4512,13 @@ impl SymForgeServer {
                 self.set_repo_root(Some(root.clone()));
 
                 // Restart the file watcher at the new root so freshness continues.
-                crate::watcher::restart_watcher(
+                let watcher_handle = crate::watcher::restart_watcher(
                     root.clone(),
                     Arc::clone(&self.index),
                     Arc::clone(&self.watcher_info),
+                    None,
                 );
+                self.watcher_handle.lock().replace(watcher_handle);
                 tracing::info!(root = %root.display(), "file watcher restarted after index_folder");
 
                 // Refresh git temporal data for the new root.
@@ -5782,9 +5864,7 @@ impl SymForgeServer {
                 {
                     return false;
                 }
-                if suppress_personal
-                    && crate::live_index::query::is_personal_tooling_path(path)
-                {
+                if suppress_personal && crate::live_index::query::is_personal_tooling_path(path) {
                     return false;
                 }
                 let class = search::NoisePolicy::classify_path(path, None);
@@ -5989,22 +6069,16 @@ impl SymForgeServer {
             let Some(file) = guard.get_file(path) else {
                 return true;
             };
-            if suppress_other_noise
-                && explore_is_test_like_path(path, Some(&file.classification))
-            {
+            if suppress_other_noise && explore_is_test_like_path(path, Some(&file.classification)) {
                 return true;
             }
-            if suppress_personal
-                && crate::live_index::query::is_personal_tooling_path(path)
-            {
+            if suppress_personal && crate::live_index::query::is_personal_tooling_path(path) {
                 return true;
             }
             let class = search::NoisePolicy::classify_path(path, None);
             match class {
                 search::NoiseClass::Vendor => suppress_vendor,
-                search::NoiseClass::Generated | search::NoiseClass::Ignored => {
-                    suppress_other_noise
-                }
+                search::NoiseClass::Generated | search::NoiseClass::Ignored => suppress_other_noise,
                 search::NoiseClass::None => false,
             }
         };
@@ -7386,17 +7460,13 @@ impl SymForgeServer {
             return result;
         }
         self.note_worktree_misuse_if_flag_on(params.0.working_directory.as_deref());
-        let repo_root = match self.capture_repo_root() {
-            Some(root) => root,
-            None => return "Error: no repository root configured.".to_string(),
-        };
         {
             let guard = self.index.read();
             loading_guard!(guard);
         }
         let batch_paths: Vec<String> = params.0.edits.iter().map(|e| e.path.clone()).collect();
-        let source_authority = match prepare_batch_paths_for_edit(self, &repo_root, &batch_paths) {
-            Ok(authority) => authority,
+        let (repo_root, source_authority) = match prepare_batch_paths_for_edit(self, &batch_paths) {
+            Ok(prepared) => prepared,
             Err(e) => return e,
         };
         match edit::execute_batch_edit(
@@ -7511,17 +7581,13 @@ impl SymForgeServer {
             return result;
         }
         self.note_worktree_misuse_if_flag_on(params.0.working_directory.as_deref());
-        let repo_root = match self.capture_repo_root() {
-            Some(root) => root,
-            None => return "Error: no repository root configured.".to_string(),
-        };
         {
             let guard = self.index.read();
             loading_guard!(guard);
         }
         let batch_paths: Vec<String> = params.0.targets.iter().map(|t| t.path.clone()).collect();
-        let source_authority = match prepare_batch_paths_for_edit(self, &repo_root, &batch_paths) {
-            Ok(authority) => authority,
+        let (repo_root, source_authority) = match prepare_batch_paths_for_edit(self, &batch_paths) {
+            Ok(prepared) => prepared,
             Err(e) => return e,
         };
         match edit::execute_batch_insert(&self.index, &repo_root, &params.0) {
@@ -7707,8 +7773,7 @@ mod tests {
             item_byte_range: None,
         };
         let (src_key, src_file) = make_file("src/normal.rs", content, vec![sym.clone()]);
-        let (vendor_key, vendor_file) =
-            make_file("vendor/foo/bar.rs", content, vec![sym.clone()]);
+        let (vendor_key, vendor_file) = make_file("vendor/foo/bar.rs", content, vec![sym.clone()]);
         let (personal_key, personal_file) =
             make_file(".claude/gsd-local-patches/foo.rs", content, vec![sym]);
         make_live_index_ready(vec![
@@ -12874,8 +12939,7 @@ mod tests {
             result.contains("noise-filtered match(es) suppressed"),
             "footer must report noise-filtered count; got:\n{result}"
         );
-        let count_ok = result.contains("2 noise-filtered")
-            || result.contains("3 noise-filtered");
+        let count_ok = result.contains("2 noise-filtered") || result.contains("3 noise-filtered");
         assert!(
             count_ok,
             "footer must report >=2 suppressed matches (vendor + personal-tooling); got:\n{result}"
@@ -14118,6 +14182,106 @@ mod tests {
         let index = make_live_index_ready(vec![("src/lib.rs".to_string(), indexed)]);
         let server = make_server_with_root(index, Some(dir.path().to_path_buf()));
         (dir, server, file_path)
+    }
+
+    fn setup_loaded_edit_test(files: &[(&str, &str)]) -> (TempDir, SymForgeServer) {
+        let dir = tempfile::tempdir().unwrap();
+        for (relative_path, content) in files {
+            let path = dir.path().join(relative_path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, content).unwrap();
+        }
+
+        let index = LiveIndex::load(dir.path()).unwrap();
+        let watcher_info = Arc::new(parking_lot::Mutex::new(
+            crate::watcher::WatcherInfo::default(),
+        ));
+        let server = SymForgeServer::new(
+            index,
+            "loaded_edit_test".to_string(),
+            watcher_info,
+            Some(dir.path().to_path_buf()),
+            None,
+        );
+        (dir, server)
+    }
+
+    #[test]
+    fn prepare_exact_path_for_edit_returns_err_on_confirmed_absent() {
+        let (dir, server) = setup_loaded_edit_test(&[]);
+        let relative_path = "src/missing.rs";
+        let expected_path = super::safe_repo_path_for_freshen(dir.path(), relative_path).unwrap();
+
+        let result = super::prepare_exact_path_for_edit(&server, relative_path);
+
+        assert_eq!(
+            result.unwrap_err(),
+            format!(
+                "{}",
+                super::EditError::PathNotFound {
+                    path: expected_path
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn freshen_exact_path_for_targeted_retrieval_removes_on_confirmed_absent_with_fence() {
+        let (dir, server) = setup_loaded_edit_test(&[("src/lib.rs", "pub fn gone() {}\n")]);
+        std::fs::remove_file(dir.path().join("src/lib.rs")).unwrap();
+
+        let refreshed = super::freshen_exact_path_for_targeted_retrieval(
+            &server,
+            &super::search::PathScope::exact("src/lib.rs"),
+        );
+
+        assert!(refreshed);
+        assert!(server.index().read().get_file("src/lib.rs").is_none());
+    }
+
+    #[test]
+    fn prepare_batch_paths_for_edit_partial_succeeds_with_skipped_paths() {
+        let (dir, server) = setup_loaded_edit_test(&[("src/lib.rs", "pub fn keep() {}\n")]);
+        let paths = vec!["src/lib.rs".to_string(), "src/missing.rs".to_string()];
+
+        let (repo_root, source_authority) =
+            super::prepare_batch_paths_for_edit(&server, &paths).expect("batch freshen");
+
+        assert_eq!(repo_root, dir.path());
+        assert_eq!(
+            source_authority,
+            crate::protocol::edit_format::EditSourceAuthority::CurrentIndex
+        );
+        assert!(server.index().read().get_file("src/lib.rs").is_some());
+    }
+
+    #[test]
+    fn freshen_helper_returns_generation_mismatch_when_gen_stale() {
+        let project_a = tempfile::tempdir().unwrap();
+        let project_b = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project_a.path().join("src")).unwrap();
+        std::fs::create_dir_all(project_b.path().join("src")).unwrap();
+        std::fs::write(project_a.path().join("src/a.rs"), "pub fn a() {}\n").unwrap();
+        std::fs::write(project_b.path().join("src/b.rs"), "pub fn b() {}\n").unwrap();
+
+        let index = LiveIndex::load(project_a.path()).unwrap();
+        let stale_gen = index.current_project_generation();
+        index.reload(project_b.path()).unwrap();
+
+        let result = crate::watcher::freshen_file_if_stale(
+            "src/b.rs",
+            &project_a.path().join("src/b.rs"),
+            &index,
+            stale_gen,
+        );
+
+        assert!(matches!(
+            result,
+            crate::watcher::FreshenResult::GenerationMismatch
+        ));
+        assert!(index.read().get_file("src/b.rs").is_some());
     }
 
     #[tokio::test]

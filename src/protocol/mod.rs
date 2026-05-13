@@ -49,6 +49,12 @@ pub struct SymForgeServer {
     pub(crate) prompt_router: PromptRouter<Self>,
     pub(crate) project_name: String,
     pub(crate) watcher_info: Arc<Mutex<WatcherInfo>>,
+    /// MUST NOT be held across `.await`. Use `.lock().take()` and
+    /// `.lock().replace(...)` around async work; `parking_lot::Mutex` is
+    /// non-async and held-across-await would deadlock the runtime.
+    /// Some only in local-stdio mode where this server owns its watcher.
+    /// None in daemon-proxy mode and daemon-degraded mode.
+    pub(crate) watcher_handle: Arc<Mutex<Option<crate::watcher::WatcherTaskHandle>>>,
     /// Root directory the watcher is currently watching. Stored in shared mutable
     /// state so local stdio tools can keep using the latest project root after
     /// `index_folder` rebinds the server to a new workspace.
@@ -90,6 +96,7 @@ impl SymForgeServer {
             prompt_router: Self::prompt_router(),
             project_name,
             watcher_info,
+            watcher_handle: Arc::new(Mutex::new(None)),
             repo_root: Arc::new(RwLock::new(repo_root)),
             token_stats,
             daemon_client: None,
@@ -111,6 +118,7 @@ impl SymForgeServer {
             prompt_router: Self::prompt_router(),
             project_name,
             watcher_info: Arc::new(Mutex::new(WatcherInfo::default())),
+            watcher_handle: Arc::new(Mutex::new(None)),
             repo_root: Arc::new(RwLock::new(repo_root)),
             token_stats: None,
             daemon_client: Some(Arc::new(tokio::sync::RwLock::new(daemon_client))),
