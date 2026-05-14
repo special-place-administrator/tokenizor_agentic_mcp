@@ -121,7 +121,7 @@ Diagnostic + minor correctness issues + **incidental items** surfaced during ext
 14. **H.11** — Sidecar PID/alive surfacing in `health`
 15. **H.12** — Add `.obsidian/`, `wiki/.obsidian/` to `NoisePolicy::classify_path`'s personal-tooling set
 16. **H.13** — Regression-suite gap analysis (added 2026-05-12 round-2 walk item 5) — audit which test would catch each verified Phase H bug; propose test-surface investments
-17. **ADR: watcher-subsystem-spawn-blocking-discipline** — write the ADR codifying the cancellation-token + generation-fence + fenced-API convention (carved here from H.1d closing rule per round-2 walk; not enforced by lint, reviewer responsibility at PR time)
+17. **ADR: watcher-subsystem-spawn-blocking-discipline** — write the ADR codifying the cancellation-token + generation-fence + fenced-API convention (carved here from H.1d closing rule per round-2 walk; not enforced by lint, reviewer responsibility at PR time). **Pulled forward to C-2 close-out gate on 2026-05-14** per plan-owner decision (close the documentation gap while the implementation is fresh); see Gate 1.5 scope addendum.
 
 ### Revised campaign sequence (post-2026-05-12)
 
@@ -156,7 +156,10 @@ Diagnostic + minor correctness issues + **incidental items** surfaced during ext
 
 User-trust + correctness fixes must close before Phase 2.3 resumes per the restructure.
 
+**Scope addendum 2026-05-14 (plan-owner authorized):** The watcher-subsystem-spawn-blocking-discipline ADR (originally C-4 item 17, line 124) is pulled forward into this C-2 close-out gate. Rationale: the ADR codifies the cancellation-token + generation-fence + fenced-API convention just landed in C-1; capturing the convention while the implementation is fresh prevents drift before the next `spawn_blocking` mutation site is added. H.8 through H.13 remain in their original C-4 slot (1-week sprint within 30 days of Phase 4 close). Phase H "fully finish all tasks" closure for the current campaign means C-1 + C-2 + ADR; user-side gates (Kimi repro, dogfood) run after this gate closes; push to `origin/main` follows the user-side gates green.
+
 - [ ] H.2, H.3, H.4, H.5, H.6, H.7 all committed and pushed; each has its own regression test. (H.7 added 2026-05-12 round-2 walk items 9+10.)
+- [ ] **ADR `docs/decisions/0014-watcher-subsystem-spawn-blocking-discipline.md`** committed. Codifies the three-layer convention (cancellation token, generation fence via `*_at_generation` fenced API, optional Layer 3 re-stat-on-NotFound retry) for `spawn_blocking` mutation sites inside the watcher subsystem. Captures the failure-mode coverage matrix from this plan-doc's "Tier 1 design rationale" as canonical guidance. Read-only spawn sites exempt. Not enforced by lint — reviewer responsibility at PR time per the round-2 "demoted to convention" framing. Includes a worked example referencing the H.1e + H.1f extensions as the additive-pattern template. Pulled forward from C-4 on 2026-05-14.
 - [ ] B-P1-1 `batch_rename` (incl. `dry_run`) completes within 5s wall on the evaluator's 13-site repro (was: 120s timeout).
 - [ ] B-P1-2 `find_dependents` no longer attributes inflated false-positive refs from common method-name collisions; AAP-shape repro reduces to <5 false positives (orchestrator-scale).
 - [ ] B-P1-3 `find_references` for a fully-qualified Rust call returns the call site (was: missing).
