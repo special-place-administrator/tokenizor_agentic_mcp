@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.8.1](https://github.com/special-place-administrator/symforge/compare/v7.8.0...v7.8.1) (2026-05-15)
+
+
+### Bug Fixes
+
+* align edit_plan symbol lines with selectors ([c8ba267](https://github.com/special-place-administrator/symforge/commit/c8ba267868e0eca59b5f157c46e255ece269062f))
+* disambiguate rust method-call references ([cfc261f](https://github.com/special-place-administrator/symforge/commit/cfc261fc5605e4c45cf586a894df4132a96353a5))
+
 ## [7.8.0](https://github.com/special-place-administrator/symforge/compare/v7.7.0...v7.8.0) (2026-05-15)
 
 
