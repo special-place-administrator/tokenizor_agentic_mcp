@@ -1441,6 +1441,24 @@ EOF
 
 **Push deferred until full Phase H ships.**
 
+**C-2 software-side closed 2026-05-15.** Restructured 2026-05-12 (round-2 walk item 4) and 2026-05-14 (ADR pulled forward) merged the original C-2 ranker-substrate bucket and C-3 opportunistic bucket into a single user-trust + correctness bucket (H.2, H.3, H.4, H.5, H.6, H.7) plus ADR 0014. Commit chain on `main` (post-C-1):
+
+- `251d7f0` H.4 — `find_dependents` Pass 2 collision filter
+- `42c8e16` H.5 — `find_references` qualified-path coverage via shared collector (also shipped the H.7 source fix as side effect of the shared collector consolidation)
+- `405aae0` H.2 — plan-doc allowed-files expansion (tools.rs health handlers)
+- `be509a7` H.2 — `health` / `health_compact` source-of-truth unification
+- `766c72c` ADR 0014 — watcher-subsystem spawn-blocking discipline (pulled forward from C-4)
+- `e691f10` H.6 — `get_symbol_context` / `get_file_context` render budget + test-module collapse
+- `9e5a93f` H.7 — `batch_rename` timeout profile (root cause identified pre-`42c8e16`)
+- `71feb4f` H.3-slot bonus — innermost enclosing symbol resolution for `search_text` nested-item matches (scope error: not a gate criterion)
+- `cabe312` H.7 — `batch_rename` regression coverage (perf budget assertion)
+- `4d939f1` H.3 — `search_text(structural=true)` envelope label fix (B-P1-7)
+- `82624e2` C-2 close-out evidence matrix + final verification transcript
+
+Final consolidated verification on `main` HEAD: `cargo test --all-targets -- --test-threads=1` PASS 1969/0/4, `cargo test --all-targets` PASS 1969/0/4, `cargo clippy -- -D warnings` PASS, `cargo check` PASS. Transcript: `docs/notes/2026-05-15-c2-final-verification.txt`. Evidence matrix: `docs/notes/2026-05-15-c2-close-out-evidence.md`.
+
+**Push gate non-negotiable:** Phase H push to `origin/main` blocked until both manual user-side gates (Kimi repro, ≥30 min dogfood on non-symforge project) run green per Gate 1 deferral note in the hotfix plan-doc.
+
 ---
 
 # Phase 3 — CoChange T3.3 Ranker Fusion (Group 2)
