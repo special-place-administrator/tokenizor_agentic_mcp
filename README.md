@@ -11,27 +11,26 @@ Works with MCP-compatible clients including Claude Code, Claude Desktop, Codex, 
 > **Use raw file reads** for docs and config when exact wording is the point.
 > **Use shell tools** for builds, tests, package managers, Docker, and general system tasks.
 
-## What's new in v7.5
+## What SymForge provides
 
-- **Frecency ranking for `search_files`** — opt-in `rank_by="frecency"` fuses a per-workspace frecency signal (7-day half-life) with the existing path-match and co-change signals. Commitment tools bump the signal (edit tools plus reads that imply active work on a file); discovery tools never bump. Requires `SYMFORGE_FRECENCY=1`. See [ADR 0011](docs/decisions/0011-frecency-bump-policy.md).
-- **Weighted-sum ranker** — `search_files` now composes rank signals through a weighted `RankSignal` registry, so new signals (frecency, coupling, …) plug in without amending handlers. See [ADR 0012](docs/decisions/0012-edit-and-ranker-hook-architecture.md).
-- **Daemon-fallback hooks** — when the sidecar port file is missing, PreToolUse/PostToolUse hooks now try the shared `symforge daemon` for an active session before failing open. Silent-degrade when both are unavailable.
-- **Hook-adoption metrics in `health`** — `health` reports per-workflow routing rates (owned workflows routed, daemon-fallback routed, no-sidecar outcomes split by workflow) so you can see at a glance whether hooks are actually reaching the index.
-- **Co-change coupling store (diagnostic)** — a per-workspace SQLite-backed coupling graph ships with `SYMFORGE_COUPLING=1`. Its strongest pair surfaces in `health` under "Strongest coupling". Ranker fusion is deferred to a later phase (see [ADR 0013](docs/decisions/0013-coupling-signal-contract.md)); until then, coupling signals in `search_files` are available only via `changed_with=path`.
-- **`SYMFORGE_HOME` override honored end-to-end** — the npm launcher, install script, and binary now agree on `SYMFORGE_HOME` so CI runs and sandboxed installs can point the whole install tree at a scratch directory without patching code.
+SymForge is a local-first code intelligence layer for agents. It keeps an in-memory tree-sitter index of the current workspace, watches the filesystem, and exposes MCP tools that let agents ask targeted questions instead of reading large files or grepping blindly.
 
-### v7.4 highlights
+- **Repository orientation:** compact repo maps, file outlines, conventions, investigation suggestions, and loaded-context inventory.
+- **Code reading:** exact file reads, file outlines with imports and consumers, symbol bodies, symbol context, caller/callee chains, and type dependency context.
+- **Search:** symbol search, text search with enclosing symbol context, multi-term and regex search, structural AST search via ast-grep patterns, and ranked file discovery.
+- **Impact tracing:** references, dependents, symbol-level diffs, uncommitted/changed-file views, match inspection, and post-edit impact analysis.
+- **Structural edits:** symbol-scoped replacement, insertion, deletion, find-and-replace, batch edits, batch inserts, batch renames, and edit planning.
+- **Ranking signals:** path matching by default, optional frecency ranking, and optional co-change ranking when a coupling store is available.
+- **Runtime observability:** health reports for index state, parser resilience, watcher state, hook adoption, daemon fallback routing, git temporal hotspots, coupling evidence, and worktree-awareness misuse.
+- **MCP surfaces:** tools, built-in resources, resource templates, and prompts for review, architecture mapping, failure triage, onboarding, refactoring, and debugging.
 
-- **ast-grep structural search** — `search_text` now supports `structural=true` for AST-pattern matching. Use `$VAR` for single-node metavariables and `$$$` for multi-node wildcards (e.g., `fn $NAME($$$) { $$$ }`). Powered by ast-grep-core with full tree-sitter integration across all 19 languages.
-- **Adaptive detail levels** — Tools with `max_tokens` auto-cascade verbosity from full to compact to signature to summary to stay within budget. No more truncated output — responses degrade gracefully.
-- **Lock-free concurrent reads** — Replaced `RwLock` with `ArcSwap` for the shared index handle. Zero reader contention under concurrent tool calls.
-- **Per-result confidence scores** — Search and navigation tools now report confidence (high/medium/low) on each result based on match quality, caller count, and churn.
-- **Token budget enforcement** — 11 search/navigation tools accept `max_tokens` and truncate at line boundaries when exceeded.
-- **MCP tool annotations** — All tools now declare `readOnlyHint` and `openWorldHint` per the MCP spec, enabling smarter client-side tool selection.
-- **Claude Desktop support** — `symforge init --client claude-desktop` registers the MCP server in Claude Desktop's config. On Windows, generates a `.cmd` wrapper to avoid the System32 CWD issue.
-- **Smarter PreToolUse hooks** — When the SymForge sidecar is already running, tool-preference hints are suppressed to reduce noise for agents that are actively using SymForge.
-- **Release profile optimization** (v7.4.2) — LTO, single codegen unit, and symbol stripping reduce the release binary by ~3%. Cross-crate inlining across 330 packages improves runtime performance.
-- **Aho-Corasick multi-term search** (v7.4.2) — Multi-term OR searches in `search_text` now use a single-pass Aho-Corasick automaton instead of sequential substring matching, eliminating per-line allocations for case-insensitive queries.
+### Supported inputs and clients
+
+SymForge parses 19 source languages through tree-sitter: Rust, Python, JavaScript, TypeScript, Go, Java, C, C++, C#, Ruby, PHP, Swift, Perl, Kotlin, Dart, Elixir, HTML, CSS, and SCSS.
+
+It also indexes common project data formats: JSON, TOML, YAML, dotenv/env files, and Markdown.
+
+The installer can configure Claude Code, Claude Desktop, Codex, Gemini CLI, and workspace-local Kilo Code. SymForge also works as a stdio MCP server for compatible clients such as VS Code MCP integrations, Roo Code, Cline, Continue, JetBrains plugins, and custom agents.
 
 ## When to use SymForge
 
@@ -117,7 +116,7 @@ After setup, confirm in your client that the SymForge MCP server is connected or
 |------|---------|
 | `search_symbols` | Find symbols by name, kind, language, path prefix |
 | `search_text` | Full-text search with enclosing symbol context. Supports literal, OR-terms, regex, and structural AST patterns (`structural=true`) |
-| `search_files` | File path discovery — three modes: default fuzzy ranking, `changed_with=path` for git-temporal co-change coupling, `resolve=true` for exact path resolution. Opt-in `rank_by="frecency"` with `SYMFORGE_FRECENCY=1` |
+| `search_files` | File path discovery with default fuzzy ranking, `resolve=true` for exact path resolution, `rank_by="path+cochange"` with `anchor_path` for coupling-store fusion, and `rank_by="frecency"` with `SYMFORGE_FRECENCY=1`. The older `changed_with=path` path remains as deprecated compatibility |
 
 ### Tracing impact
 
@@ -125,7 +124,7 @@ After setup, confirm in your client that the SymForge MCP server is connected or
 |------|---------|
 | `find_references` | Call sites, imports, type usages, implementations |
 | `find_dependents` | File-level dependency graph |
-| `get_symbol_context` (with `sections=[...]`) | Multi-hop caller/callee chains for a symbol — consolidated from the former `trace_symbol` tool; the old name remains as a daemon-side alias for one release cycle |
+| `get_symbol_context` (with `sections=[...]`) | Multi-hop caller/callee chains for a symbol. `trace_symbol` remains available as a compatibility alias |
 | `what_changed` | Files changed since a timestamp, ref, or uncommitted |
 | `diff_symbols` | Symbol-level diff between git refs (AST-based for supported languages) |
 | `analyze_file_impact` | Re-index a file after editing and report affected dependents |
@@ -158,9 +157,11 @@ All seven edit tools accept an optional `working_directory` parameter pointing a
 }
 ```
 
-### Frecency ranking
+### Ranking signals
 
-`search_files` accepts an optional `rank_by="frecency"` parameter that fuses a per-workspace frecency signal with the existing path-match and co-change signals. Frecency decays on a 7-day half-life, so a file you touched five minutes ago outranks one you hit ten times six months ago. Feature-gated on `SYMFORGE_FRECENCY=1`; when the flag is unset or `rank_by` is omitted, ranking is byte-identical to pre-flag releases. See [ADR 0011](docs/decisions/0011-frecency-bump-policy.md).
+`search_files` ranks path matches by default and can opt into additional signals when the caller requests them.
+
+Use `rank_by="frecency"` to fuse a per-workspace frecency signal with path matching. Frecency decays on a 7-day half-life, so a file you touched five minutes ago outranks one you hit ten times six months ago. This mode requires `SYMFORGE_FRECENCY=1`; when the flag is unset or `rank_by` is omitted, ranking falls back to the default path-based order. See [ADR 0011](docs/decisions/0011-frecency-bump-policy.md).
 
 ```json
 {
@@ -170,6 +171,16 @@ All seven edit tools accept an optional `working_directory` parameter pointing a
 ```
 
 Frecency scores bump on *commitment* tools — every edit tool plus the read tools that imply you're working on a known file (`get_file_context`, `get_file_content`, `get_symbol`, `get_symbol_context`). Discovery tools (`search_files`, `search_text`, `search_symbols`) deliberately never bump: searching for a file is not the same as working on it, and a searching-bumps-too policy corrupts rankings via a positive feedback loop. Batch tools dedup bumps per invocation, so editing 20 symbols in one `batch_edit` call bumps each touched path exactly once. Set `SYMFORGE_DEBUG_RANKING=1` to surface per-signal scores in `search_files` responses and a last-10 bumps list in `health`.
+
+Use `rank_by="path+cochange"` with `anchor_path="<repo-relative-path>"` to fuse path matches with the per-workspace co-change coupling store. This mode requires `SYMFORGE_COUPLING=1` and usable coupling evidence for the anchor. If the store is missing or has no usable neighbors, SymForge explains the fallback and returns path-ranked results. The older `changed_with=path` mode still works for compatibility and emits a deprecation warning.
+
+```json
+{
+  "query": "routes",
+  "rank_by": "path+cochange",
+  "anchor_path": "src/auth/routes.rs"
+}
+```
 
 ### Validation and indexing
 
@@ -235,7 +246,7 @@ Each of the seven edit tools accepts an optional `working_directory` parameter p
 }
 ```
 
-**`RankSignal`** wraps `search_files` scoring contributions. Each signal carries a name, a weight, and a `score()` function, and the ranker combines registered signals into a weighted sum. The current path-match and co-change signals ship as default registrations; additional signals — frecency, for example — register at startup and join the fusion without touching the handler or the other signals.
+**`RankSignal`** wraps `search_files` scoring contributions. Each signal carries a name, a weight, and a `score()` function, and the ranker combines registered signals into a weighted sum. Path matching, co-change evidence, and frecency use this extension point, so ranking behavior can evolve without rewriting the search handler.
 
 See [ADR 0012](docs/decisions/0012-edit-and-ranker-hook-architecture.md) for the rationale and the feature plug-in pattern.
 
@@ -259,7 +270,7 @@ See [ADR 0012](docs/decisions/0012-edit-and-ranker-hook-architecture.md) for the
 | `SYMFORGE_DAEMON_BIND` | `127.0.0.1` | Daemon bind host for shared local daemon |
 | `SYMFORGE_FRECENCY` | unset | Set to `1` to enable the frecency rank signal in `search_files` (`rank_by="frecency"`) |
 | `SYMFORGE_DEBUG_RANKING` | unset | Set to `1` to surface per-signal scores in `search_files` responses and a last-10 bumps list in `health` |
-| `SYMFORGE_COUPLING` | unset | Set to `1` to enable the co-change coupling store lifecycle (diagnostic only; ranker fusion pending) |
+| `SYMFORGE_COUPLING` | unset | Set to `1` to build and refresh the per-workspace co-change coupling store used by `search_files rank_by="path+cochange"` |
 | `SYMFORGE_WORKTREE_AWARE` | unset | Set to `1` to enable worktree routing on edit tools via the `working_directory` parameter |
 | `SYMFORGE_INDEXING_THREAD_STACK_BYTES` | `4194304` (Windows only) | Override the indexing worker-thread stack size. Minimum 3 MiB on Windows; ignored elsewhere |
 
