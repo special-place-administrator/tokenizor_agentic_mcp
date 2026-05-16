@@ -457,7 +457,10 @@ pub struct SearchFilesInput {
     pub limit: Option<u32>,
     /// Optional current file path to boost local results.
     pub current_file: Option<String>,
-    /// Find files that frequently co-change with this file (uses git temporal coupling data).
+    /// Deprecated since v7.x: prefer `rank_by="path+cochange"` with
+    /// `anchor_path=<path>`. This compatibility path still finds files that
+    /// frequently co-change with this file via git temporal coupling, but is
+    /// scheduled for removal in v8.x.
     pub changed_with: Option<String>,
     /// Set to true for exact path resolution mode: resolves an ambiguous filename or partial path to one exact project path.
     #[serde(default, deserialize_with = "lenient_bool")]
@@ -2142,6 +2145,14 @@ fn search_files_coupling_neighbors(
     } else {
         Some(neighbors)
     }
+}
+
+const CHANGED_WITH_DEPRECATION_WARNING: &str = "Deprecation warning: `search_files changed_with=` is deprecated since v7.x and scheduled for removal in v8.x; prefer `rank_by=\"path+cochange\"` with `anchor_path=<path>`.";
+
+fn append_changed_with_deprecation_warning(mut result: String) -> String {
+    result.push_str("\n\n");
+    result.push_str(CHANGED_WITH_DEPRECATION_WARNING);
+    result
 }
 
 fn search_files_resolve_match_type_label(view: &SearchFilesResolveView) -> &'static str {
@@ -4372,17 +4383,22 @@ impl SymForgeServer {
             return result;
         }
 
-        // Handle changed_with (git temporal coupling)
+        // Deprecated since v7.x: prefer `rank_by="path+cochange"` with `anchor_path`.
+        // Keep this compatibility path behavior unchanged for one release cycle.
         if let Some(ref target_path) = params.0.changed_with {
             let temporal = self.index.git_temporal();
             match temporal.state {
                 crate::live_index::git_temporal::GitTemporalState::Ready => {}
                 crate::live_index::git_temporal::GitTemporalState::Unavailable(ref reason) => {
-                    return format!("Git temporal data unavailable: {reason}");
+                    return append_changed_with_deprecation_warning(format!(
+                        "Git temporal data unavailable: {reason}"
+                    ));
                 }
                 _ => {
-                    return "Git temporal data is still loading. Try again in a few seconds."
-                        .to_string();
+                    return append_changed_with_deprecation_warning(
+                        "Git temporal data is still loading. Try again in a few seconds."
+                            .to_string(),
+                    );
                 }
             }
             let commit_count = temporal.stats.total_commits_analyzed;
@@ -4450,9 +4466,9 @@ impl SymForgeServer {
                                 "\nOnly {commit_count} commit(s) were analyzed, so coupling may strengthen as history grows."
                             ));
                         }
-                        return result;
+                        return append_changed_with_deprecation_warning(result);
                     }
-                    return if commit_count < 50 {
+                    let result = if commit_count < 50 {
                         format!(
                             "No high-confidence co-change data for '{target_path}'. Only {commit_count} commit(s) analyzed — strong co-change needs at least 2 shared commits and Jaccard >= 0.15. Results improve with more history."
                         )
@@ -4461,6 +4477,7 @@ impl SymForgeServer {
                             "No high-confidence co-change data for '{target_path}' (analyzed {commit_count} commits). This file may change independently of others or only have weak coupling signals."
                         )
                     };
+                    return append_changed_with_deprecation_warning(result);
                 }
                 let total = hits.len();
                 let mut result = format::search_files_result_view(&SearchFilesView::Found {
@@ -4491,16 +4508,16 @@ impl SymForgeServer {
                         "\n\n⚠ Low confidence: only {commit_count} commit(s) analyzed. Coupling scores may shift as history grows."
                     ));
                 }
-                return result;
+                return append_changed_with_deprecation_warning(result);
             }
             if commit_count < 20 {
-                return format!(
+                return append_changed_with_deprecation_warning(format!(
                     "'{target_path}' not found in git history ({commit_count} commit(s) analyzed). Co-change analysis needs more history to produce useful results."
-                );
+                ));
             }
-            return format!(
+            return append_changed_with_deprecation_warning(format!(
                 "No git history found for '{target_path}'. Check the file path is correct and that it has been committed."
-            );
+            ));
         }
 
         if params.0.query.is_empty() {
@@ -10792,6 +10809,12 @@ mod tests {
         assert!(
             result.contains("weak heuristic (git-temporal coupling)"),
             "{result}"
+        );
+        assert!(
+            result.contains("Deprecation warning")
+                && result.contains("rank_by=\"path+cochange\"")
+                && result.contains("anchor_path"),
+            "changed_with output should point callers at the fused co-change path: {result}"
         );
         assert!(result.contains("Low confidence"), "{result}");
         assert!(result.contains("src/routes.rs"), "{result}");

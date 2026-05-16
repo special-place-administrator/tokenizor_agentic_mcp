@@ -545,7 +545,7 @@ Lights up `CoChangeSignal::score()`. Implements ADR 0013's 6-rule contract. Rule
 
 **Verification:** `cargo test --test cochange_fusion --test-threads=1` PASS + existing search_files goldens unchanged.
 
-#### - [ ] **Unit 2.5: Deprecate changed_with separate walk (T3.5)**
+#### - [x] **Unit 2.5: Deprecate changed_with separate walk (T3.5)**
 
 **Goal:** The existing `changed_with: Option<String>` field on `SearchFilesInput` runs its own git-temporal walk. With T3.3-T3.4 in place, this can be deprecated (not deleted) — point users at `rank_by="path+cochange" + anchor_path=` instead.
 
@@ -553,15 +553,17 @@ Lights up `CoChangeSignal::score()`. Implements ADR 0013's 6-rule contract. Rule
 
 **Dependencies:** Unit 2.4
 
+**Status 2026-05-16:** Complete locally. TDD RED verified with `cargo test --lib search_files_changed_with -- --test-threads=1` failing in `test_search_files_changed_with_surfaces_weak_candidates` because `changed_with` output did not yet include a deprecation warning. GREEN passed after `SearchFilesInput::changed_with` documented the v7.x deprecation/v8.x removal path and `search_files` appended a deprecation warning to every `changed_with` compatibility-path return while leaving the git-temporal walk and existing result formatting intact. Verification passed: `cargo check`, `cargo test --lib search_files_changed_with -- --test-threads=1`, `cargo test --all-targets -- --test-threads=1`, and `cargo build --release`.
+
 **Files:**
 - Modify: `src/protocol/tools.rs::SearchFilesInput::changed_with` docstring
 - Modify: `src/protocol/tools.rs::search_files` (continue to honor `changed_with` if set — just emit a deprecation warning)
 
 **Approach:** Add `// deprecated since v7.x: prefer rank_by="path+cochange" with anchor_path`. Keep runtime behavior unchanged for one release cycle; remove in v8.x.
 
-**Test scenarios:** None new (preserve existing tests).
+**Test scenarios:** Existing `changed_with` tests preserved; `test_search_files_changed_with_surfaces_weak_candidates` now also pins the deprecation warning.
 
-**Verification:** Existing `changed_with` tests still pass.
+**Verification:** Existing `changed_with` tests still pass; full cargo gate passed.
 
 #### - [ ] **Unit 2.6: Wave 2 close-out + release as v7.9.0 (minor bump)**
 
