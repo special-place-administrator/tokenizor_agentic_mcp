@@ -602,17 +602,19 @@ Lights up `CoChangeSignal::score()`. Implements ADR 0013's coupling contract. Ru
 
 ### Wave 3 — RTK Tier 1 + Tier 2 Merged Sprint (Phase 4)
 
-Per user direction: Tier 1 and Tier 2 combined into one cross-sprint. Sub-ordered by file-touch collision graph + per-item dependency. RTK 4.3 dropped (no `.scm` files in repo). T2.6 (`match_output` short-circuit) is investigative; T2.2 may collapse if no real symbol found.
+Per user direction: Tier 1 and Tier 2 combined into one cross-sprint. Sub-ordered by file-touch collision graph + per-item dependency. RTK 4.3 dropped (no `.scm` files in repo). T2.6 (`match_output` short-circuit) investigation completed 2026-05-16: no real `match_output` symbol exists, so Unit 3e.4 is N/A as written. T2.2 SQLite analytics is now a standalone product decision if retained.
 
 #### Sub-wave 3a: Research
 
-#### - [ ] **Unit 3a.1: OnceLock audit (T2.3)**
+#### - [x] **Unit 3a.1: OnceLock audit (T2.3)**
 
 **Goal:** Map every hot-path init pattern in `src/` that could migrate from per-call init to `OnceLock`. Output is a follow-up plan, not source patches.
 
 **Requirements:** R3
 
 **Dependencies:** Wave 2 close
+
+**Landed:** `d3dda0e` (`docs(rtk): audit once-lock candidates`)
 
 **Files:**
 - Create: `docs/notes/2026-XX-XX-rtk-once-lock-audit.md` (audit doc; sites + recommended migration order)
@@ -623,13 +625,17 @@ Per user direction: Tier 1 and Tier 2 combined into one cross-sprint. Sub-ordere
 
 **Verification:** Audit doc complete with at least 5 sites identified or "no migration candidates" stated explicitly.
 
-#### - [ ] **Unit 3a.2: `match_output` investigation (T2.6)**
+#### - [x] **Unit 3a.2: `match_output` investigation (T2.6)**
 
 **Goal:** Determine whether `match_output` (per RTK Tier 2 wiki note) refers to a real symbol. If yes, propose short-circuit shape. If no, mark T2.2 (SQLite analytics) as standalone.
 
 **Requirements:** R3
 
 **Dependencies:** Wave 2 close
+
+**Landed:** `afc41eb` (`docs(rtk): investigate match_output short-circuit`)
+
+**Outcome:** No real `match_output` symbol exists in SymForge. T2.6 implementation is N/A as written; SQLite analytics no longer depends on this investigation.
 
 **Files:**
 - Create: `docs/notes/2026-XX-XX-rtk-match-output-investigation.md`
@@ -642,13 +648,15 @@ Per user direction: Tier 1 and Tier 2 combined into one cross-sprint. Sub-ordere
 
 #### Sub-wave 3b: First parallel implementation batch
 
-#### - [ ] **Unit 3b.1: `automod` for `src/parsing/languages/` (RTK 4.1)**
+#### - [x] **Unit 3b.1: `automod` for `src/parsing/languages/` (RTK 4.1)**
 
 **Goal:** Replace 19 manual `mod` declarations in `src/parsing/languages/mod.rs:1-19` with `automod::dir!()`.
 
 **Requirements:** R3
 
 **Dependencies:** Wave 0 close (paired with 3b.2 in parallel)
+
+**Landed:** `1a4fa86` (`refactor(parsing): use automod for language modules`)
 
 **Files:**
 - Modify: `Cargo.toml` (add `automod = "1"` dependency)
@@ -800,13 +808,13 @@ Per user direction: Tier 1 and Tier 2 combined into one cross-sprint. Sub-ordere
 
 **Verification:** Targeted + integration tests PASS.
 
-#### - [ ] **Unit 3e.2: SQLite analytics (T2.2) — conditional**
+#### - [ ] **Unit 3e.2: SQLite analytics (T2.2) — standalone decision**
 
 **Goal:** Track tool call frequency, response sizes, index rebuild times, edit success rates. Use `rusqlite` bundled + WAL + 5s busy timeout + GLOB path scoping.
 
 **Requirements:** R3
 
-**Dependencies:** Unit 3a.2 (if `match_output` is real, T2.2 is in scope; else T2.2 collapses)
+**Dependencies:** Product decision required after Unit 3a.2 found no real `match_output` seam. If retained, T2.2 stands on observability value rather than formatter short-circuit support.
 
 **Files:**
 - Create: `src/observability/analytics.rs` (new module if T2.2 ships)
@@ -838,13 +846,17 @@ Per user direction: Tier 1 and Tier 2 combined into one cross-sprint. Sub-ordere
 
 **Verification:** Targeted tests PASS.
 
-#### - [ ] **Unit 3e.4: `match_output` short-circuit — conditional (T2.6)**
+#### - [x] **Unit 3e.4: `match_output` short-circuit — N/A as written (T2.6)**
 
 **Goal:** Short-circuit format pipeline when result is obvious (zero-match searches, healthy index).
 
 **Requirements:** R3
 
 **Dependencies:** Unit 3a.2 finding that `match_output` exists as a real symbol
+
+**Landed:** `afc41eb` (`docs(rtk): investigate match_output short-circuit`)
+
+**Outcome:** No real `match_output` symbol exists. Do not implement this unit as written. Any future trivial-response optimization should be a new, typed formatter-design item rather than a patch to a missing hook.
 
 **Files:** TBD post-investigation.
 
