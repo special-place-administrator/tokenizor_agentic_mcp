@@ -14,7 +14,7 @@ use parking_lot::RwLock;
 /// - Never use MCP error codes for not-found — return helpful text via format functions
 /// - Never hold RwLockReadGuard across await points — extract into owned values first
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -26,7 +26,8 @@ use schemars::{JsonSchema, Schema};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::capability::{
-    CapabilityEvidence, CapabilityFreshness, CapabilityName, CapabilitySafety, CapabilityStatus,
+    CapabilityCost, CapabilityEvidence, CapabilityFreshness, CapabilityName, CapabilitySafety,
+    CapabilityStatus, CouplingPreparePolicy,
 };
 
 /// Deserialize a `u32` from either a JSON number or a stringified number like `"5"`.
@@ -488,7 +489,9 @@ pub struct SearchFilesInput {
     /// path ranking, otherwise the response includes explicit fallback,
     /// unavailable, or disabled-by-policy evidence.
     /// `"path+cochange"` fuses path match with the coupling store when
-    /// `anchor_path` is set and the workspace has coupling data.
+    /// `anchor_path` is set and ready coupling data exists; otherwise the
+    /// response reports call-time preparation, fallback, unavailable, stale,
+    /// or disabled-by-policy evidence.
     /// Any other value (including `None`) preserves the default
     /// tier-based ordering exactly.
     ///
@@ -2152,18 +2155,239 @@ fn search_files_match_type_label(view: &SearchFilesView) -> &'static str {
 
 const MAX_CO_CHANGE_PARTNERS_PER_ANCHOR: u32 = 20;
 
+struct SearchFilesCoChangeResolution {
+    neighbors: Option<SearchFilesCouplingNeighbors>,
+    evidence: CapabilityEvidence,
+}
+
+fn cochange_ranking_evidence(
+    status: CapabilityStatus,
+    freshness: CapabilityFreshness,
+    cost: CapabilityCost,
+    detail: impl Into<String>,
+) -> CapabilityEvidence {
+    CapabilityEvidence::new(CapabilityName::CoChangeRanking, status)
+        .with_freshness(freshness)
+        .with_cost(cost)
+        .with_safety(CapabilitySafety::ReadOnly)
+        .with_detail(detail)
+}
+
+fn cochange_lazy_prepare_evidence(
+    root: &Path,
+    reason: &str,
+    fallback_detail: &str,
+) -> CapabilityEvidence {
+    match crate::live_index::coupling::start_lazy_prepare(root) {
+        Ok(crate::live_index::coupling::LazyPrepareOutcome::Started) => cochange_ranking_evidence(
+            CapabilityStatus::Preparing,
+            CapabilityFreshness::Unknown,
+            CapabilityCost::Bounded,
+            format!("{reason}; bounded background preparation started; {fallback_detail}"),
+        ),
+        Ok(crate::live_index::coupling::LazyPrepareOutcome::AlreadyRunning) => {
+            cochange_ranking_evidence(
+                CapabilityStatus::Preparing,
+                CapabilityFreshness::Unknown,
+                CapabilityCost::Bounded,
+                format!(
+                    "{reason}; bounded background preparation already in progress; {fallback_detail}"
+                ),
+            )
+        }
+        Err(error) => cochange_ranking_evidence(
+            CapabilityStatus::Unavailable,
+            CapabilityFreshness::Unknown,
+            CapabilityCost::Bounded,
+            format!("{reason}; unable to start bounded preparation: {error}; {fallback_detail}"),
+        ),
+    }
+}
+
+fn cochange_stale_prepare_evidence(root: &Path) -> CapabilityEvidence {
+    match crate::live_index::coupling::start_lazy_prepare(root) {
+        Ok(crate::live_index::coupling::LazyPrepareOutcome::Started) => cochange_ranking_evidence(
+            CapabilityStatus::Stale,
+            CapabilityFreshness::Stale,
+            CapabilityCost::Bounded,
+            "coupling store is stale for the current HEAD; bounded background refresh started; path ranking returned",
+        ),
+        Ok(crate::live_index::coupling::LazyPrepareOutcome::AlreadyRunning) => {
+            cochange_ranking_evidence(
+                CapabilityStatus::Stale,
+                CapabilityFreshness::Stale,
+                CapabilityCost::Bounded,
+                "coupling store is stale for the current HEAD; bounded background refresh already in progress; path ranking returned",
+            )
+        }
+        Err(error) => cochange_ranking_evidence(
+            CapabilityStatus::Unavailable,
+            CapabilityFreshness::Stale,
+            CapabilityCost::Bounded,
+            format!(
+                "coupling store is stale for the current HEAD; unable to start bounded refresh: {error}; path ranking returned"
+            ),
+        ),
+    }
+}
+
 fn search_files_coupling_neighbors(
     index: &LiveIndex,
+    repo_root: Option<&Path>,
     anchor_path: &str,
-) -> Option<SearchFilesCouplingNeighbors> {
-    let store = index.coupling_store()?;
+) -> SearchFilesCoChangeResolution {
+    let anchor_path = normalize_exact_path(anchor_path);
+    if !index.files.contains_key(&anchor_path) {
+        return SearchFilesCoChangeResolution {
+            neighbors: None,
+            evidence: cochange_ranking_evidence(
+                CapabilityStatus::FallbackUsed,
+                CapabilityFreshness::Unknown,
+                CapabilityCost::Free,
+                format!("anchor_path={anchor_path} is not indexed; path ranking returned"),
+            ),
+        };
+    }
+
+    match crate::live_index::coupling::coupling_prepare_policy_from_env() {
+        CouplingPreparePolicy::Disabled => {
+            return SearchFilesCoChangeResolution {
+                neighbors: None,
+                evidence: cochange_ranking_evidence(
+                    CapabilityStatus::DisabledByPolicy,
+                    CapabilityFreshness::Unknown,
+                    CapabilityCost::Free,
+                    "operator policy disabled co-change preparation and ranking; path ranking returned",
+                ),
+            };
+        }
+        CouplingPreparePolicy::LazyOnRequest | CouplingPreparePolicy::WarmOnStart => {}
+    }
+
+    let store = if let Some(store) = index.coupling_store() {
+        Some(store.clone())
+    } else if let Some(root) = repo_root {
+        match crate::live_index::coupling::open_existing_coupling_store(root) {
+            Ok(Some(store)) => Some((*store).clone()),
+            Ok(None) => {
+                return SearchFilesCoChangeResolution {
+                    neighbors: None,
+                    evidence: cochange_lazy_prepare_evidence(
+                        root,
+                        "no coupling store exists for this workspace",
+                        "path ranking returned",
+                    ),
+                };
+            }
+            Err(error) => {
+                return SearchFilesCoChangeResolution {
+                    neighbors: None,
+                    evidence: cochange_ranking_evidence(
+                        CapabilityStatus::Unavailable,
+                        CapabilityFreshness::Unknown,
+                        CapabilityCost::Low,
+                        format!("unable to open coupling store: {error}; path ranking returned"),
+                    ),
+                };
+            }
+        }
+    } else {
+        return SearchFilesCoChangeResolution {
+            neighbors: None,
+            evidence: cochange_ranking_evidence(
+                CapabilityStatus::Unavailable,
+                CapabilityFreshness::Unknown,
+                CapabilityCost::Free,
+                "no repository root is bound; path ranking returned",
+            ),
+        };
+    };
+    let Some(store) = store else {
+        return SearchFilesCoChangeResolution {
+            neighbors: None,
+            evidence: cochange_ranking_evidence(
+                CapabilityStatus::Unavailable,
+                CapabilityFreshness::Unknown,
+                CapabilityCost::Free,
+                "no coupling store is available; path ranking returned",
+            ),
+        };
+    };
+
+    if let Some(root) = repo_root {
+        match store.cold_built_at() {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return SearchFilesCoChangeResolution {
+                    neighbors: None,
+                    evidence: cochange_lazy_prepare_evidence(
+                        root,
+                        "coupling store exists but has not completed a cold build",
+                        "path ranking returned",
+                    ),
+                };
+            }
+            Err(error) => {
+                return SearchFilesCoChangeResolution {
+                    neighbors: None,
+                    evidence: cochange_ranking_evidence(
+                        CapabilityStatus::Unavailable,
+                        CapabilityFreshness::Unknown,
+                        CapabilityCost::Low,
+                        format!(
+                            "unable to inspect coupling store build state: {error}; path ranking returned"
+                        ),
+                    ),
+                };
+            }
+        }
+
+        let stored_head = match store.last_head() {
+            Ok(head) => head,
+            Err(error) => {
+                return SearchFilesCoChangeResolution {
+                    neighbors: None,
+                    evidence: cochange_ranking_evidence(
+                        CapabilityStatus::Unavailable,
+                        CapabilityFreshness::Unknown,
+                        CapabilityCost::Low,
+                        format!(
+                            "unable to inspect coupling store HEAD state: {error}; path ranking returned"
+                        ),
+                    ),
+                };
+            }
+        };
+        let current_head = crate::git::head_sha(root).ok();
+        if stored_head != current_head {
+            return SearchFilesCoChangeResolution {
+                neighbors: None,
+                evidence: cochange_stale_prepare_evidence(root),
+            };
+        }
+    }
+
     let rows = store
         .query_with_floor(
-            &crate::live_index::coupling::AnchorKey::file(anchor_path),
+            &crate::live_index::coupling::AnchorKey::file(&anchor_path),
             MAX_CO_CHANGE_PARTNERS_PER_ANCHOR,
             crate::live_index::rank_signals::FILE_LEVEL_CO_CHANGE_FLOOR,
         )
-        .ok()?;
+        .map_err(|error| error.to_string());
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(error) => {
+            return SearchFilesCoChangeResolution {
+                neighbors: None,
+                evidence: cochange_ranking_evidence(
+                    CapabilityStatus::Unavailable,
+                    CapabilityFreshness::Unknown,
+                    CapabilityCost::Low,
+                    format!("unable to query coupling store: {error}; path ranking returned"),
+                ),
+            };
+        }
+    };
     let mut neighbors = HashMap::new();
     for row in rows {
         let Some(partner_path) = row.partner.as_str().strip_prefix("file:") else {
@@ -2182,9 +2406,29 @@ fn search_files_coupling_neighbors(
         );
     }
     if neighbors.is_empty() {
-        None
+        SearchFilesCoChangeResolution {
+            neighbors: None,
+            evidence: cochange_ranking_evidence(
+                CapabilityStatus::FallbackUsed,
+                CapabilityFreshness::Empty,
+                CapabilityCost::Low,
+                format!(
+                    "ready coupling store has no usable partner rows for anchor_path={anchor_path}; path ranking returned"
+                ),
+            ),
+        }
     } else {
-        Some(neighbors)
+        SearchFilesCoChangeResolution {
+            neighbors: Some(neighbors),
+            evidence: cochange_ranking_evidence(
+                CapabilityStatus::Ready,
+                CapabilityFreshness::Current,
+                CapabilityCost::Low,
+                format!(
+                    "ready coupling store loaded usable partner rows for anchor_path={anchor_path}"
+                ),
+            ),
+        }
     }
 }
 
@@ -4757,37 +5001,44 @@ impl SymForgeServer {
 
         let rank_by_path_cochange = params.0.rank_by.as_deref() == Some("path+cochange");
         let rank_by_frecency = params.0.rank_by.as_deref() == Some("frecency");
-        let mut cochange_note: Option<String> = None;
+        let mut cochange_evidence: Option<CapabilityEvidence> = None;
         let mut frecency_evidence: Option<CapabilityEvidence> = None;
         let mut hidden_noise_count = 0usize;
+        let cochange_repo_root = if rank_by_path_cochange {
+            self.capture_repo_root()
+        } else {
+            None
+        };
         let mut view = {
             let guard = self.index.read();
             loading_guard!(guard);
-            let coupling_neighbors = if rank_by_path_cochange
-                && let Some(anchor_path) = params.0.anchor_path.as_deref()
-            {
-                search_files_coupling_neighbors(&guard, anchor_path)
+            let cochange_resolution = if rank_by_path_cochange {
+                match params.0.anchor_path.as_deref() {
+                    Some(anchor_path) => Some(search_files_coupling_neighbors(
+                        &guard,
+                        cochange_repo_root.as_deref(),
+                        anchor_path,
+                    )),
+                    None => Some(SearchFilesCoChangeResolution {
+                        neighbors: None,
+                        evidence: cochange_ranking_evidence(
+                            CapabilityStatus::FallbackUsed,
+                            CapabilityFreshness::Unknown,
+                            CapabilityCost::Free,
+                            "`rank_by=\"path+cochange\"` requires `anchor_path=<path>`; path ranking returned",
+                        ),
+                    }),
+                }
             } else {
                 None
             };
-            if rank_by_path_cochange {
-                cochange_note = match (params.0.anchor_path.as_deref(), coupling_neighbors.as_ref())
-                {
-                    (None, _) => Some(
-                        "Co-change ranking inactive: `rank_by=\"path+cochange\"` requires `anchor_path=<path>`; fell back to path-only ranking."
-                            .to_string(),
-                    ),
-                    (Some(anchor_path), None) => Some(format!(
-                        "Co-change ranking inactive: no usable coupling-store evidence for `anchor_path={anchor_path}`; fell back to path-only ranking."
-                    )),
-                    (Some(_), Some(_)) => None,
-                };
+            if let Some(resolution) = &cochange_resolution {
+                cochange_evidence = Some(resolution.evidence.clone());
             }
-            let coupling_context = params
-                .0
-                .anchor_path
-                .as_deref()
-                .zip(coupling_neighbors.as_ref());
+            let coupling_neighbors = cochange_resolution
+                .as_ref()
+                .and_then(|resolution| resolution.neighbors.as_ref());
+            let coupling_context = params.0.anchor_path.as_deref().zip(coupling_neighbors);
             let view = guard.capture_search_files_view_with_noise(
                 &params.0.query,
                 params.0.limit.unwrap_or(20) as usize,
@@ -4814,15 +5065,25 @@ impl SymForgeServer {
                         .count(),
                     _ => 0,
                 };
-                cochange_note = if applied_hits > 0 {
-                    Some(format!(
-                        "Co-change ranking active: `anchor_path={anchor_path}` loaded {} usable coupling partner(s); rows with shared-commit counts show applied evidence.",
-                        neighbors.len()
+                cochange_evidence = if applied_hits > 0 {
+                    Some(cochange_ranking_evidence(
+                        CapabilityStatus::Applied,
+                        CapabilityFreshness::Current,
+                        CapabilityCost::Low,
+                        format!(
+                            "anchor_path={anchor_path} loaded {} usable coupling partner(s); rows with shared-commit counts show applied evidence",
+                            neighbors.len()
+                        ),
                     ))
                 } else {
-                    Some(format!(
-                        "Co-change ranking requested: `anchor_path={anchor_path}` loaded {} usable coupling partner(s), but none matched returned candidates or passed rank gates; path-only scores are shown.",
-                        neighbors.len()
+                    Some(cochange_ranking_evidence(
+                        CapabilityStatus::FallbackUsed,
+                        CapabilityFreshness::Current,
+                        CapabilityCost::Low,
+                        format!(
+                            "anchor_path={anchor_path} loaded {} usable coupling partner(s), but none matched returned candidates or passed rank gates; path ranking returned",
+                            neighbors.len()
+                        ),
                     ))
                 };
             }
@@ -4968,9 +5229,9 @@ impl SymForgeServer {
                 include_personal_tooling,
             );
         }
-        if let Some(note) = cochange_note {
+        if let Some(evidence) = cochange_evidence {
             result.push_str("\n\n");
-            result.push_str(&note);
+            result.push_str(&format::capability_evidence_line(&evidence));
         }
         if let Some(evidence) = frecency_evidence {
             result.push_str("\n\n");
@@ -8728,6 +8989,24 @@ mod tests {
     }
 
     impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: called only in single-threaded test context; no concurrent env readers.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: called only in single-threaded test context; no concurrent env readers.
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, previous }
+        }
+
         fn set_path(key: &'static str, value: &Path) -> Self {
             let previous = std::env::var_os(key);
             // SAFETY: called only in single-threaded test context; no concurrent env readers.
@@ -11483,7 +11762,7 @@ mod tests {
             .await;
 
         assert!(
-            result.contains("── Co-changed files (git temporal coupling) ──"),
+            result.contains("── Co-changed files (coupling store) ──"),
             "got: {result}"
         );
         let partner_pos = result.find("src/server/routes.rs").expect("partner");
@@ -11497,9 +11776,231 @@ mod tests {
             "coupling evidence should be rendered: {result}"
         );
         assert!(
-            result.contains("Co-change ranking active")
+            result.contains("Capability: co-change ranking applied")
                 && result.contains("loaded 1 usable coupling partner"),
             "rank_by=path+cochange should report applied evidence: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_files_path_cochange_env_unset_missing_store_reports_preparing() {
+        let _env = EnvVarGuard::remove("SYMFORGE_COUPLING");
+        let repo = init_git_repo();
+        let db_path = repo.path().join(crate::paths::SYMFORGE_COUPLING_DB_PATH);
+        assert!(!db_path.exists(), "test starts without a coupling store");
+        let server = make_server_with_root(
+            make_live_index_ready(vec![
+                make_file("src/auth/routes.rs", b"fn auth_routes() {}", vec![]),
+                make_file("src/server/routes.rs", b"fn server_routes() {}", vec![]),
+            ]),
+            Some(repo.path().to_path_buf()),
+        );
+
+        let result = server
+            .search_files(Parameters(super::SearchFilesInput {
+                query: "routes.rs".to_string(),
+                limit: Some(20),
+                current_file: None,
+                changed_with: None,
+                resolve: None,
+                estimate: None,
+                max_tokens: None,
+                rank_by: Some("path+cochange".to_string()),
+                anchor_path: Some("src/auth/routes.rs".to_string()),
+                include_vendor: None,
+                include_personal_tooling: None,
+            }))
+            .await;
+
+        assert!(
+            result.contains("Capability: co-change ranking preparing"),
+            "env-unset missing-store request should report lazy preparation evidence: {result}"
+        );
+        assert!(
+            result.contains("path ranking returned"),
+            "preparing fallback should preserve path-ranked results: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_files_path_cochange_disabled_policy_reports_disabled() {
+        let _env = EnvVarGuard::set("SYMFORGE_COUPLING", "disabled");
+        let repo = init_git_repo();
+        let db_path = repo.path().join(crate::paths::SYMFORGE_COUPLING_DB_PATH);
+        let server = make_server_with_root(
+            make_live_index_ready(vec![
+                make_file("src/auth/routes.rs", b"fn auth_routes() {}", vec![]),
+                make_file("src/server/routes.rs", b"fn server_routes() {}", vec![]),
+            ]),
+            Some(repo.path().to_path_buf()),
+        );
+
+        let result = server
+            .search_files(Parameters(super::SearchFilesInput {
+                query: "routes.rs".to_string(),
+                limit: Some(20),
+                current_file: None,
+                changed_with: None,
+                resolve: None,
+                estimate: None,
+                max_tokens: None,
+                rank_by: Some("path+cochange".to_string()),
+                anchor_path: Some("src/auth/routes.rs".to_string()),
+                include_vendor: None,
+                include_personal_tooling: None,
+            }))
+            .await;
+
+        assert!(
+            result.contains("Capability: co-change ranking disabled by policy"),
+            "disabled policy should be reported explicitly: {result}"
+        );
+        assert!(
+            !db_path.exists(),
+            "disabled policy must not create a coupling store"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_files_path_cochange_non_git_reports_unavailable() {
+        let _env = EnvVarGuard::remove("SYMFORGE_COUPLING");
+        let root = TempDir::new().expect("temp non-git root");
+        let server = make_server_with_root(
+            make_live_index_ready(vec![
+                make_file("src/auth/routes.rs", b"fn auth_routes() {}", vec![]),
+                make_file("src/server/routes.rs", b"fn server_routes() {}", vec![]),
+            ]),
+            Some(root.path().to_path_buf()),
+        );
+
+        let result = server
+            .search_files(Parameters(super::SearchFilesInput {
+                query: "routes.rs".to_string(),
+                limit: Some(20),
+                current_file: None,
+                changed_with: None,
+                resolve: None,
+                estimate: None,
+                max_tokens: None,
+                rank_by: Some("path+cochange".to_string()),
+                anchor_path: Some("src/auth/routes.rs".to_string()),
+                include_vendor: None,
+                include_personal_tooling: None,
+            }))
+            .await;
+
+        assert!(
+            result.contains("Capability: co-change ranking unavailable")
+                && result.contains("not a git repository"),
+            "non-git repo should be reported explicitly: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_files_path_cochange_missing_anchor_reports_precise_evidence() {
+        let _env = EnvVarGuard::remove("SYMFORGE_COUPLING");
+        let repo = init_git_repo();
+        let server = make_server_with_root(
+            make_live_index_ready(vec![
+                make_file("src/auth/routes.rs", b"fn auth_routes() {}", vec![]),
+                make_file("src/server/routes.rs", b"fn server_routes() {}", vec![]),
+            ]),
+            Some(repo.path().to_path_buf()),
+        );
+
+        let result = server
+            .search_files(Parameters(super::SearchFilesInput {
+                query: "routes.rs".to_string(),
+                limit: Some(20),
+                current_file: None,
+                changed_with: None,
+                resolve: None,
+                estimate: None,
+                max_tokens: None,
+                rank_by: Some("path+cochange".to_string()),
+                anchor_path: Some("src/missing/routes.rs".to_string()),
+                include_vendor: None,
+                include_personal_tooling: None,
+            }))
+            .await;
+
+        assert!(
+            result.contains("Capability: co-change ranking fallback used")
+                && result.contains("anchor_path=src/missing/routes.rs")
+                && result.contains("not indexed"),
+            "missing anchor should be precise evidence, not silent path fallback: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_files_path_cochange_empty_neighbor_set_reports_fallback_evidence() {
+        let store = crate::live_index::coupling::CouplingStore::open_in_memory().unwrap();
+        let server = make_server(make_live_index_ready_with_coupling_store(
+            vec![
+                make_file("src/auth/routes.rs", b"fn auth_routes() {}", vec![]),
+                make_file("src/server/routes.rs", b"fn server_routes() {}", vec![]),
+            ],
+            store,
+        ));
+
+        let result = server
+            .search_files(Parameters(super::SearchFilesInput {
+                query: "routes.rs".to_string(),
+                limit: Some(20),
+                current_file: None,
+                changed_with: None,
+                resolve: None,
+                estimate: None,
+                max_tokens: None,
+                rank_by: Some("path+cochange".to_string()),
+                anchor_path: Some("src/auth/routes.rs".to_string()),
+                include_vendor: None,
+                include_personal_tooling: None,
+            }))
+            .await;
+
+        assert!(
+            result.contains("Capability: co-change ranking fallback used")
+                && result.contains("no usable partner rows"),
+            "empty neighbor set should be explicit fallback evidence: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_files_path_cochange_corrupt_store_reports_unavailable() {
+        let _env = EnvVarGuard::remove("SYMFORGE_COUPLING");
+        let repo = init_git_repo();
+        let db_path = repo.path().join(crate::paths::SYMFORGE_COUPLING_DB_PATH);
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        fs::write(&db_path, b"not sqlite").unwrap();
+        let server = make_server_with_root(
+            make_live_index_ready(vec![
+                make_file("src/auth/routes.rs", b"fn auth_routes() {}", vec![]),
+                make_file("src/server/routes.rs", b"fn server_routes() {}", vec![]),
+            ]),
+            Some(repo.path().to_path_buf()),
+        );
+
+        let result = server
+            .search_files(Parameters(super::SearchFilesInput {
+                query: "routes.rs".to_string(),
+                limit: Some(20),
+                current_file: None,
+                changed_with: None,
+                resolve: None,
+                estimate: None,
+                max_tokens: None,
+                rank_by: Some("path+cochange".to_string()),
+                anchor_path: Some("src/auth/routes.rs".to_string()),
+                include_vendor: None,
+                include_personal_tooling: None,
+            }))
+            .await;
+
+        assert!(
+            result.contains("Capability: co-change ranking unavailable")
+                && result.contains("unable to open coupling store"),
+            "corrupt store should be explicit unavailable evidence: {result}"
         );
     }
 
@@ -11551,13 +12052,12 @@ mod tests {
             "fallback should preserve path results: {path_cochange}"
         );
         assert!(
-            path_cochange.contains(
-                "Co-change ranking inactive: `rank_by=\"path+cochange\"` requires `anchor_path=<path>`"
-            ),
+            path_cochange.contains("Capability: co-change ranking fallback used")
+                && path_cochange.contains("requires `anchor_path=<path>`"),
             "fallback should explain missing anchor: {path_cochange}"
         );
         assert!(
-            !default.contains("Co-change ranking inactive"),
+            !default.contains("Capability: co-change ranking"),
             "baseline should not contain rank_by diagnostics: {default}"
         );
     }
@@ -11606,11 +12106,12 @@ mod tests {
             "fallback should preserve path results: {path_cochange}"
         );
         assert!(
-            path_cochange.contains("Co-change ranking inactive: no usable coupling-store evidence"),
+            path_cochange.contains("Capability: co-change ranking unavailable")
+                && path_cochange.contains("no repository root is bound"),
             "fallback should explain unavailable/empty coupling evidence: {path_cochange}"
         );
         assert!(
-            !default.contains("Co-change ranking inactive"),
+            !default.contains("Capability: co-change ranking"),
             "baseline should not contain rank_by diagnostics: {default}"
         );
     }

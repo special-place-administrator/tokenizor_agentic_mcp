@@ -1,12 +1,12 @@
 //! Phase 3.1 — coupling store lifecycle.
 //!
-//! Opens the per-workspace coupling store at session start, cold-builds on
-//! first session, applies HEAD-delta on subsequent sessions, and refreshes
-//! on the watcher's reconcile tick so mid-session HEAD moves stay reflected.
+//! Opens or prepares the per-workspace coupling store according to policy.
+//! Warm-on-start cold-builds on first session, applies HEAD-delta on
+//! subsequent sessions, and refreshes on the watcher's reconcile tick so
+//! mid-session HEAD moves stay reflected.
 //!
-//! Env-gated on `SYMFORGE_COUPLING=1`. No user-visible behaviour — the store
-//! exists only so Phase 3.3 can consume it. Contract in
-//! `docs/plans/cochange-coupling-3.1-design.md`.
+//! Default policy is lazy-on-request: startup may reuse an existing store but
+//! does not create or build one unless `SYMFORGE_COUPLING` asks for warmup.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,17 +14,81 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tracing::{debug, trace};
 
-use crate::live_index::store::SharedIndex;
 use super::{CouplingStore, WalkerConfig, apply_head_delta, cold_build};
+use crate::capability::CouplingPreparePolicy;
+use crate::live_index::store::SharedIndex;
 
 pub const COUPLING_FLAG_ENV: &str = "SYMFORGE_COUPLING";
 
-fn flag_on() -> bool {
-    std::env::var(COUPLING_FLAG_ENV).as_deref() == Ok("1")
+pub fn coupling_prepare_policy_from_env() -> CouplingPreparePolicy {
+    let Ok(raw) = std::env::var(COUPLING_FLAG_ENV) else {
+        return CouplingPreparePolicy::LazyOnRequest;
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "lazy" | "lazy-on-request" | "lazy_on_request" | "request" => {
+            CouplingPreparePolicy::LazyOnRequest
+        }
+        "1" | "true" | "on" | "yes" | "warm" | "warm-on-start" | "warm_on_start" => {
+            CouplingPreparePolicy::WarmOnStart
+        }
+        "0" | "false" | "off" | "no" | "disable" | "disabled" => CouplingPreparePolicy::Disabled,
+        _ => CouplingPreparePolicy::LazyOnRequest,
+    }
 }
 
 fn is_git_repo(root: &Path) -> bool {
     git2::Repository::discover(root).is_ok()
+}
+
+pub fn coupling_db_path(project_root: &Path) -> PathBuf {
+    project_root.join(crate::paths::SYMFORGE_COUPLING_DB_PATH)
+}
+
+pub fn open_existing_coupling_store(
+    project_root: &Path,
+) -> Result<Option<Arc<CouplingStore>>, String> {
+    let db_path = coupling_db_path(project_root);
+    if !db_path.is_file() {
+        return Ok(None);
+    }
+    CouplingStore::open(&db_path)
+        .map(Arc::new)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LazyPrepareOutcome {
+    Started,
+    AlreadyRunning,
+}
+
+pub fn start_lazy_prepare(project_root: &Path) -> Result<LazyPrepareOutcome, String> {
+    if !is_git_repo(project_root) {
+        return Err("not a git repository".to_string());
+    }
+
+    let guard = guard_for(project_root);
+    let Some(release) = try_acquire(guard) else {
+        return Ok(LazyPrepareOutcome::AlreadyRunning);
+    };
+
+    let repo_root = project_root.to_path_buf();
+    let spawn_result = std::thread::Builder::new()
+        .name("coupling-lazy-prepare".into())
+        .spawn(move || {
+            let _release = release;
+            let db_path = coupling_db_path(&repo_root);
+            debug!("coupling lazy prepare: starting");
+            match run_init(&db_path, &repo_root) {
+                Ok(()) => debug!("coupling lazy prepare: ok"),
+                Err(e) => debug!("coupling lazy prepare: failed: {e}"),
+            }
+        });
+
+    spawn_result
+        .map(|_| LazyPrepareOutcome::Started)
+        .map_err(|e| format!("coupling lazy prepare spawn failed: {e}"))
 }
 
 /// Per-workspace in-flight guard. One `AtomicBool` per project root.
@@ -57,22 +121,31 @@ fn try_acquire(guard: Arc<AtomicBool>) -> Option<GuardRelease> {
 
 /// Boot-path entry point. Called once at `LiveIndex::load` per workspace.
 ///
-/// With flag unset or no git repo at `project_root`: full no-op — no thread,
-/// no DB file, no guard acquisition.
+/// Default lazy-on-request policy reuses an existing DB file but does not
+/// create one or run history analysis. Warm-on-start preserves the original
+/// eager background builder. Disabled and non-git workspaces are no-ops.
 ///
-/// Otherwise spawns a named background thread that runs `run_init`. The
+/// Warm-on-start spawns a named background thread that runs `run_init`. The
 /// per-workspace guard is acquired before spawning and released by RAII in
-/// the spawned thread. On `std::thread::Builder::spawn` failure the guard
-/// is released synchronously so the workspace does not wedge.
+/// the spawned thread.
 pub fn init_coupling_store(project_root: &Path) -> Option<Arc<CouplingStore>> {
-    if !flag_on() {
-        return None;
-    }
-    if !is_git_repo(project_root) {
+    let policy = coupling_prepare_policy_from_env();
+
+    if matches!(policy, CouplingPreparePolicy::Disabled) || !is_git_repo(project_root) {
         return None;
     }
 
-    let db_path = project_root.join(crate::paths::SYMFORGE_COUPLING_DB_PATH);
+    if matches!(policy, CouplingPreparePolicy::LazyOnRequest) {
+        return match open_existing_coupling_store(project_root) {
+            Ok(store) => store,
+            Err(e) => {
+                debug!("coupling init: existing store open failed: {e}");
+                None
+            }
+        };
+    }
+
+    let db_path = coupling_db_path(project_root);
     let store = match CouplingStore::open(&db_path) {
         Ok(store) => Arc::new(store),
         Err(e) => {
@@ -114,8 +187,8 @@ pub fn init_coupling_store(project_root: &Path) -> Option<Arc<CouplingStore>> {
 
 /// Reconcile-tick entry point. Called from the watcher's 30 s reconcile
 /// branch via `tokio::task::spawn_blocking`. Runs entirely on the calling
-/// thread — no further spawn. Silently no-ops on flag-off, non-git project,
-/// or contested guard.
+/// thread — no further spawn. Silently no-ops on disabled policy, lazy policy
+/// without an existing store, non-git project, or contested guard.
 pub fn refresh_on_reconcile_tick(project_root: &Path, expected_gen: u64, shared: &SharedIndex) {
     let current_gen = shared.current_project_generation();
     if current_gen != expected_gen {
@@ -126,7 +199,13 @@ pub fn refresh_on_reconcile_tick(project_root: &Path, expected_gen: u64, shared:
         return;
     }
 
-    if !flag_on() {
+    let policy = coupling_prepare_policy_from_env();
+    if matches!(policy, CouplingPreparePolicy::Disabled) {
+        return;
+    }
+    if matches!(policy, CouplingPreparePolicy::LazyOnRequest)
+        && !coupling_db_path(project_root).is_file()
+    {
         return;
     }
     if !is_git_repo(project_root) {
@@ -138,7 +217,7 @@ pub fn refresh_on_reconcile_tick(project_root: &Path, expected_gen: u64, shared:
         return;
     };
 
-    let db_path = project_root.join(crate::paths::SYMFORGE_COUPLING_DB_PATH);
+    let db_path = coupling_db_path(project_root);
     debug!("coupling tick: starting");
     match run_init(&db_path, project_root) {
         Ok(()) => debug!("coupling tick: ok"),
@@ -225,10 +304,7 @@ mod tests {
         idx.write().expect("write index");
         let tree_id = idx.write_tree().expect("write tree");
         let tree = repo.find_tree(tree_id).expect("find tree");
-        let parent_commit = repo
-            .head()
-            .ok()
-            .and_then(|h| h.peel_to_commit().ok());
+        let parent_commit = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
         let parents_vec: Vec<&git2::Commit> = parent_commit.iter().collect();
         let sig = git2::Signature::now("t", "t@x").expect("sig");
         let oid = repo
@@ -284,9 +360,25 @@ mod tests {
         refresh_on_reconcile_tick(tmp.path(), expected_gen, &shared);
 
         let db_path = tmp.path().join(crate::paths::SYMFORGE_COUPLING_DB_PATH);
+        assert!(!db_path.exists(), "no db touch on tick with flag unset");
+    }
+
+    #[test]
+    fn lazy_prepare_reports_already_running_when_guard_is_held() {
+        let _lock = COUPLING_ENV_LOCK.lock().unwrap();
+        clear_flag();
+        let tmp = TempDir::new().unwrap();
+        init_repo_with_root_commit(tmp.path());
+        let guard = guard_for(tmp.path());
+        let _held = try_acquire(guard).expect("test should acquire guard");
+
+        let outcome = start_lazy_prepare(tmp.path()).expect("lazy prepare request");
+
+        assert_eq!(outcome, LazyPrepareOutcome::AlreadyRunning);
+        let db_path = tmp.path().join(crate::paths::SYMFORGE_COUPLING_DB_PATH);
         assert!(
             !db_path.exists(),
-            "no db touch on tick with flag unset"
+            "contested lazy prepare must not start a duplicate builder"
         );
     }
 

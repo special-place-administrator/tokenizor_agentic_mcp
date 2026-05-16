@@ -403,7 +403,8 @@ pub struct LiveIndex {
     pub(crate) gitignore: Option<ignore::gitignore::Gitignore>,
     /// Files that were not fully indexed (Tier 2 metadata-only or Tier 3 hard-skipped).
     pub(crate) skipped_files: Vec<SkippedFile>,
-    /// Per-workspace co-change store, present only when coupling is explicitly enabled.
+    /// Per-workspace co-change store, present when policy warms it or when
+    /// lazy policy finds an existing store at startup.
     pub(crate) coupling_store: Option<Arc<super::coupling::CouplingStore>>,
     /// Reason this index started empty, if any. Set at construction time by
     /// the startup-plan branch; surfaced in `health` output as an actionable

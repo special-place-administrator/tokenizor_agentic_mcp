@@ -11,7 +11,10 @@ pub mod schema;
 pub mod store;
 pub mod walker;
 
-pub use lifecycle::{init_coupling_store, refresh_on_reconcile_tick};
+pub use lifecycle::{
+    LazyPrepareOutcome, coupling_prepare_policy_from_env, init_coupling_store,
+    open_existing_coupling_store, refresh_on_reconcile_tick, start_lazy_prepare,
+};
 pub use store::{CouplingRow, CouplingStore};
 pub use walker::{DeltaOutcome, WalkerConfig, WalkerStats, apply_head_delta, cold_build};
 

@@ -1482,9 +1482,7 @@ pub fn search_files_result_view(view: &SearchFilesView) -> String {
                 if last_tier != Some(hit.tier) {
                     last_tier = Some(hit.tier);
                     let header = match hit.tier {
-                        SearchFilesTier::CoChange => {
-                            "── Co-changed files (git temporal coupling) ──"
-                        }
+                        SearchFilesTier::CoChange => "── Co-changed files (coupling store) ──",
                         SearchFilesTier::StrongPath => "── Strong path matches ──",
                         SearchFilesTier::Basename => "── Basename matches ──",
                         SearchFilesTier::LoosePath => "── Loose path matches ──",
