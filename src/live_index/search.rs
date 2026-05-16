@@ -1727,9 +1727,9 @@ fn build_context_rendered_lines(
 
 // ── File-search frecency fusion ────────────────────────────────────────────
 //
-// Opt-in rerank used by `search_files` when `rank_by="frecency"` is set AND
-// the `SYMFORGE_FRECENCY=1` feature flag is on. Default callers keep the
-// existing tier-based comparator in `query::capture_search_files_view`.
+// Opt-in rerank used by `search_files` when `rank_by="frecency"` is set and
+// call-time frecency history is available. Default callers keep the existing
+// tier-based comparator in `query::capture_search_files_view`.
 //
 // Contract: `combined = 0.6 * path_match + 0.3 * co_change + 0.1 * frecency_norm`
 // with frecency normalized against the max raw score in the candidate set so

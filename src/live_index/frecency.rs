@@ -2,16 +2,18 @@
 //!
 //! Two complementary layers live here:
 //!
-//! 1. [`FrecencyStore`] — SQLite-backed, WAL mode, bumped on commitment tools
-//!    (reads/edits of known files) and never on discovery tools (search).
-//!    Decays on a 7-day half-life. This is the storage + scoring layer.
+//! 1. [`FrecencyStore`] — SQLite-backed or in-memory, bumped on commitment
+//!    tools (reads/edits of known files) and never on discovery tools
+//!    (search). Decays on a 7-day half-life. This is the storage + scoring
+//!    layer.
 //! 2. [`bump`] — the call-site façade that commitment tools
 //!    (`get_file_context`, `get_file_content`, `get_symbol`,
 //!    `get_symbol_context`, the seven edit tools) invoke at the end of their
-//!    happy path. Gated by `SYMFORGE_FRECENCY="1"`; opens the per-workspace
-//!    SQLite store on demand and writes through to the underlying
-//!    [`FrecencyStore`]. Infallible — every error is silently dropped so the
-//!    feature cannot break the tools it hooks into.
+//!    happy path. Unset `SYMFORGE_FRECENCY` collects session-scoped in-memory
+//!    history; `SYMFORGE_FRECENCY="1"` keeps the existing persistent SQLite
+//!    collection; explicit false/off/disabled values disable collection.
+//!    Infallible — every error is silently dropped so the feature cannot break
+//!    the tools it hooks into.
 //!
 //! Discovery tools (`search_files`, `search_text`, `search_symbols`)
 //! deliberately never call [`bump`] — see the spec §"Search tools deliberately
@@ -22,7 +24,7 @@
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Half-life for frecency decay, in seconds. 7 days.
 pub const HALF_LIFE_SECS: i64 = 7 * 24 * 60 * 60;
@@ -33,8 +35,9 @@ pub const RESET_HALVE_THRESHOLD: u32 = 500;
 
 const META_LAST_HEAD: &str = "last_head_sha";
 
-/// Env var that gates every call-site [`bump`]. `"1"` enables recording;
-/// anything else (including unset) treats [`bump`] as a no-op.
+/// Env var that controls frecency collection policy. Unset means session
+/// collection, `"1"` means persistent collection, and false/off/disabled
+/// values disable collection.
 pub const FRECENCY_FLAG_ENV: &str = "SYMFORGE_FRECENCY";
 
 /// Outcome of applying the HEAD-change reset policy.
@@ -54,6 +57,13 @@ pub struct BumpEntry {
     pub path: PathBuf,
     pub last_access_ts: i64,
     pub hit_count: i64,
+}
+
+/// Snapshot of frecency scores available to a call-time ranking request.
+#[derive(Debug, Clone)]
+pub struct FrecencyRankingSnapshot {
+    pub scores: HashMap<PathBuf, f64>,
+    pub source: String,
 }
 
 /// SQLite-backed per-workspace frecency store.
@@ -350,30 +360,54 @@ fn normalize_path(p: &Path) -> String {
 // ---------------------------------------------------------------------------
 //
 // `bump(repo_root, paths)` is the stable surface commitment-tool handlers call
-// at the end of their happy path. It opens the per-workspace SQLite store on
-// demand and writes the bumps through. SQLite open + a single upsert is sub-ms
-// in WAL mode; the call sites are not hot paths.
+// at the end of their happy path. It writes either to a session in-memory store
+// or to the persistent per-workspace SQLite store depending on policy.
+
+/// Resolve frecency collection policy from the process environment.
+///
+/// Environment variables are policy/default knobs. Unset means lightweight
+/// session collection; `"1"`/truthy/persistent values mean the existing
+/// persistent SQLite store; explicit false/off/disabled values disable both
+/// collection and ranking use.
+pub fn collection_policy_from_env() -> crate::capability::FrecencyCollectionPolicy {
+    use crate::capability::FrecencyCollectionPolicy;
+
+    match std::env::var(FRECENCY_FLAG_ENV) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "" | "session" => FrecencyCollectionPolicy::Session,
+            "1" | "true" | "yes" | "on" | "persistent" => FrecencyCollectionPolicy::Persistent,
+            "0" | "false" | "no" | "off" | "disabled" | "disable" => {
+                FrecencyCollectionPolicy::Disabled
+            }
+            _ => FrecencyCollectionPolicy::Disabled,
+        },
+        Err(std::env::VarError::NotPresent) => FrecencyCollectionPolicy::Session,
+        Err(std::env::VarError::NotUnicode(_)) => FrecencyCollectionPolicy::Disabled,
+    }
+}
 
 /// Record that the given paths were accessed by a commitment tool.
 ///
-/// No-op when `SYMFORGE_FRECENCY` is unset or not `"1"`. Infallible — callers
-/// never need to handle errors; failure to record a bump is silently dropped
-/// so the feature cannot break the tool it hooks into.
+/// No-op only when policy disables frecency. Infallible — callers never need
+/// to handle errors; failure to record a bump is silently dropped so the
+/// feature cannot break the tool it hooks into.
 ///
 /// `paths` is expected to already be deduplicated (batch tools collect into a
 /// `HashSet<PathBuf>` before calling). Looks up a process-cached
-/// [`FrecencyStore`] keyed by the per-workspace database path; same-process
-/// callers serialize through the store's internal connection mutex with no
-/// SQLite-level lock contention. Cross-process contention falls back to the
-/// 5-second `busy_timeout` set in [`FrecencyStore::open`].
+/// [`FrecencyStore`] keyed by the workspace. Same-process callers serialize
+/// through the store's internal connection mutex with no SQLite-level lock
+/// contention. Cross-process contention for persistent collection falls back to
+/// the 5-second `busy_timeout` set in [`FrecencyStore::open`].
 pub fn bump(repo_root: &Path, paths: &[PathBuf]) {
-    if std::env::var(FRECENCY_FLAG_ENV).as_deref() != Ok("1") {
-        return;
-    }
     if paths.is_empty() {
         return;
     }
-    let Some(store) = cached_store_for(repo_root) else {
+    let store = match collection_policy_from_env() {
+        crate::capability::FrecencyCollectionPolicy::Disabled => return,
+        crate::capability::FrecencyCollectionPolicy::Session => session_store_for(repo_root),
+        crate::capability::FrecencyCollectionPolicy::Persistent => cached_store_for(repo_root),
+    };
+    let Some(store) = store else {
         return;
     };
     let now_ts = std::time::SystemTime::now()
@@ -383,6 +417,51 @@ pub fn bump(repo_root: &Path, paths: &[PathBuf]) {
     let _ = store.bump(paths, now_ts);
 }
 
+/// Return frecency scores for a call-time ranking request without creating any
+/// persistent store. Existing persistent history and current-process session
+/// history are both considered; session rows override persistent rows for the
+/// same path.
+pub fn ranking_scores_for_paths(
+    repo_root: &Path,
+    paths: &[&Path],
+    now_ts: i64,
+) -> Result<Option<FrecencyRankingSnapshot>, String> {
+    let mut scores = HashMap::new();
+    let mut sources = Vec::new();
+
+    let db_path = repo_root.join(crate::paths::SYMFORGE_FRECENCY_DB_PATH);
+    match FrecencyStore::open_existing_readonly(&db_path) {
+        Ok(Some(store)) => {
+            scores.extend(
+                store
+                    .bulk_scores(paths, now_ts)
+                    .map_err(|err| err.to_string())?,
+            );
+            sources.push("persistent");
+        }
+        Ok(None) => {}
+        Err(err) => return Err(err.to_string()),
+    }
+
+    if let Some(store) = cached_session_store_for(repo_root) {
+        scores.extend(
+            store
+                .bulk_scores(paths, now_ts)
+                .map_err(|err| err.to_string())?,
+        );
+        sources.push("session");
+    }
+
+    if sources.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(FrecencyRankingSnapshot {
+        scores,
+        source: format!("{} frecency history", sources.join(" + ")),
+    }))
+}
+
 /// Look up (or lazily create) the cached [`FrecencyStore`] for `repo_root`.
 ///
 /// All same-process callers for a given workspace share the same `Arc` and
@@ -390,14 +469,12 @@ pub fn bump(repo_root: &Path, paths: &[PathBuf]) {
 /// opened — bump is infallible at the call site, so we just drop the bump.
 ///
 /// First cache-miss per repo applies the HEAD-change reset policy before
-/// inserting into the cache. This makes commitment-tool bumps the trigger
-/// for the policy (lazy), so `LiveIndex::load` does not open the DB at boot —
-/// discovery-only sessions leave no frecency footprint. The reset call
-/// happens INSIDE the cache mutex so two parallel bumps cannot race on
-/// policy application.
+/// inserting into the cache. In the persistent lazy path, commitment-tool bumps
+/// are the trigger for the policy. Startup initialization can still warm this
+/// path when policy explicitly requests persistent collection. The reset call
+/// happens INSIDE the cache mutex so two parallel bumps cannot race on policy
+/// application.
 fn cached_store_for(repo_root: &Path) -> Option<std::sync::Arc<FrecencyStore>> {
-    use std::collections::HashMap;
-    use std::sync::{Arc, OnceLock};
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<FrecencyStore>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let key = repo_root.join(crate::paths::SYMFORGE_FRECENCY_DB_PATH);
@@ -413,10 +490,33 @@ fn cached_store_for(repo_root: &Path) -> Option<std::sync::Arc<FrecencyStore>> {
     Some(store)
 }
 
+fn session_cache() -> &'static Mutex<HashMap<PathBuf, Arc<FrecencyStore>>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<FrecencyStore>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn session_store_for(repo_root: &Path) -> Option<Arc<FrecencyStore>> {
+    let cache = session_cache();
+    let key = repo_root.to_path_buf();
+    let mut guard = cache.lock().ok()?;
+    if let Some(existing) = guard.get(&key) {
+        return Some(Arc::clone(existing));
+    }
+    let store = Arc::new(FrecencyStore::open_in_memory().ok()?);
+    guard.insert(key, Arc::clone(&store));
+    Some(store)
+}
+
+fn cached_session_store_for(repo_root: &Path) -> Option<Arc<FrecencyStore>> {
+    let cache = session_cache();
+    let guard = cache.lock().ok()?;
+    guard.get(repo_root).map(Arc::clone)
+}
+
 /// [`EditHook`] implementation that records a frecency bump after every
 /// successful edit commit. Delegates to [`bump`], so the
-/// `SYMFORGE_FRECENCY` flag check happens there — registering the hook is
-/// itself unconditional.
+/// collection policy check happens there — registering the hook is itself
+/// unconditional.
 pub struct FrecencyBumpHook;
 
 impl crate::protocol::edit_hooks::EditHook for FrecencyBumpHook {
@@ -431,8 +531,9 @@ impl crate::protocol::edit_hooks::EditHook for FrecencyBumpHook {
 
 /// Register [`FrecencyBumpHook`] on the process-wide edit-hook registry exactly
 /// once. Safe to call from every `LiveIndex::load` — the inner [`OnceLock`]
-/// dedupes. The hook body itself gates on `SYMFORGE_FRECENCY=1`, so registering
-/// unconditionally costs nothing when the flag is off.
+/// dedupes. The hook body resolves collection policy at call time, so
+/// registering unconditionally is cheap and keeps env changes observable after
+/// startup.
 pub fn ensure_bump_hook_registered() {
     use std::sync::OnceLock;
     static REGISTERED: OnceLock<()> = OnceLock::new();
@@ -574,7 +675,9 @@ mod tests {
         for _ in 0..10 {
             store.bump(std::slice::from_ref(&ancient), 0).unwrap();
         }
-        store.bump(std::slice::from_ref(&recent), six_months - 300).unwrap();
+        store
+            .bump(std::slice::from_ref(&recent), six_months - 300)
+            .unwrap();
         let now = six_months;
         assert!(store.score(&recent, now).unwrap() > store.score(&ancient, now).unwrap());
     }
@@ -628,7 +731,9 @@ mod tests {
         store.bump(std::slice::from_ref(&hot), 100).unwrap();
         store.bump(std::slice::from_ref(&warm), 100).unwrap();
         // Cold: 1 hit, but decayed by 5 half-lives.
-        store.bump(std::slice::from_ref(&cold), 100 - HALF_LIFE_SECS * 5).unwrap();
+        store
+            .bump(std::slice::from_ref(&cold), 100 - HALF_LIFE_SECS * 5)
+            .unwrap();
         let top = store.top_frecent(3, 100).unwrap();
         assert_eq!(top.len(), 3);
         assert_eq!(top[0].0, hot);
@@ -640,9 +745,7 @@ mod tests {
     fn top_frecent_respects_n_limit() {
         let store = make_store();
         for i in 0..20 {
-            store
-                .bump(&[PathBuf::from(format!("f{i}.rs"))], 0)
-                .unwrap();
+            store.bump(&[PathBuf::from(format!("f{i}.rs"))], 0).unwrap();
         }
         assert_eq!(store.top_frecent(5, 0).unwrap().len(), 5);
     }
@@ -811,15 +914,24 @@ mod tests {
     }
 
     #[test]
-    fn module_bump_is_noop_when_flag_unset() {
+    fn module_bump_records_session_paths_when_flag_unset() {
         let _g = ENV_LOCK.lock().unwrap();
         clear_flag();
         let tmp = tempfile::tempdir().expect("tempdir");
-        super::bump(tmp.path(), &[PathBuf::from("src/lib.rs")]);
-        // Flag off: the database file must not even be created.
+        let path = PathBuf::from("src/lib.rs");
+        super::bump(tmp.path(), std::slice::from_ref(&path));
+        let path_refs = [path.as_path()];
+        let snapshot = super::ranking_scores_for_paths(tmp.path(), &path_refs, 0)
+            .expect("session scores ok")
+            .expect("session history present");
+        assert_eq!(
+            snapshot.scores.get(Path::new("src/lib.rs")),
+            Some(&1.0),
+            "unset policy should collect session frecency"
+        );
         assert!(
             !db_path_for(tmp.path()).exists(),
-            "bump with flag unset must not touch disk"
+            "session collection must not create the persistent database"
         );
     }
 
@@ -833,7 +945,7 @@ mod tests {
         clear_flag();
         assert!(
             !db_path_for(tmp.path()).exists(),
-            "bump with flag != 1 must not touch disk"
+            "bump with disabled policy must not touch disk"
         );
     }
 

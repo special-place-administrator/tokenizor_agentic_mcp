@@ -347,10 +347,11 @@ fn spot_verify_sample_from_view(
 /// Open the per-workspace `FrecencyStore` and apply the graduated HEAD-change
 /// reset policy at session startup.
 ///
-/// Gated on `SYMFORGE_FRECENCY=1`. With the flag unset (the default), this is
-/// a no-op and the database is never touched.
+/// Startup persistence is gated on the persistent collection policy. With
+/// `SYMFORGE_FRECENCY` unset (the default session policy), this is a no-op and
+/// the database is never touched at boot.
 ///
-/// With the flag on:
+/// With persistent collection enabled:
 ///
 /// 1. Open the SQLite store at `<project_root>/.symforge/frecency.db`,
 ///    creating the file and parent directory if missing.
@@ -372,11 +373,13 @@ fn spot_verify_sample_from_view(
 /// Spec: §"Reset-on-HEAD-change: graduated, not binary" on
 /// `[[SymForge Frecency-Weighted File Ranking]]`.
 pub fn init_frecency_store(project_root: &Path) {
-    // Hook registration is unconditional — the hook body gates on the flag at
-    // call time, so a test that flips `SYMFORGE_FRECENCY` on AFTER boot still
-    // sees its edits land in the per-workspace store.
+    // Hook registration is unconditional — the hook body resolves collection
+    // policy at call time, so a test that flips `SYMFORGE_FRECENCY` after boot
+    // still sees edits follow the current policy.
     crate::live_index::frecency::ensure_bump_hook_registered();
-    if std::env::var(crate::live_index::frecency::FRECENCY_FLAG_ENV).as_deref() != Ok("1") {
+    if crate::live_index::frecency::collection_policy_from_env()
+        != crate::capability::FrecencyCollectionPolicy::Persistent
+    {
         return;
     }
     let db_path = project_root.join(crate::paths::SYMFORGE_FRECENCY_DB_PATH);

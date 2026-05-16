@@ -150,8 +150,8 @@ impl SymForgeServer {
     ///
     /// No-op when no repo root is bound (the feature has nothing to anchor
     /// the per-workspace store to). Forwards to
-    /// [`crate::live_index::frecency::bump`], which itself no-ops unless
-    /// `SYMFORGE_FRECENCY=1`.
+    /// [`crate::live_index::frecency::bump`], which itself resolves session,
+    /// persistent, or disabled collection policy.
     pub(crate) fn bump_frecency(&self, paths: &[PathBuf]) {
         if let Some(root) = self.capture_repo_root() {
             crate::live_index::frecency::bump(&root, paths);

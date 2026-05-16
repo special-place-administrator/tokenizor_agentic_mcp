@@ -25,6 +25,10 @@ use rmcp::{tool, tool_router};
 use schemars::{JsonSchema, Schema};
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::capability::{
+    CapabilityEvidence, CapabilityFreshness, CapabilityName, CapabilitySafety, CapabilityStatus,
+};
+
 /// Deserialize a `u32` from either a JSON number or a stringified number like `"5"`.
 pub(crate) fn lenient_u32<'de, D: Deserializer<'de>>(
     deserializer: D,
@@ -479,8 +483,10 @@ pub struct SearchFilesInput {
     /// Optional maximum token budget for the response.
     #[serde(default, deserialize_with = "lenient_u64")]
     pub max_tokens: Option<u64>,
-    /// Optional ranking mode. `"frecency"` fuses the tier-based path
-    /// match with per-workspace frecency; requires `SYMFORGE_FRECENCY=1`.
+    /// Optional ranking mode. `"frecency"` requests call-time frecency
+    /// resolution: available session or persistent history is fused with
+    /// path ranking, otherwise the response includes explicit fallback,
+    /// unavailable, or disabled-by-policy evidence.
     /// `"path+cochange"` fuses path match with the coupling store when
     /// `anchor_path` is set and the workspace has coupling data.
     /// Any other value (including `None`) preserves the default
@@ -2182,6 +2188,16 @@ fn search_files_coupling_neighbors(
     }
 }
 
+fn frecency_ranking_evidence(
+    status: CapabilityStatus,
+    detail: impl Into<String>,
+) -> CapabilityEvidence {
+    CapabilityEvidence::new(CapabilityName::FrecencyRanking, status)
+        .with_freshness(CapabilityFreshness::Current)
+        .with_safety(CapabilitySafety::ReadOnly)
+        .with_detail(detail)
+}
+
 const CHANGED_WITH_DEPRECATION_WARNING: &str = "Deprecation warning: `search_files changed_with=` is deprecated since v7.x and scheduled for removal in v8.x; prefer `rank_by=\"path+cochange\"` with `anchor_path=<path>`.";
 
 fn append_changed_with_deprecation_warning(mut result: String) -> String {
@@ -3167,7 +3183,7 @@ impl SymForgeServer {
             // for every resolved entry (skip FileNotFound since we did not
             // actually touch them), dedup, and emit one bump call at the end
             // per Implementation Notes §"Bump dedup per tool invocation".
-            // No-op unless SYMFORGE_FRECENCY=1.
+            // Collection policy is resolved inside bump_frecency.
             let bump_paths: Vec<PathBuf> = captured
                 .iter()
                 .filter_map(|entry| match entry {
@@ -3275,7 +3291,7 @@ impl SymForgeServer {
                     (output.len() / 4) as u32,
                 );
                 // Frecency bump — commitment tool, single-symbol happy path.
-                // No-op unless SYMFORGE_FRECENCY=1. See wiki
+                // Collection policy is resolved inside bump_frecency. See wiki
                 // `[[SymForge Frecency-Weighted File Ranking]]` §"Bump hooks".
                 self.bump_frecency(&[PathBuf::from(&params.0.path)]);
                 output
@@ -3547,8 +3563,8 @@ impl SymForgeServer {
                 self.session_context
                     .record_listed_file(&params.0.path, (output.len() / 4) as u32);
                 // Frecency bump — commitment tool. Reached only on the happy
-                // path after a successful outline fetch; no-op unless
-                // SYMFORGE_FRECENCY=1. See wiki `[[SymForge Frecency-Weighted
+                // path after a successful outline fetch; collection policy is
+                // resolved inside bump_frecency. See wiki `[[SymForge Frecency-Weighted
                 // File Ranking]]` §"Bump hooks".
                 self.bump_frecency(&[PathBuf::from(&params.0.path)]);
                 output
@@ -3673,7 +3689,7 @@ impl SymForgeServer {
             self.session_context
                 .record_symbol(&path, &params.0.name, (output.len() / 4) as u32);
             // Frecency bump — commitment tool, bundle-mode happy path.
-            // No-op unless SYMFORGE_FRECENCY=1.
+            // Collection policy is resolved inside bump_frecency.
             self.bump_frecency(&[PathBuf::from(&path)]);
             return output;
         }
@@ -3708,7 +3724,7 @@ impl SymForgeServer {
                 (trace_result.len() / 4) as u32,
             );
             // Frecency bump — commitment tool, trace-mode happy path.
-            // No-op unless SYMFORGE_FRECENCY=1.
+            // Collection policy is resolved inside bump_frecency.
             self.bump_frecency(&[PathBuf::from(&path)]);
             return format::enforce_token_budget(trace_result, params.0.max_tokens);
         }
@@ -3826,7 +3842,7 @@ impl SymForgeServer {
                 // Frecency bump — commitment tool, default-mode happy path.
                 // Resolve the bump path the same way the output did:
                 // explicit params first, auto-resolved path as fallback.
-                // No-op unless SYMFORGE_FRECENCY=1.
+                // Collection policy is resolved inside bump_frecency.
                 if let Some(bump_path) = params
                     .0
                     .path
@@ -3873,8 +3889,8 @@ impl SymForgeServer {
                     }
                     // Frecency bump — commitment tool, fallback-definition
                     // branch (sidecar unavailable but we still returned a
-                    // useful symbol body to the caller). No-op unless
-                    // SYMFORGE_FRECENCY=1.
+                    // useful symbol body to the caller). Collection policy is
+                    // resolved inside bump_frecency.
                     if let Some(bump_path) = params
                         .0
                         .path
@@ -4740,7 +4756,9 @@ impl SymForgeServer {
         }
 
         let rank_by_path_cochange = params.0.rank_by.as_deref() == Some("path+cochange");
+        let rank_by_frecency = params.0.rank_by.as_deref() == Some("frecency");
         let mut cochange_note: Option<String> = None;
+        let mut frecency_evidence: Option<CapabilityEvidence> = None;
         let mut hidden_noise_count = 0usize;
         let mut view = {
             let guard = self.index.read();
@@ -4810,39 +4828,101 @@ impl SymForgeServer {
             }
             view
         };
-        // Optional frecency-fusion rerank. Activated only when the caller asked
-        // for `rank_by="frecency"` AND the `SYMFORGE_FRECENCY=1` flag is on.
-        // Missing or unreadable stores silently fall back to the tier-based
-        // ordering — discovery must never create a frecency footprint or break
-        // `search_files`.
-        if params.0.rank_by.as_deref() == Some("frecency")
-            && std::env::var("SYMFORGE_FRECENCY").as_deref() == Ok("1")
-            && let SearchFilesView::Found { hits, .. } = &mut view
-            && let Some(repo_root) = self.capture_repo_root()
-        {
-            let db_path = repo_root.join(crate::paths::SYMFORGE_FRECENCY_DB_PATH);
-            if let Ok(Some(store)) =
-                crate::live_index::frecency::FrecencyStore::open_existing_readonly(&db_path)
-            {
-                let hit_paths: Vec<std::path::PathBuf> = hits
-                    .iter()
-                    .map(|h| std::path::PathBuf::from(&h.path))
-                    .collect();
-                let path_refs: Vec<&std::path::Path> =
-                    hit_paths.iter().map(|p| p.as_path()).collect();
-                let now_ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                if let Ok(scores) = store.bulk_scores(&path_refs, now_ts) {
-                    let breakdowns =
-                        crate::live_index::search::score_hits_by_frecency_fusion(hits, &scores);
-                    let taken = std::mem::take(hits);
-                    *hits = crate::live_index::search::reorder_hits_by_frecency_fusion(
-                        taken,
-                        &breakdowns,
-                    );
+        // Optional frecency-fusion rerank. Activated when the caller requests
+        // `rank_by="frecency"`, independent of the old persistent-collection
+        // feature flag. Discovery still never opens a writeable frecency store:
+        // this branch only reads existing persistent rows and current-process
+        // session rows, then reports explicit evidence for every fallback.
+        if rank_by_frecency {
+            match crate::live_index::frecency::collection_policy_from_env() {
+                crate::capability::FrecencyCollectionPolicy::Disabled => {
+                    frecency_evidence = Some(frecency_ranking_evidence(
+                        CapabilityStatus::DisabledByPolicy,
+                        "operator policy disabled frecency collection and ranking; path ranking returned",
+                    ));
                 }
+                _ => match &mut view {
+                    SearchFilesView::Found { hits, .. } if hits.is_empty() => {
+                        frecency_evidence = Some(frecency_ranking_evidence(
+                            CapabilityStatus::FallbackUsed,
+                            "no returned candidates to score; path ranking returned",
+                        ));
+                    }
+                    SearchFilesView::Found { hits, .. } => {
+                        if let Some(repo_root) = self.capture_repo_root() {
+                            let candidate_count = hits.len();
+                            let hit_paths: Vec<std::path::PathBuf> = hits
+                                .iter()
+                                .map(|hit| std::path::PathBuf::from(&hit.path))
+                                .collect();
+                            let path_refs: Vec<&std::path::Path> =
+                                hit_paths.iter().map(|path| path.as_path()).collect();
+                            let now_ts = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|duration| duration.as_secs() as i64)
+                                .unwrap_or(0);
+                            match crate::live_index::frecency::ranking_scores_for_paths(
+                                &repo_root, &path_refs, now_ts,
+                            ) {
+                                Ok(Some(snapshot)) if !snapshot.scores.is_empty() => {
+                                    let scored_count = snapshot.scores.len();
+                                    let breakdowns =
+                                        crate::live_index::search::score_hits_by_frecency_fusion(
+                                            hits,
+                                            &snapshot.scores,
+                                        );
+                                    let taken = std::mem::take(hits);
+                                    *hits =
+                                        crate::live_index::search::reorder_hits_by_frecency_fusion(
+                                            taken,
+                                            &breakdowns,
+                                        );
+                                    frecency_evidence = Some(frecency_ranking_evidence(
+                                        CapabilityStatus::Applied,
+                                        format!(
+                                            "{scored_count}/{candidate_count} returned candidates had frecency scores from {}; requested frecency ranking applied",
+                                            snapshot.source
+                                        ),
+                                    ));
+                                }
+                                Ok(Some(snapshot)) => {
+                                    frecency_evidence = Some(frecency_ranking_evidence(
+                                        CapabilityStatus::FallbackUsed,
+                                        format!(
+                                            "{} is empty or has no scores for returned candidates; path ranking returned",
+                                            snapshot.source
+                                        ),
+                                    ));
+                                }
+                                Ok(None) => {
+                                    frecency_evidence = Some(frecency_ranking_evidence(
+                                        CapabilityStatus::FallbackUsed,
+                                        "no frecency history found; path ranking returned",
+                                    ));
+                                }
+                                Err(reason) => {
+                                    frecency_evidence = Some(frecency_ranking_evidence(
+                                        CapabilityStatus::Unavailable,
+                                        format!(
+                                            "unable to read frecency history: {reason}; path ranking returned"
+                                        ),
+                                    ));
+                                }
+                            }
+                        } else {
+                            frecency_evidence = Some(frecency_ranking_evidence(
+                                CapabilityStatus::Unavailable,
+                                "no repository root is bound; path ranking returned",
+                            ));
+                        }
+                    }
+                    _ => {
+                        frecency_evidence = Some(frecency_ranking_evidence(
+                            CapabilityStatus::FallbackUsed,
+                            "no returned candidates to score; path ranking returned",
+                        ));
+                    }
+                },
             }
         }
         let envelope = match &view {
@@ -4862,6 +4942,8 @@ impl SymForgeServer {
                     search_files_match_type_label(&view),
                     if rank_by_path_cochange {
                         "current index + optional coupling store"
+                    } else if rank_by_frecency {
+                        "current index + optional frecency history"
                     } else {
                         "current index"
                     },
@@ -4889,6 +4971,10 @@ impl SymForgeServer {
         if let Some(note) = cochange_note {
             result.push_str("\n\n");
             result.push_str(&note);
+        }
+        if let Some(evidence) = frecency_evidence {
+            result.push_str("\n\n");
+            result.push_str(&format::capability_evidence_line(&evidence));
         }
         if let Some(note) = search_files_hidden_noise_note(
             hidden_noise_count,
@@ -5502,7 +5588,7 @@ impl SymForgeServer {
                 self.session_context
                     .record_file(&input.path, (output.len() / 4) as u32);
                 // Frecency bump — commitment tool. Indexed-file branch;
-                // no-op unless SYMFORGE_FRECENCY=1. See wiki
+                // collection policy is resolved inside bump_frecency. See wiki
                 // `[[SymForge Frecency-Weighted File Ranking]]` §"Bump hooks".
                 self.bump_frecency(&[PathBuf::from(&input.path)]);
                 format::cap_file_content_output(format!("{}{}", mode_annotation, output))
@@ -5525,7 +5611,7 @@ impl SymForgeServer {
                                 );
                                 // Frecency bump — commitment tool. Raw-disk
                                 // fallback branch (non-indexed source files);
-                                // no-op unless SYMFORGE_FRECENCY=1.
+                                // collection policy is resolved inside bump_frecency.
                                 self.bump_frecency(&[PathBuf::from(&input.path)]);
                                 return format::cap_file_content_output(format!(
                                     "{}{}",
@@ -6938,8 +7024,10 @@ impl SymForgeServer {
             "Per-workspace file-ranking signal that decays on a 7-day half-life \
              and fuses with existing path-match and co-change signals. Call \
              `search_files` with `rank_by=\"frecency\"` to surface files you \
-             recently touched. Feature-gated on `SYMFORGE_FRECENCY=1`; when the \
-             flag is unset the ranker and every bump hook are no-ops.\n\
+             recently touched. With `SYMFORGE_FRECENCY` unset, commitment tools \
+             collect session-scoped history; `SYMFORGE_FRECENCY=1` uses the \
+             persistent `.symforge/frecency.db`; false/off/disabled values block \
+             frecency and requested ranking reports disabled-by-policy evidence.\n\
              Bump-on-commitment policy: SymForge bumps a path's frecency score \
              on every edit tool and on the read tools that imply commitment to \
              a known file (`get_file_context`, `get_file_content`, `get_symbol`, \

@@ -88,16 +88,16 @@
 
 ## Implementation Checklist
 
-- [ ] Re-read this task and list the plan.
-- [ ] Inspect `src/live_index/frecency.rs`, `src/protocol/tools.rs`, `tests/frecency_ranking.rs`, and `tests/edit_hook_behavior.rs`.
-- [ ] Add focused env-unset and policy-disabled tests before broad refactoring where practical.
-- [ ] Implement frecency capability resolution and response evidence.
-- [ ] Run focused frecency tests.
-- [ ] Run `cargo check`.
-- [ ] Run `cargo test --all-targets -- --test-threads=1` because shared ranking and edit-hook behavior changed.
-- [ ] Run `cargo build --release` if README or public behavior is updated in this task.
-- [ ] Update docs if behavior, env vars, or response shapes changed.
-- [ ] Confirm every success criterion.
+- [x] Re-read this task and list the plan.
+- [x] Inspect `src/live_index/frecency.rs`, `src/protocol/tools.rs`, `tests/frecency_ranking.rs`, and `tests/edit_hook_behavior.rs`.
+- [x] Add focused env-unset and policy-disabled tests before broad refactoring where practical.
+- [x] Implement frecency capability resolution and response evidence.
+- [x] Run focused frecency tests.
+- [x] Run `cargo check`.
+- [x] Run `cargo test --all-targets -- --test-threads=1` because shared ranking and edit-hook behavior changed.
+- [x] Run `cargo build --release` if README or public behavior is updated in this task.
+- [x] Update docs if behavior, env vars, or response shapes changed.
+- [x] Confirm every success criterion.
 
 ## Implementation Chunks
 

@@ -130,10 +130,14 @@ with per-invocation dedup for batch operations. Concretely:
    dedup when the batch handler fires `after_edit_committed` once per
    sub-edit, since the hook owns the set and the handler owns only
    the lifecycle callback.
-5. **The feature is gated on `SYMFORGE_FRECENCY=1`, defaulted off.**
-   `bump` itself short-circuits when the flag is unset, so every bump
-   call site is a no-op on default deployments. The first release ships
-   inert; operators opt in per-agent after dogfooding.
+5. **Frecency collection policy stays inside `bump`, not at call
+   sites.** The original v7.5 rollout used `SYMFORGE_FRECENCY=1` as an
+   opt-in persistent-store gate. After
+   [ADR 0016](./0016-call-time-capability-resolution.md), unset
+   `SYMFORGE_FRECENCY` means session-scoped in-memory collection,
+   truthy/persistent values use `.symforge/frecency.db`, and explicit
+   false/off/disabled values disable collection. Call sites still invoke
+   `bump`; policy remains centralized.
 
 ### Rollout status as of this ADR
 
@@ -141,8 +145,8 @@ This ADR lands together with partial implementation: the four
 commitment-read handlers call `bump` directly (item 2); the three
 discovery handlers carry the no-bump guards (item 3); the call-site
 `bump` façade in
-[`src/live_index/frecency.rs`](../../src/live_index/frecency.rs) routes
-to a test-observability sink gated on `SYMFORGE_FRECENCY=1` (item 5).
+[`src/live_index/frecency.rs`](../../src/live_index/frecency.rs) originally
+routed to a test-observability sink gated on `SYMFORGE_FRECENCY=1`.
 The `FrecencyBumpHook` registration that wires item 1 — and the
 store-backed sink that replaces the test-observability layer — land in
 subsequent todos on this tentacle; the architectural policy this ADR
@@ -173,11 +177,9 @@ future handlers.
 **Harder**
 
 - Seven edit handlers plus four commitment-read handlers is eleven
-  distinct bump call sites to audit against the `SYMFORGE_FRECENCY=1`
-  gate. The gate lives once inside `bump`, so forgetting it in a
-  handler is a silent no-op rather than a silent bump — but reviewers
-  still need to know that "bump was added" and "bump is live"
-  are two different statements.
+  distinct bump call sites to audit against centralized frecency policy.
+  The policy lives once inside `bump`, so reviewers still need to know
+  that "bump was added" and "bump is live" are two different statements.
 - The `EditHook` + direct-call split (edits via the registry;
   commitment reads via direct `bump`) means there are two bump
   code paths to keep in sync. The split is deliberate per ADR 0012 —
@@ -208,10 +210,10 @@ future handlers.
    `bump(&[path])` calls per invocation silently re-introduce the
    score-skew failure mode that per-invocation dedup exists to
    prevent.
-4. **The `SYMFORGE_FRECENCY=1` gate MUST stay inside `bump`, not at
-   call sites.** Centralizing the gate means no handler can forget
-   it, and flipping the flag changes behavior uniformly. A call-site
-   gate drifts; the central gate does not.
+4. **The `SYMFORGE_FRECENCY` policy MUST stay inside `bump`, not at
+   call sites.** Centralizing the policy means no handler can forget it,
+   and changing the environment/config default changes behavior
+   uniformly. A call-site gate drifts; the central policy does not.
 5. **`rank_by="frecency"` on `search_files` is the only user-visible
    API change this feature is allowed.** The spec's zero-new-tools
    constraint (§"Tool placement — zero new tools") is load-bearing;
