@@ -92,18 +92,18 @@
 
 ## Implementation Checklist
 
-- [ ] Re-read this task and list the plan.
-- [ ] Inspect `src/worktree.rs`, `src/protocol/edit_hooks.rs`, `src/protocol/edit_format.rs`, edit-tool handlers, and existing worktree tests.
-- [ ] Add or update focused tests for env-unset routing before changing the hook gate where practical.
-- [ ] Convert worktree routing from env prerequisite to call-time `working_directory` opt-in with policy disable semantics.
-- [ ] Preserve omitted-parameter behavior and response shape.
-- [ ] Update worktree-related health/conventions/help text.
-- [ ] Run focused worktree and edit-hook tests.
-- [ ] Run `cargo check`.
-- [ ] Run `cargo test --all-targets -- --test-threads=1` because edit behavior changed.
-- [ ] Run `cargo build --release` if public docs or schemas changed.
-- [ ] Update docs if behavior, env vars, or response shapes changed.
-- [ ] Confirm every success criterion.
+- [x] Re-read this task and list the plan.
+- [x] Inspect `src/worktree.rs`, `src/protocol/edit_hooks.rs`, `src/protocol/edit_format.rs`, edit-tool handlers, and existing worktree tests.
+- [x] Add or update focused tests for env-unset routing before changing the hook gate where practical.
+- [x] Convert worktree routing from env prerequisite to call-time `working_directory` opt-in with policy disable semantics.
+- [x] Preserve omitted-parameter behavior and response shape.
+- [x] Update worktree-related health/conventions/help text.
+- [x] Run focused worktree and edit-hook tests.
+- [x] Run `cargo check`.
+- [x] Run `cargo test --all-targets -- --test-threads=1` because edit behavior changed.
+- [x] Run `cargo build --release` if public docs or schemas changed.
+- [x] Update docs if behavior, env vars, or response shapes changed.
+- [x] Confirm every success criterion.
 
 ## Implementation Chunks
 

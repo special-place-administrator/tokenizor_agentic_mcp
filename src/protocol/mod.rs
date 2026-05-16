@@ -72,7 +72,7 @@ pub struct SymForgeServer {
     /// Session context tracking: records what the LLM has fetched this session.
     pub(crate) session_context: Arc<session::SessionContext>,
     /// Tracks edit-tool calls that omitted `working_directory` while the
-    /// `SYMFORGE_WORKTREE_AWARE` feature flag was on. Surfaced by the
+    /// transitional worktree observability knob was on. Surfaced by the
     /// `health` tool as a rolling "last hour" signal.
     pub(crate) worktree_misuse: Arc<crate::worktree::WorktreeMisuseCounter>,
 }
@@ -168,11 +168,11 @@ impl SymForgeServer {
     }
 
     /// Bump the worktree-awareness misuse counter when an edit handler
-    /// was called without `working_directory` and the feature flag is
-    /// on. No-op when the caller supplied the parameter or the flag is
-    /// off. The counter surfaces in `health` output as a rolling
-    /// "last hour" signal of feature-flag-on callers who haven't yet
-    /// migrated to the worktree-aware call shape.
+    /// was called without `working_directory` and the transitional
+    /// observability knob is on. No-op when the caller supplied the
+    /// parameter or the knob is off. The counter surfaces in `health`
+    /// output as a rolling "last hour" signal for callers that should
+    /// already be passing worktree routing context.
     pub(crate) fn note_worktree_misuse_if_flag_on(&self, working_directory: Option<&str>) {
         if working_directory.is_none() && crate::worktree::feature_flag_enabled() {
             self.worktree_misuse.record_missing_working_directory();

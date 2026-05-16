@@ -7276,9 +7276,11 @@ impl SymForgeServer {
              (edit_within_symbol, replace_symbol_body, insert_symbol, \
              delete_symbol, batch_edit, batch_insert, batch_rename) so writes \
              land in your worktree instead of the indexed copy.\n\
-             Feature-gated on `SYMFORGE_WORKTREE_AWARE=1`; when the flag is \
-             unset or the parameter is omitted, today's indexed-path \
-             behaviour is preserved. See README §Worktree awareness.",
+             A supplied `working_directory` is explicit call-time routing \
+             consent; unset/normal policy allows it, while false/off/disabled \
+             `SYMFORGE_WORKTREE_AWARE` values block requested routing before \
+             write. Omitting the parameter preserves today's indexed-path \
+             behaviour. See README §Worktree awareness.",
         );
         output.push_str("\n\n── Frecency ranking ──\n");
         output.push_str(
@@ -7803,22 +7805,22 @@ impl SymForgeServer {
             Some(root) => root,
             None => return "Error: no repository root configured.".to_string(),
         };
+        let working_directory = params
+            .0
+            .working_directory
+            .as_deref()
+            .map(std::path::Path::new);
         let hook_ctx = edit_hooks::EditContext {
             relative_path: &params.0.path,
             indexed_absolute_path: &abs_path,
             repo_root: &repo_root,
-            working_directory: params
-                .0
-                .working_directory
-                .as_deref()
-                .map(std::path::Path::new),
+            working_directory,
         };
         let resolved_target = match edit_hooks::resolve(&hook_ctx) {
             Ok(r) => r,
             Err(e) => return format!("Error: {e}"),
         };
         let resolved_path = resolved_target.target_path.clone();
-        let working_directory_supplied = params.0.working_directory.is_some();
         let file = {
             let guard = self.index.read();
             loading_guard!(guard);
@@ -7947,7 +7949,7 @@ impl SymForgeServer {
         ));
         result.push_str(&edit::format_tee_snapshot_suffix(&write_report));
         result.push_str(&edit_format::format_reroute_suffix(
-            working_directory_supplied,
+            working_directory,
             &resolved_target,
         ));
         result
@@ -7992,22 +7994,22 @@ impl SymForgeServer {
             Some(root) => root,
             None => return "Error: no repository root configured.".to_string(),
         };
+        let working_directory = params
+            .0
+            .working_directory
+            .as_deref()
+            .map(std::path::Path::new);
         let hook_ctx = edit_hooks::EditContext {
             relative_path: &params.0.path,
             indexed_absolute_path: &abs_path,
             repo_root: &repo_root,
-            working_directory: params
-                .0
-                .working_directory
-                .as_deref()
-                .map(std::path::Path::new),
+            working_directory,
         };
         let resolved_target = match edit_hooks::resolve(&hook_ctx) {
             Ok(r) => r,
             Err(e) => return format!("Error: {e}"),
         };
         let resolved_path = resolved_target.target_path.clone();
-        let working_directory_supplied = params.0.working_directory.is_some();
         let file = {
             let guard = self.index.read();
             loading_guard!(guard);
@@ -8087,7 +8089,7 @@ impl SymForgeServer {
             )
         );
         out.push_str(&edit_format::format_reroute_suffix(
-            working_directory_supplied,
+            working_directory,
             &resolved_target,
         ));
         out.push_str(&edit::format_tee_snapshot_suffix(&write_report));
@@ -8128,22 +8130,22 @@ impl SymForgeServer {
             Some(root) => root,
             None => return "Error: no repository root configured.".to_string(),
         };
+        let working_directory = params
+            .0
+            .working_directory
+            .as_deref()
+            .map(std::path::Path::new);
         let hook_ctx = edit_hooks::EditContext {
             relative_path: &params.0.path,
             indexed_absolute_path: &abs_path,
             repo_root: &repo_root,
-            working_directory: params
-                .0
-                .working_directory
-                .as_deref()
-                .map(std::path::Path::new),
+            working_directory,
         };
         let resolved_target = match edit_hooks::resolve(&hook_ctx) {
             Ok(r) => r,
             Err(e) => return format!("Error: {e}"),
         };
         let resolved_path = resolved_target.target_path.clone();
-        let working_directory_supplied = params.0.working_directory.is_some();
         let file = {
             let guard = self.index.read();
             loading_guard!(guard);
@@ -8218,7 +8220,7 @@ impl SymForgeServer {
             )
         );
         out.push_str(&edit_format::format_reroute_suffix(
-            working_directory_supplied,
+            working_directory,
             &resolved_target,
         ));
         out.push_str(&edit::format_tee_snapshot_suffix(&write_report));
@@ -8261,22 +8263,22 @@ impl SymForgeServer {
             Some(root) => root,
             None => return "Error: no repository root configured.".to_string(),
         };
+        let working_directory = params
+            .0
+            .working_directory
+            .as_deref()
+            .map(std::path::Path::new);
         let hook_ctx = edit_hooks::EditContext {
             relative_path: &params.0.path,
             indexed_absolute_path: &abs_path,
             repo_root: &repo_root,
-            working_directory: params
-                .0
-                .working_directory
-                .as_deref()
-                .map(std::path::Path::new),
+            working_directory,
         };
         let resolved_target = match edit_hooks::resolve(&hook_ctx) {
             Ok(r) => r,
             Err(e) => return format!("Error: {e}"),
         };
         let resolved_path = resolved_target.target_path.clone();
-        let working_directory_supplied = params.0.working_directory.is_some();
         let file = {
             let guard = self.index.read();
             loading_guard!(guard);
@@ -8459,7 +8461,7 @@ impl SymForgeServer {
             )
         );
         out.push_str(&edit_format::format_reroute_suffix(
-            working_directory_supplied,
+            working_directory,
             &resolved_target,
         ));
         out.push_str(&edit::format_tee_snapshot_suffix(&write_report));

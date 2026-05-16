@@ -10,7 +10,7 @@
 //! resolution algorithm implemented here.
 //!
 //! The edit handlers call [`resolve_target_path`] before writing. When
-//! `working_directory` is `None`, behavior is byte-identical to pre-flag
+//! `working_directory` is `None`, behavior is byte-identical to pre-routing
 //! releases (write to the indexed absolute path). When `Some`, the path
 //! is re-rooted against the working directory and validated against a
 //! cached `git worktree list`, refreshed on cache miss.
@@ -24,7 +24,10 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
+use crate::capability::WorktreeRoutingPolicy;
 use crate::protocol::edit_hooks::{EditContext, EditHook};
+
+pub const WORKTREE_ROUTING_ENV: &str = "SYMFORGE_WORKTREE_AWARE";
 
 /// A worktree known to be associated with the indexed root.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +84,12 @@ pub enum WorktreeError {
 
     #[error("`git worktree list` failed: {0}")]
     GitWorktreeList(String),
+
+    #[error(
+        "WorktreeRoutingDisabledByPolicy: working_directory `{}` requested worktree routing, but worktree routing is disabled by policy — {hint}",
+        cwd.display()
+    )]
+    WorktreeRoutingDisabledByPolicy { cwd: PathBuf, hint: String },
 }
 
 /// Canonicalize a path, returning a clean form without the `\\?\` UNC
@@ -190,16 +199,16 @@ pub fn resolve_target_path(
     working_directory: Option<&Path>,
     cache: &mut WorktreeCache,
 ) -> Result<ResolvedTarget, WorktreeError> {
-    let canonical_indexed_abs = canonicalize_or_identity(indexed_abs);
-    let canonical_indexed_root = canonicalize(indexed_root)?;
-
     let Some(raw_wd) = working_directory else {
         return Ok(ResolvedTarget {
-            target_path: canonical_indexed_abs.clone(),
-            indexed_path: canonical_indexed_abs,
+            target_path: indexed_abs.to_path_buf(),
+            indexed_path: indexed_abs.to_path_buf(),
             rerouted: false,
         });
     };
+
+    let canonical_indexed_abs = canonicalize_or_identity(indexed_abs);
+    let canonical_indexed_root = canonicalize(indexed_root)?;
 
     // Canonicalize fails with NotFound when the supplied working_directory
     // doesn't exist on disk (e.g. a typo or a yet-to-be-created worktree
@@ -325,6 +334,17 @@ impl Default for WorktreeAwareEditHook {
 
 impl EditHook for WorktreeAwareEditHook {
     fn resolve_target_path(&self, ctx: &EditContext) -> Result<ResolvedTarget, String> {
+        if let Some(cwd) = ctx.working_directory
+            && routing_policy_from_env() == WorktreeRoutingPolicy::Disabled
+        {
+            return Err(WorktreeError::WorktreeRoutingDisabledByPolicy {
+                cwd: cwd.to_path_buf(),
+                hint: format!(
+                    "unset {WORKTREE_ROUTING_ENV} or set it to `1`/`true`/`on` to allow explicit call-time routing"
+                ),
+            }
+            .to_string());
+        }
         let mut cache = self.cache.lock();
         resolve_target_path(
             ctx.indexed_absolute_path,
@@ -336,25 +356,40 @@ impl EditHook for WorktreeAwareEditHook {
     }
 }
 
-/// Returns `true` when the `SYMFORGE_WORKTREE_AWARE=1` feature flag is
-/// set. Reads the process environment on every call; callers should
-/// cache the result when hot-path sensitive.
+/// Interpret the transitional worktree-routing env var as policy. Unset means
+/// explicit call-time routing is allowed; false/off/disabled values block
+/// requested routing before any write.
+pub fn routing_policy_from_env() -> WorktreeRoutingPolicy {
+    match std::env::var(WORKTREE_ROUTING_ENV) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "" | "1" | "true" | "yes" | "on" | "explicit" | "explicit-call-time"
+            | "explicit_call_time" => WorktreeRoutingPolicy::ExplicitCallTime,
+            "0" | "false" | "no" | "off" | "disabled" | "disable" => {
+                WorktreeRoutingPolicy::Disabled
+            }
+            _ => WorktreeRoutingPolicy::Disabled,
+        },
+        Err(std::env::VarError::NotPresent) => WorktreeRoutingPolicy::ExplicitCallTime,
+        Err(std::env::VarError::NotUnicode(_)) => WorktreeRoutingPolicy::Disabled,
+    }
+}
+
+/// Returns `true` when the transitional observability knob is set. This does
+/// not gate routing; it only keeps the health-visible misuse counter opt-in.
 pub fn feature_flag_enabled() -> bool {
-    std::env::var("SYMFORGE_WORKTREE_AWARE").ok().as_deref() == Some("1")
+    std::env::var(WORKTREE_ROUTING_ENV).ok().as_deref() == Some("1")
 }
 
 /// Install [`WorktreeAwareEditHook`] on the process-wide edit-hook
-/// registry, exactly once. Gated by `SYMFORGE_WORKTREE_AWARE=1`; a
-/// missing or unset flag is a no-op so today's behaviour is preserved.
+/// registry, exactly once. Routing policy is resolved inside the hook so
+/// callers can request worktree routing at call time with `working_directory`.
 ///
 /// Safe to call repeatedly — the first caller registers the hook and
 /// every subsequent call short-circuits via the internal [`OnceLock`].
 pub fn register_if_feature_enabled() {
     static REGISTERED: OnceLock<()> = OnceLock::new();
     REGISTERED.get_or_init(|| {
-        if feature_flag_enabled() {
-            crate::protocol::edit_hooks::register(Box::new(WorktreeAwareEditHook::new()));
-        }
+        crate::protocol::edit_hooks::register(Box::new(WorktreeAwareEditHook::new()));
     });
 }
 
@@ -362,7 +397,7 @@ pub fn register_if_feature_enabled() {
 const MISUSE_WINDOW: Duration = Duration::from_secs(3600);
 
 /// Counts edit-tool calls that omitted `working_directory` while the
-/// `SYMFORGE_WORKTREE_AWARE` feature flag was on. Exposed through the
+/// transitional worktree observability knob is on. Exposed through the
 /// `health` tool as a rolling "last hour" signal so regressions stay
 /// visible after the feature ships.
 ///
@@ -568,7 +603,10 @@ mod tests {
         let mut cache = WorktreeCache::new();
         assert!(cache.is_empty());
         let entry = cache.lookup(&wt_root, &main_root).expect("lookup");
-        assert!(entry.is_some(), "expected cache to refresh and find worktree");
+        assert!(
+            entry.is_some(),
+            "expected cache to refresh and find worktree"
+        );
         assert!(!cache.is_empty(), "refresh should have populated cache");
     }
 
@@ -593,7 +631,23 @@ mod tests {
         let resolved =
             resolve_target_path(&indexed_abs, &main_root, None, &mut cache).expect("resolve");
         assert!(!resolved.rerouted);
-        assert_eq!(resolved.target_path, canonicalize(&indexed_abs).unwrap());
+        assert_eq!(resolved.target_path, indexed_abs);
+        assert_eq!(resolved.target_path, resolved.indexed_path);
+    }
+
+    #[test]
+    fn resolve_omitted_working_directory_does_not_touch_filesystem() {
+        let missing_root = std::env::temp_dir().join(format!(
+            "symforge-missing-root-{}",
+            std::process::id()
+        ));
+        let indexed_abs = missing_root.join("src/file.rs");
+        let mut cache = WorktreeCache::new();
+        let resolved = resolve_target_path(&indexed_abs, &missing_root, None, &mut cache)
+            .expect("omitted working_directory should not canonicalize repo root");
+
+        assert!(!resolved.rerouted);
+        assert_eq!(resolved.target_path, indexed_abs);
         assert_eq!(resolved.target_path, resolved.indexed_path);
     }
 
@@ -602,9 +656,8 @@ mod tests {
         let (_tmp, main_root, _wt) = make_repo_with_worktree();
         let indexed_abs = main_root.join("src/file.rs");
         let mut cache = WorktreeCache::new();
-        let resolved =
-            resolve_target_path(&indexed_abs, &main_root, Some(&main_root), &mut cache)
-                .expect("resolve");
+        let resolved = resolve_target_path(&indexed_abs, &main_root, Some(&main_root), &mut cache)
+            .expect("resolve");
         assert!(!resolved.rerouted, "indexed root should not reroute");
     }
 
@@ -613,9 +666,8 @@ mod tests {
         let (_tmp, main_root, wt_root) = make_repo_with_worktree();
         let indexed_abs = main_root.join("src/file.rs");
         let mut cache = WorktreeCache::new();
-        let resolved =
-            resolve_target_path(&indexed_abs, &main_root, Some(&wt_root), &mut cache)
-                .expect("resolve");
+        let resolved = resolve_target_path(&indexed_abs, &main_root, Some(&wt_root), &mut cache)
+            .expect("resolve");
         assert!(resolved.rerouted);
         assert_eq!(resolved.target_path, wt_root.join("src/file.rs"));
         assert_eq!(resolved.indexed_path, canonicalize(&indexed_abs).unwrap());
@@ -627,11 +679,13 @@ mod tests {
         let stray = tempfile::tempdir().unwrap();
         let indexed_abs = main_root.join("src/file.rs");
         let mut cache = WorktreeCache::new();
-        let err =
-            resolve_target_path(&indexed_abs, &main_root, Some(stray.path()), &mut cache)
-                .expect_err("should reject unknown dir");
+        let err = resolve_target_path(&indexed_abs, &main_root, Some(stray.path()), &mut cache)
+            .expect_err("should reject unknown dir");
         assert!(
-            matches!(err, WorktreeError::WorkingDirectoryNotARecognizedWorktree { .. }),
+            matches!(
+                err,
+                WorktreeError::WorkingDirectoryNotARecognizedWorktree { .. }
+            ),
             "got {err:?}"
         );
     }
@@ -643,10 +697,12 @@ mod tests {
         fs::remove_file(wt_root.join("src/file.rs")).unwrap();
         let indexed_abs = main_root.join("src/file.rs");
         let mut cache = WorktreeCache::new();
-        let err =
-            resolve_target_path(&indexed_abs, &main_root, Some(&wt_root), &mut cache)
-                .expect_err("should report missing target");
-        assert!(matches!(err, WorktreeError::TargetFileMissing { .. }), "got {err:?}");
+        let err = resolve_target_path(&indexed_abs, &main_root, Some(&wt_root), &mut cache)
+            .expect_err("should report missing target");
+        assert!(
+            matches!(err, WorktreeError::TargetFileMissing { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -658,9 +714,8 @@ mod tests {
         let stray_indexed = outside_canon.join("file.rs");
         fs::write(&stray_indexed, "x").unwrap();
         let mut cache = WorktreeCache::new();
-        let err =
-            resolve_target_path(&stray_indexed, &main_root, Some(&wt_root), &mut cache)
-                .expect_err("should reject path outside indexed root");
+        let err = resolve_target_path(&stray_indexed, &main_root, Some(&wt_root), &mut cache)
+            .expect_err("should reject path outside indexed root");
         assert!(
             matches!(err, WorktreeError::PathOutsideIndexedRoot { .. }),
             "got {err:?}"

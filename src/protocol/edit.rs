@@ -182,6 +182,24 @@ pub(crate) fn format_tee_snapshot_suffix(report: &AtomicWriteReport) -> String {
         .unwrap_or_default()
 }
 
+fn append_response_suffix_to_first_summary(summaries: &mut Vec<String>, suffix: &str) {
+    let suffix = suffix.trim_start_matches('\n');
+    if suffix.is_empty() {
+        return;
+    }
+    let indented = suffix
+        .lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if let Some(first) = summaries.first_mut() {
+        first.push('\n');
+        first.push_str(&indented);
+    } else {
+        summaries.push(indented);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Reindex after write
 // ---------------------------------------------------------------------------
@@ -1215,6 +1233,7 @@ pub(crate) fn execute_batch_edit(
         language: LanguageId,
         summaries: Vec<String>,
         working_directory: Option<PathBuf>,
+        resolved_target: crate::worktree::ResolvedTarget,
     }
 
     let mut staged: Vec<StagedFile> = Vec::with_capacity(by_file.len());
@@ -1347,10 +1366,11 @@ pub(crate) fn execute_batch_edit(
             repo_root,
             working_directory: per_file_working_directory.as_deref(),
         };
-        let abs_path = match super::edit_hooks::resolve(&hook_ctx) {
-            Ok(r) => r.target_path,
+        let resolved_target = match super::edit_hooks::resolve(&hook_ctx) {
+            Ok(r) => r,
             Err(e) => return Err(format!("Path resolution error for '{path}': {e}")),
         };
+        let abs_path = resolved_target.target_path.clone();
         staged.push(StagedFile {
             path: path.clone(),
             abs_path,
@@ -1359,6 +1379,7 @@ pub(crate) fn execute_batch_edit(
             language,
             summaries: file_summaries,
             working_directory: per_file_working_directory,
+            resolved_target,
         });
     }
 
@@ -1447,7 +1468,7 @@ pub(crate) fn execute_batch_edit(
         );
         let hook_ctx = super::edit_hooks::EditContext {
             relative_path: &staged_file.path,
-            indexed_absolute_path: &staged_file.abs_path,
+            indexed_absolute_path: &staged_file.resolved_target.indexed_path,
             repo_root,
             working_directory: staged_file.working_directory.as_deref(),
         };
@@ -1456,13 +1477,13 @@ pub(crate) fn execute_batch_edit(
         if let Some(report) = &write_reports[i]
             && let Some(hint) = report.tee_snapshot.response_hint()
         {
-            if let Some(first) = file_summaries.first_mut() {
-                first.push_str("\n  ");
-                first.push_str(&hint);
-            } else {
-                file_summaries.push(hint);
-            }
+            append_response_suffix_to_first_summary(&mut file_summaries, &hint);
         }
+        let reroute_suffix = super::edit_format::format_reroute_suffix(
+            staged_file.working_directory.as_deref(),
+            &staged_file.resolved_target,
+        );
+        append_response_suffix_to_first_summary(&mut file_summaries, &reroute_suffix);
         summaries.extend(file_summaries);
     }
 
@@ -1712,6 +1733,7 @@ pub(crate) fn execute_batch_rename(
         language: LanguageId,
         refs_count: usize,
         working_directory: Option<std::path::PathBuf>,
+        resolved_target: crate::worktree::ResolvedTarget,
     }
     let mut staged: Vec<StagedFile> = Vec::with_capacity(by_file.len());
     for (path, ranges) in &by_file {
@@ -1753,18 +1775,19 @@ pub(crate) fn execute_batch_rename(
             repo_root,
             working_directory: working_directory.as_deref(),
         };
-        let abs = match super::edit_hooks::resolve(&hook_ctx) {
-            Ok(r) => r.target_path,
+        let resolved_target = match super::edit_hooks::resolve(&hook_ctx) {
+            Ok(r) => r,
             Err(e) => return Err(format!("Path resolution error for '{path}': {e}")),
         };
         staged.push(StagedFile {
             path: path.clone(),
-            abs_path: abs,
+            abs_path: resolved_target.target_path.clone(),
             original,
             new_content,
             language: lang,
             refs_count: ranges.len(),
             working_directory,
+            resolved_target,
         });
     }
 
@@ -1840,7 +1863,7 @@ pub(crate) fn execute_batch_rename(
         );
         let hook_ctx = super::edit_hooks::EditContext {
             relative_path: &sf.path,
-            indexed_absolute_path: &sf.abs_path,
+            indexed_absolute_path: &sf.resolved_target.indexed_path,
             repo_root,
             working_directory: sf.working_directory.as_deref(),
         };
@@ -1859,6 +1882,12 @@ pub(crate) fn execute_batch_rename(
             uncertain_lines.len(),
         ));
         output.push_str(&uncertain_lines.join("\n"));
+    }
+    for sf in &staged {
+        output.push_str(&super::edit_format::format_reroute_suffix(
+            sf.working_directory.as_deref(),
+            &sf.resolved_target,
+        ));
     }
     Ok(output)
 }
@@ -2057,6 +2086,7 @@ pub(crate) fn execute_batch_insert(
         language: LanguageId,
         summaries: Vec<String>,
         working_directory: Option<PathBuf>,
+        resolved_target: crate::worktree::ResolvedTarget,
     }
 
     let mut staged: Vec<StagedFile> = Vec::with_capacity(by_file.len());
@@ -2132,18 +2162,19 @@ pub(crate) fn execute_batch_insert(
             repo_root,
             working_directory: per_file_working_directory.as_deref(),
         };
-        let abs_path = match super::edit_hooks::resolve(&hook_ctx) {
-            Ok(r) => r.target_path,
+        let resolved_target = match super::edit_hooks::resolve(&hook_ctx) {
+            Ok(r) => r,
             Err(e) => return Err(format!("Target {path}: path resolution error: {e}")),
         };
         staged.push(StagedFile {
             path: path.clone(),
-            abs_path,
+            abs_path: resolved_target.target_path.clone(),
             original: file.content.clone(),
             new_content: content,
             language: resolved[indices[0]].language.clone(),
             summaries: file_summaries,
             working_directory: per_file_working_directory,
+            resolved_target,
         });
     }
 
@@ -2224,12 +2255,18 @@ pub(crate) fn execute_batch_insert(
         );
         let hook_ctx = super::edit_hooks::EditContext {
             relative_path: &staged_file.path,
-            indexed_absolute_path: &staged_file.abs_path,
+            indexed_absolute_path: &staged_file.resolved_target.indexed_path,
             repo_root,
             working_directory: staged_file.working_directory.as_deref(),
         };
         super::edit_hooks::after_commit(&hook_ctx, &staged_file.abs_path);
-        summaries.extend(staged_file.summaries.iter().cloned());
+        let mut file_summaries = staged_file.summaries.clone();
+        let reroute_suffix = super::edit_format::format_reroute_suffix(
+            staged_file.working_directory.as_deref(),
+            &staged_file.resolved_target,
+        );
+        append_response_suffix_to_first_summary(&mut file_summaries, &reroute_suffix);
+        summaries.extend(file_summaries);
     }
 
     Ok(summaries)

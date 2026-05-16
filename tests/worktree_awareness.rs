@@ -11,10 +11,9 @@
 //!     and emit `wrote_to` / `indexed_path` / `rerouted` in their response.
 //!   - `README.md` documents the parameter with one example.
 //!
-//! The feature is flagged behind `SYMFORGE_WORKTREE_AWARE=1`. Each test
-//! enables the flag before building its fixture. The tests set env vars, so
-//! they MUST run single-threaded — project `CLAUDE.md` already mandates
-//! `--test-threads=1` for this crate.
+//! `working_directory` is call-time consent for routing. The tests that mutate
+//! the transitional policy env var MUST run single-threaded — project
+//! `CLAUDE.md` already mandates `--test-threads=1` for this crate.
 //!
 //! Harness shells out to the system `git` binary (version 2.5+ for
 //! `git worktree add`). On dev machines and CI this is always present.
@@ -54,12 +53,38 @@ const EDIT_TOOLS: &[&str] = &[
 const HELLO_RS: &str =
     "fn hello() {\n    println!(\"hello\");\n}\n\nfn world() {\n    println!(\"world\");\n}\n";
 
-// ─── Feature flag helpers ───────────────────────────────────────────────────
+// ─── Policy env helpers ─────────────────────────────────────────────────────
 
-fn enable_feature_flag() {
-    // SAFETY: tests are `--test-threads=1` per project `CLAUDE.md`. Rust 2024
-    // requires `unsafe` for env-var mutation; see `.planning/STATE.md:66`.
-    unsafe { std::env::set_var("SYMFORGE_WORKTREE_AWARE", "1") };
+struct WorktreePolicyEnvGuard {
+    previous: Option<String>,
+}
+
+impl WorktreePolicyEnvGuard {
+    fn remove() -> Self {
+        let previous = std::env::var("SYMFORGE_WORKTREE_AWARE").ok();
+        // SAFETY: tests are `--test-threads=1` per project policy.
+        unsafe { std::env::remove_var("SYMFORGE_WORKTREE_AWARE") };
+        Self { previous }
+    }
+
+    fn set(value: &str) -> Self {
+        let previous = std::env::var("SYMFORGE_WORKTREE_AWARE").ok();
+        // SAFETY: tests are `--test-threads=1` per project policy.
+        unsafe { std::env::set_var("SYMFORGE_WORKTREE_AWARE", value) };
+        Self { previous }
+    }
+}
+
+impl Drop for WorktreePolicyEnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: tests are `--test-threads=1` per project policy.
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var("SYMFORGE_WORKTREE_AWARE", value),
+                None => std::env::remove_var("SYMFORGE_WORKTREE_AWARE"),
+            }
+        }
+    }
 }
 
 // ─── Git helpers (shell out; git is required dev tooling) ───────────────────
@@ -140,7 +165,11 @@ impl IndexedOnlyFixture {
             Some(root.clone()),
             None,
         );
-        Self { _dir: dir, root, server }
+        Self {
+            _dir: dir,
+            root,
+            server,
+        }
     }
 
     fn read(&self, rel: &str) -> String {
@@ -237,7 +266,7 @@ fn assert_not_contains(result: &str, needle: &str) {
 /// the tool's input struct).
 #[tokio::test]
 async fn ac1_all_seven_edit_tools_accept_working_directory_param() {
-    enable_feature_flag();
+    let _env = WorktreePolicyEnvGuard::remove();
     // Lock the tool set in one place; future edit tools must be added here
     // before the file is re-landed.
     assert_eq!(EDIT_TOOLS.len(), 7, "spec §2.1 lists exactly 7 write tools");
@@ -338,7 +367,7 @@ async fn ac1_all_seven_edit_tools_accept_working_directory_param() {
 /// today (indexed-path write, pre-existing response format).
 #[tokio::test]
 async fn ac2_omitted_working_directory_is_byte_identical() {
-    enable_feature_flag();
+    let _env = WorktreePolicyEnvGuard::remove();
     let fx = IndexedOnlyFixture::new(&[("src/lib.rs", HELLO_RS)]);
 
     let result = call(
@@ -373,7 +402,7 @@ async fn ac2_omitted_working_directory_is_byte_identical() {
 /// worktree's copy and leaves the indexed copy untouched.
 #[tokio::test]
 async fn ac3_working_directory_at_known_worktree_writes_to_worktree() {
-    enable_feature_flag();
+    let _env = WorktreePolicyEnvGuard::remove();
     let fx = WorktreeFixture::new(&[("src/lib.rs", HELLO_RS)]);
     let wt_arg = fx.worktree_root.to_str().unwrap().to_string();
 
@@ -410,7 +439,7 @@ async fn ac3_working_directory_at_known_worktree_writes_to_worktree() {
 /// returns an error and writes zero bytes.
 #[tokio::test]
 async fn ac4_working_directory_at_unknown_path_errors_and_writes_nothing() {
-    enable_feature_flag();
+    let _env = WorktreePolicyEnvGuard::remove();
     let fx = WorktreeFixture::new(&[("src/lib.rs", HELLO_RS)]);
     // A real, existing directory that isn't registered with the indexed
     // repo's `git worktree list`.
@@ -454,7 +483,7 @@ async fn ac4_working_directory_at_unknown_path_errors_and_writes_nothing() {
 /// so callers can verify the actual write target.
 #[tokio::test]
 async fn ac5_response_surfaces_wrote_to_and_indexed_path_and_rerouted() {
-    enable_feature_flag();
+    let _env = WorktreePolicyEnvGuard::remove();
     let fx = WorktreeFixture::new(&[("src/lib.rs", HELLO_RS)]);
     let wt_arg = fx.worktree_root.to_str().unwrap().to_string();
 
@@ -472,10 +501,75 @@ async fn ac5_response_surfaces_wrote_to_and_indexed_path_and_rerouted() {
 
     assert_contains(&result, "wrote_to");
     assert_contains(&result, "indexed_path");
+    assert_contains(&result, "working_directory");
     assert_contains(&result, "rerouted: true");
     // The rerouted write target must appear verbatim in the response so the
     // caller can log / verify it.
     assert_contains(&result, fx.worktree_root.to_str().unwrap());
+}
+
+/// Env-vars-unset routing is the Task 05 regression: a supplied
+/// `working_directory` is explicit call-time consent and must not need
+/// `SYMFORGE_WORKTREE_AWARE=1`.
+#[tokio::test]
+async fn env_unset_working_directory_routes_and_reports_full_target_evidence() {
+    let _env = WorktreePolicyEnvGuard::remove();
+    let fx = WorktreeFixture::new(&[("src/lib.rs", HELLO_RS)]);
+    let wt_arg = fx.worktree_root.to_str().unwrap().to_string();
+
+    let result = call(
+        &fx.server,
+        "replace_symbol_body",
+        json!({
+            "path": "src/lib.rs",
+            "name": "hello",
+            "new_body": "fn hello() {\n    println!(\"ENV_UNSET_WT\");\n}",
+            "working_directory": wt_arg,
+        }),
+    )
+    .await;
+
+    assert_contains(&result, "working_directory");
+    assert_contains(&result, "wrote_to");
+    assert_contains(&result, "indexed_path");
+    assert_contains(&result, "rerouted: true");
+    assert_contains(&result, fx.worktree_root.to_str().unwrap());
+
+    assert!(
+        fx.read_worktree("src/lib.rs").contains("ENV_UNSET_WT"),
+        "env-unset routed write must land in worktree"
+    );
+    assert!(
+        !fx.read_indexed("src/lib.rs").contains("ENV_UNSET_WT"),
+        "env-unset routed write must not pollute indexed root"
+    );
+}
+
+/// Explicit disabled policy is fail-safe: requested worktree routing errors
+/// before write instead of silently falling back to indexed-root writes.
+#[tokio::test]
+async fn policy_disabled_working_directory_fails_before_any_write() {
+    let _env = WorktreePolicyEnvGuard::set("disabled");
+    let fx = WorktreeFixture::new(&[("src/lib.rs", HELLO_RS)]);
+    let indexed_before = fx.read_indexed("src/lib.rs");
+    let worktree_before = fx.read_worktree("src/lib.rs");
+
+    let result = call(
+        &fx.server,
+        "replace_symbol_body",
+        json!({
+            "path": "src/lib.rs",
+            "name": "hello",
+            "new_body": "fn hello() {\n    println!(\"DISABLED_SHOULD_NOT_WRITE\");\n}",
+            "working_directory": fx.worktree_root.to_str().unwrap(),
+        }),
+    )
+    .await;
+
+    assert_contains(&result, "WorktreeRoutingDisabledByPolicy");
+    assert_contains(&result, "disabled by policy");
+    assert_eq!(fx.read_indexed("src/lib.rs"), indexed_before);
+    assert_eq!(fx.read_worktree("src/lib.rs"), worktree_before);
 }
 
 /// AC6: Test matrix covers the two cases not covered by AC2-AC4:
@@ -484,7 +578,7 @@ async fn ac5_response_surfaces_wrote_to_and_indexed_path_and_rerouted() {
 ///      HEAD → `TargetFileMissing` with an actionable hint.
 #[tokio::test]
 async fn ac6_matrix_covers_indexed_root_and_missing_file_cases() {
-    enable_feature_flag();
+    let _env = WorktreePolicyEnvGuard::remove();
     let fx = WorktreeFixture::new(&[("src/lib.rs", HELLO_RS)]);
 
     // Case A: working_directory = indexed root → same behaviour as omitted.
@@ -520,6 +614,172 @@ async fn ac6_matrix_covers_indexed_root_and_missing_file_cases() {
     assert_contains(&result_b, "git ls-tree");
 }
 
+/// Every routed edit surface, including batch tools, reports the resolved
+/// target when `working_directory` is supplied.
+#[tokio::test]
+async fn all_routed_edit_tools_report_resolved_target_when_working_directory_supplied() {
+    let _env = WorktreePolicyEnvGuard::remove();
+
+    let cases: Vec<(&str, Value, &str)> = vec![
+        (
+            "edit_within_symbol",
+            json!({
+                "path": "src/lib.rs",
+                "name": "hello",
+                "old_text": "hello",
+                "new_text": "EDIT_WITHIN_WT",
+            }),
+            "EDIT_WITHIN_WT",
+        ),
+        (
+            "replace_symbol_body",
+            json!({
+                "path": "src/lib.rs",
+                "name": "hello",
+                "new_body": "fn hello() {\n    println!(\"REPLACE_WT\");\n}",
+            }),
+            "REPLACE_WT",
+        ),
+        (
+            "insert_symbol",
+            json!({
+                "path": "src/lib.rs",
+                "name": "hello",
+                "content": "fn inserted_wt() {}",
+                "position": "after",
+            }),
+            "inserted_wt",
+        ),
+        (
+            "delete_symbol",
+            json!({
+                "path": "src/lib.rs",
+                "name": "world",
+            }),
+            "fn world()",
+        ),
+        (
+            "batch_edit",
+            json!({
+                "edits": [{
+                    "path": "src/lib.rs",
+                    "name": "hello",
+                    "operation": {
+                        "type": "edit_within",
+                        "old_text": "hello",
+                        "new_text": "BATCH_EDIT_WT"
+                    }
+                }]
+            }),
+            "BATCH_EDIT_WT",
+        ),
+        (
+            "batch_insert",
+            json!({
+                "content": "fn batch_inserted_wt() {}",
+                "position": "after",
+                "targets": [{ "path": "src/lib.rs", "name": "hello" }]
+            }),
+            "batch_inserted_wt",
+        ),
+        (
+            "batch_rename",
+            json!({
+                "path": "src/lib.rs",
+                "name": "hello",
+                "new_name": "hello_renamed_wt",
+            }),
+            "hello_renamed_wt",
+        ),
+    ];
+
+    for (tool, mut params, expected_marker) in cases {
+        let fx = WorktreeFixture::new(&[("src/lib.rs", HELLO_RS)]);
+        params["working_directory"] = json!(fx.worktree_root.to_str().unwrap());
+
+        let result = call(&fx.server, tool, params).await;
+
+        assert_contains(&result, "working_directory");
+        assert_contains(&result, "wrote_to");
+        assert_contains(&result, "indexed_path");
+        assert_contains(&result, "rerouted: true");
+        assert_contains(&result, fx.worktree_root.to_str().unwrap());
+
+        let worktree_after = fx.read_worktree("src/lib.rs");
+        let indexed_after = fx.read_indexed("src/lib.rs");
+        if tool == "delete_symbol" {
+            assert!(
+                !worktree_after.contains(expected_marker),
+                "{tool} did not delete from worktree as expected:\n{worktree_after}\nresponse:\n{result}"
+            );
+            assert!(
+                indexed_after.contains(expected_marker),
+                "{tool} polluted indexed root:\n{indexed_after}\nresponse:\n{result}"
+            );
+        } else {
+            assert!(
+                worktree_after.contains(expected_marker),
+                "{tool} did not update worktree as expected:\n{worktree_after}\nresponse:\n{result}"
+            );
+            assert!(
+                !indexed_after.contains(expected_marker),
+                "{tool} polluted indexed root:\n{indexed_after}\nresponse:\n{result}"
+            );
+        }
+    }
+}
+
+/// Tee snapshots must snapshot the resolved worktree target before the routed
+/// write, not the indexed-root file that supplied the symbol span.
+#[tokio::test]
+async fn tee_snapshot_uses_resolved_worktree_target_before_write() {
+    let _env = WorktreePolicyEnvGuard::remove();
+    let fx = WorktreeFixture::new(&[("src/lib.rs", HELLO_RS)]);
+    let worktree_file = fx.worktree_root.join("src/lib.rs");
+    fs::write(
+        &worktree_file,
+        "fn hello() {\n    println!(\"WORKTREE_ORIGINAL\");\n}\n\nfn world() {}\n",
+    )
+    .expect("write divergent worktree file");
+
+    let result = call(
+        &fx.server,
+        "replace_symbol_body",
+        json!({
+            "path": "src/lib.rs",
+            "name": "hello",
+            "new_body": "fn hello() {\n    println!(\"TEE_AFTER\");\n}",
+            "working_directory": fx.worktree_root.to_str().unwrap(),
+        }),
+    )
+    .await;
+
+    assert_contains(&result, "Tee snapshot:");
+    assert_contains(&result, "rerouted: true");
+
+    let tee_dir = fx.worktree_root.join(".symforge").join("tee");
+    let mut snapshot_contents = Vec::new();
+    for entry in fs::read_dir(&tee_dir)
+        .unwrap_or_else(|e| panic!("expected tee dir at {}: {e}", tee_dir.display()))
+    {
+        let path = entry.expect("tee entry").path();
+        if path.is_file() {
+            snapshot_contents.push(fs::read_to_string(path).expect("read tee snapshot"));
+        }
+    }
+
+    assert!(
+        snapshot_contents
+            .iter()
+            .any(|content| content.contains("WORKTREE_ORIGINAL")),
+        "tee snapshots did not preserve the pre-write worktree bytes: {snapshot_contents:?}"
+    );
+    assert!(
+        fx.read_worktree("src/lib.rs").contains("TEE_AFTER"),
+        "routed write should still update the worktree"
+    );
+}
+
 /// AC7: `README.md` documents the `working_directory` parameter with an
 /// example.
 #[test]
@@ -545,7 +805,7 @@ fn ac7_readme_documents_working_directory_parameter() {
 #[cfg(target_os = "windows")]
 #[tokio::test]
 async fn matrix_windows_forward_and_back_slash_canonicalize_equal() {
-    enable_feature_flag();
+    let _env = WorktreePolicyEnvGuard::remove();
     let fx = WorktreeFixture::new(&[("src/lib.rs", HELLO_RS)]);
     let back = fx.worktree_root.to_str().unwrap().to_string();
     let forward = back.replace('\\', "/");
@@ -572,7 +832,7 @@ async fn matrix_windows_forward_and_back_slash_canonicalize_equal() {
 #[cfg(target_os = "windows")]
 #[tokio::test]
 async fn matrix_mixed_case_windows_canonicalize_equal() {
-    enable_feature_flag();
+    let _env = WorktreePolicyEnvGuard::remove();
     let fx = WorktreeFixture::new(&[("src/lib.rs", HELLO_RS)]);
     let original = fx.worktree_root.to_str().unwrap().to_string();
     // Flip-case selected characters (drive letter, a couple of segments) so
@@ -608,7 +868,7 @@ async fn matrix_mixed_case_windows_canonicalize_equal() {
 /// without a trailing separator must canonicalize to the same worktree.
 #[tokio::test]
 async fn matrix_trailing_slash_canonicalize_equal() {
-    enable_feature_flag();
+    let _env = WorktreePolicyEnvGuard::remove();
     let fx = WorktreeFixture::new(&[("src/lib.rs", HELLO_RS)]);
     let base = fx.worktree_root.to_str().unwrap().to_string();
     let sep = std::path::MAIN_SEPARATOR;
@@ -643,7 +903,7 @@ async fn matrix_trailing_slash_canonicalize_equal() {
 /// is untouched by either.
 #[tokio::test]
 async fn matrix_two_worktrees_concurrent_calls_have_no_crosstalk() {
-    enable_feature_flag();
+    let _env = WorktreePolicyEnvGuard::remove();
     let fx = WorktreeFixture::new(&[("src/lib.rs", HELLO_RS)]);
 
     let wt2 = fx.container().join("wt_two");
@@ -699,7 +959,7 @@ async fn matrix_two_worktrees_concurrent_calls_have_no_crosstalk() {
 /// accepted on the next tool call, not rejected as unknown.
 #[tokio::test]
 async fn matrix_cache_refresh_newly_created_worktree_accepted() {
-    enable_feature_flag();
+    let _env = WorktreePolicyEnvGuard::remove();
     let fx = IndexedOnlyFixture::new(&[("src/lib.rs", HELLO_RS)]);
     let container = fx.root.parent().expect("container").to_path_buf();
     let lateborn = container.join("wt_lateborn");
@@ -739,11 +999,11 @@ async fn matrix_cache_refresh_newly_created_worktree_accepted() {
 // ─── Item 4: health misuse counter + conventions answer ─────────────────────
 
 /// `health` surfaces a rolling "last hour" misuse counter whose value bumps
-/// each time an edit tool is called without `working_directory` while
-/// `SYMFORGE_WORKTREE_AWARE=1` is set.
+/// each time an edit tool is called without `working_directory` while the
+/// transitional observability knob is set.
 #[tokio::test]
 async fn health_surfaces_worktree_misuse_counter() {
-    enable_feature_flag();
+    let _env = WorktreePolicyEnvGuard::set("1");
     let fx = IndexedOnlyFixture::new(&[("src/lib.rs", HELLO_RS)]);
 
     // Baseline: before any edit calls, counter reads 0.
@@ -794,7 +1054,7 @@ async fn health_surfaces_worktree_misuse_counter() {
 /// increment — the caller did the right thing.
 #[tokio::test]
 async fn health_misuse_counter_does_not_increment_when_working_directory_supplied() {
-    enable_feature_flag();
+    let _env = WorktreePolicyEnvGuard::set("1");
     let fx = WorktreeFixture::new(&[("src/lib.rs", HELLO_RS)]);
     let wt_arg = fx.worktree_root.to_str().unwrap().to_string();
 
@@ -818,18 +1078,19 @@ async fn health_misuse_counter_does_not_increment_when_working_directory_supplie
     );
 }
 
-/// `conventions` output documents the `working_directory` parameter,
-/// `SYMFORGE_WORKTREE_AWARE` flag, and points at the README — so agents
-/// that query project conventions learn how to call edit tools from
-/// inside a worktree.
+/// `conventions` output documents the `working_directory` parameter and points
+/// at the README — so agents that query project conventions learn how to call
+/// edit tools from inside a worktree without treating env setup as a
+/// prerequisite.
 #[tokio::test]
 async fn conventions_surfaces_worktree_awareness_guidance() {
+    let _env = WorktreePolicyEnvGuard::remove();
     let fx = IndexedOnlyFixture::new(&[("src/lib.rs", HELLO_RS)]);
 
     let output = call(&fx.server, "conventions", json!({})).await;
 
     assert_contains(&output, "Worktree awareness");
     assert_contains(&output, "working_directory");
-    assert_contains(&output, "SYMFORGE_WORKTREE_AWARE");
+    assert_not_contains(&output, "Feature-gated on `SYMFORGE_WORKTREE_AWARE=1`");
     assert_contains(&output, "README");
 }

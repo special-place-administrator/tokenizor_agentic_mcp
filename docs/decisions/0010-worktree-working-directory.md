@@ -65,9 +65,10 @@ in the seven handler bodies.
 Adopt Option A. Every edit tool on `impl SymForgeServer` accepts an
 optional `working_directory: Option<String>` field on its input struct.
 When supplied, SymForge re-roots the indexed absolute path against the
-caller's worktree root before writing. The behaviour is gated by
-`SYMFORGE_WORKTREE_AWARE=1`; the flag defaults off so the first release
-lands inert and can be turned on per-agent after dogfooding.
+caller's worktree root before writing. After ADR 0016, the parameter is
+the call-time routing request; `SYMFORGE_WORKTREE_AWARE` is only a
+policy/default knob. Unset or truthy policy allows explicit routing, while
+false/off/disabled policy rejects requested routing before any write.
 
 ### Resolution algorithm (`src/worktree.rs`)
 
@@ -75,19 +76,21 @@ lands inert and can be turned on per-agent after dogfooding.
 `resolve_target_path(indexed_abs, indexed_root, working_directory, cache)`
 implements the algorithm from the source spec §2.2:
 
-1. Canonicalize `indexed_abs`, `indexed_root`, and `working_directory`
+1. If `working_directory` is `None`, return `ResolvedTarget {
+   target_path = indexed_abs, rerouted = false }` before any filesystem
+   canonicalization. This is the byte-identical-to-pre-routing path.
+2. Canonicalize `indexed_abs`, `indexed_root`, and `working_directory`
    with [`dunce::canonicalize`](https://docs.rs/dunce) — `std::fs::canonicalize`
    on Windows produces `\\?\` UNC prefixes that do not match what
    `git worktree list` prints.
-2. If `working_directory` is `None` or canonically equal to
-   `indexed_root`, return `ResolvedTarget { target_path = indexed_abs,
-   rerouted = false }`. This is the byte-identical-to-pre-flag path.
-3. Otherwise look up the canonical working-directory path in a cached
+3. If the canonical `working_directory` equals `indexed_root`, return
+   `ResolvedTarget { target_path = indexed_abs, rerouted = false }`.
+4. Otherwise look up the canonical working-directory path in a cached
    `git worktree list --porcelain` of the indexed root. On cache miss,
    shell out, repopulate, re-check. Unknown paths return
    `WorkingDirectoryNotARecognizedWorktree` with a hint pointing at
    `git worktree list`.
-4. Strip the `indexed_root` prefix off `indexed_abs`, re-join against the
+5. Strip the `indexed_root` prefix off `indexed_abs`, re-join against the
    canonical worktree path, verify the target file exists (worktrees at
    older commits may lack the file), and return
    `ResolvedTarget { target_path, indexed_path = indexed_abs,
@@ -98,33 +101,35 @@ implements the algorithm from the source spec §2.2:
 `WorktreeAwareEditHook` in
 [`src/worktree.rs`](../../src/worktree.rs) implements the `EditHook`
 trait defined by ADR 0012 and calls `resolve_target_path` from
-`resolve_target_path(ctx)`. `register_if_feature_enabled()` installs the
-hook on process start when `SYMFORGE_WORKTREE_AWARE=1`; otherwise the
-registry stays at `DefaultEditHook` and the seven handlers behave
-byte-identically to pre-flag releases. The seven handler bodies do not
-branch on `working_directory`; they route every path resolution through
-`edit_hooks::resolve()` per ADR 0012, and the hook decides.
+`resolve_target_path(ctx)`. `register_if_feature_enabled()` now installs
+the hook unconditionally; the hook resolves worktree policy at call time
+so a supplied `working_directory` can route without restarting the MCP
+server. The seven handler bodies do not branch on `working_directory`;
+they route every path resolution through `edit_hooks::resolve()` per ADR
+0012, and the hook decides.
 
 ### Response shape
 
-Edit responses gain three additive fields rendered by
+Edit responses gain four additive fields rendered by
 [`src/protocol/edit_format.rs`](../../src/protocol/edit_format.rs):
 
+- `working_directory` — caller-supplied worktree root for this edit call.
 - `wrote_to` — absolute path of the file that was actually written.
 - `indexed_path` — absolute path the index believes the file lives at.
 - `rerouted` — boolean, `true` iff `wrote_to != indexed_path`.
 
-When `working_directory` is omitted, `wrote_to == indexed_path` and
-`rerouted == false`. The existing response fields are unchanged; clients
-that ignore unknown keys keep working.
+When `working_directory` is omitted, the resolved-target block is omitted
+so existing response text remains unchanged. When it is supplied and equal
+to the indexed root, the block reports `rerouted == false`.
 
 ### Visibility
 
 The `health` handler in
 [`src/protocol/tools.rs`](../../src/protocol/tools.rs) appends an
 `edit tool calls without working_directory (last hour): N` line when the
-flag is on, so agents that forget to pass the parameter show up in
-diagnostics rather than going silent.
+transitional observability knob is on, so agents that forget to pass the
+parameter show up in diagnostics rather than going silent. This counter
+does not gate routing.
 
 ### Deferred
 
@@ -145,19 +150,20 @@ diagnostics rather than going silent.
   failure mode is closed at the source. Pass `working_directory`, get
   `rerouted: true` in the response, verify the write landed in the
   intended tree.
-- The contract is auditable. Every edit response carries the resolved
-  `wrote_to` path and the `rerouted` flag, so post-hoc log review can
-  spot misrouted writes directly.
-- Adoption is incremental. The flag defaults off; callers that omit
-  `working_directory` are byte-identical to pre-flag behaviour; the
-  `health` misuse counter surfaces callers that forgot to adapt after
-  flag-on, without breaking them.
+- The contract is auditable. Every edit response with a supplied
+  `working_directory` carries the resolved `wrote_to` path and the
+  `rerouted` flag, so post-hoc log review can spot misrouted writes
+  directly.
+- Adoption is incremental. Callers that omit `working_directory` are
+  byte-identical to pre-routing behaviour; the `health` misuse counter
+  surfaces callers that forgot to adapt when the transitional
+  observability knob is enabled, without breaking them.
 
 **Harder**
 
-- The edit-tool response shape gains three fields (`wrote_to`,
-  `indexed_path`, `rerouted`). Clients that depend on the exact response
-  shape — for example, MCP clients that assert on a fixed JSON schema —
+- The edit-tool response shape gains four fields (`working_directory`,
+  `wrote_to`, `indexed_path`, `rerouted`). Clients that depend on the
+  exact response shape — for example, MCP clients that assert on a fixed JSON schema —
   must ignore unknown fields gracefully or pin the SymForge version.
 - The `git worktree list` cache introduces a consistency window.
   `git worktree add` / `git worktree remove` calls made *outside*
@@ -176,17 +182,17 @@ diagnostics rather than going silent.
    `edit_hooks::resolve()` (per ADR 0012 invariant 1). Inlining
    worktree-specific logic in a handler body re-introduces the failure
    mode this ADR fixes.
-2. When `working_directory` is `None` or equal to the indexed root,
-   behaviour MUST be byte-identical to pre-flag releases. This is the
-   backward-compat contract. Regression tests in
-   `tests/worktree_awareness.rs` guard the flag-off and omitted-field
-   paths.
-3. `SYMFORGE_WORKTREE_AWARE` defaults off until the feature has been
-   dogfooded on at least one real tentacle run. Enabling it by default
-   is itself an ADR-worthy decision and requires a superseding note.
-4. `wrote_to`, `indexed_path`, and `rerouted` are additive fields and
-   MUST NOT be removed or renamed without a superseding ADR; clients
-   may depend on them for auditability.
+2. When `working_directory` is `None`, behaviour MUST be byte-identical
+   to pre-routing releases. This is the backward-compat contract.
+   Regression tests in `tests/worktree_awareness.rs` guard
+   policy-disabled and omitted-field paths. A supplied indexed-root
+   `working_directory` writes the same file but still emits the additive
+   resolved-target evidence.
+3. `SYMFORGE_WORKTREE_AWARE` is a policy/default knob, not the semantic
+   trigger for a supplied `working_directory`.
+4. `working_directory`, `wrote_to`, `indexed_path`, and `rerouted` are
+   additive fields and MUST NOT be removed or renamed without a
+   superseding ADR; clients may depend on them for auditability.
 5. Windows canonicalization MUST use `dunce::canonicalize`, not
    `std::fs::canonicalize`. The latter emits `\\?\` UNC prefixes that
    do not match `git worktree list` output and silently break the

@@ -145,7 +145,7 @@ After setup, confirm in your client that the SymForge MCP server is connected or
 
 ### Worktree awareness
 
-All seven edit tools accept an optional `working_directory` parameter pointing at a sibling `git worktree` of the indexed repo. The planned call-time contract treats that parameter as explicit routing consent: SymForge validates the supplied worktree before writing, re-roots the symbol's indexed path onto that worktree, and reports `wrote_to`, `indexed_path`, and `rerouted` so callers can verify the target. Reads still come from the indexed path; only writes reroute. During the migration from the original opt-in release, `SYMFORGE_WORKTREE_AWARE` is an operational policy/default knob for deployments that need to disable, dogfood, or default routing behavior; it is not the long-term semantic trigger for a caller that explicitly supplies `working_directory`. See [ADR 0010](docs/decisions/0010-worktree-working-directory.md) and [ADR 0016](docs/decisions/0016-call-time-capability-resolution.md).
+All seven edit tools accept an optional `working_directory` parameter pointing at a sibling `git worktree` of the indexed repo. Supplying that parameter is explicit call-time routing consent: SymForge validates the worktree before writing, re-roots the symbol's indexed path onto that worktree, and reports `working_directory`, `wrote_to`, `indexed_path`, and `rerouted` so callers can verify the target. Reads still come from the indexed path; only writes reroute. `SYMFORGE_WORKTREE_AWARE` is an operational policy/default knob: unset allows explicit call-time routing, while false/off/disabled values block requested routing before write. See [ADR 0010](docs/decisions/0010-worktree-working-directory.md) and [ADR 0016](docs/decisions/0016-call-time-capability-resolution.md).
 
 ```json
 {
@@ -235,7 +235,7 @@ Two trait-based registries let feature code plug into the shared edit and ranker
 
 **`EditHook`** wraps the per-edit lifecycle for the seven edit tools (`replace_symbol_body`, `edit_within_symbol`, `insert_symbol`, `delete_symbol`, `batch_edit`, `batch_insert`, `batch_rename`). Implementations register at startup; the handlers delegate to the registry to resolve the target path before writing and to run bookkeeping after the edit commits. For example, a worktree-aware feature registers a hook that rewrites a symbol's indexed path onto the active worktree before the write lands.
 
-Each of the seven edit tools accepts an optional `working_directory` parameter pointing at a `git worktree` sibling of the indexed repo. Planned call-time routing treats that parameter as explicit consent: SymForge validates the worktree, reroutes the write there, and includes `rerouted: true`, `wrote_to:`, and `indexed_path:` lines in the response so callers can verify the target. `SYMFORGE_WORKTREE_AWARE` remains a transitional policy/default knob while this behavior migrates. Example:
+Each of the seven edit tools accepts an optional `working_directory` parameter pointing at a `git worktree` sibling of the indexed repo. Call-time routing treats that parameter as explicit consent: SymForge validates the worktree, reroutes the write there, and includes `working_directory:`, `rerouted:`, `wrote_to:`, and `indexed_path:` lines in the response so callers can verify the target. `SYMFORGE_WORKTREE_AWARE` remains a policy/default knob, not a prerequisite for a supplied `working_directory`. Example:
 
 ```json
 {
@@ -271,7 +271,7 @@ See [ADR 0012](docs/decisions/0012-edit-and-ranker-hook-architecture.md) for the
 | `SYMFORGE_FRECENCY` | unset | Frecency policy: unset/session keeps collection in current-process memory; `1`/truthy/persistent writes `.symforge/frecency.db`; false/off/disabled blocks collection and requested ranking reports disabled-by-policy evidence |
 | `SYMFORGE_DEBUG_RANKING` | unset | Operational default-on/debug knob for ranking diagnostics; planned call-time explanations should also be requestable per call |
 | `SYMFORGE_COUPLING` | unset | Co-change policy: unset/lazy prepares `.symforge/coupling.db` only when `rank_by="path+cochange"` requests it; `1`/truthy values warm on startup; false/off/disabled blocks preparation and requested ranking |
-| `SYMFORGE_WORKTREE_AWARE` | unset | Transitional policy/default knob for worktree routing; `working_directory` is the planned call-time consent signal |
+| `SYMFORGE_WORKTREE_AWARE` | unset | Worktree-routing policy/default knob: unset or truthy allows explicit `working_directory` routing; false/off/disabled blocks requested routing before write |
 | `SYMFORGE_INDEXING_THREAD_STACK_BYTES` | `4194304` (Windows only) | Override the indexing worker-thread stack size. Minimum 3 MiB on Windows; ignored elsewhere |
 
 For platform-specific setup scripts (PowerShell, CMD, bash, zsh), see the wiki:

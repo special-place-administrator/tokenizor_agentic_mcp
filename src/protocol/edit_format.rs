@@ -160,23 +160,24 @@ pub(crate) fn format_stale_warnings(
     out
 }
 
-/// Format the worktree-routing suffix appended to edit responses when the
-/// caller supplied `working_directory`. Produces three lines
-/// (`rerouted: <bool>`, `wrote_to: <abs>`, `indexed_path: <abs>`) so agents
-/// can verify the actual write target; see
+/// Format the worktree-routing suffix appended to edit responses when the caller
+/// supplied `working_directory`. Produces concise target evidence so agents can
+/// verify the requested workspace, actual write target, indexed path, and
+/// reroute state; see
 /// `docs/decisions/0010-worktree-working-directory.md` and
 /// `tests/worktree_awareness.rs`. Returns an empty string when
 /// `working_directory` was omitted, preserving byte-identical output for
 /// today's callers.
 pub(crate) fn format_reroute_suffix(
-    working_directory_supplied: bool,
+    working_directory: Option<&std::path::Path>,
     resolved: &crate::worktree::ResolvedTarget,
 ) -> String {
-    if !working_directory_supplied {
+    let Some(working_directory) = working_directory else {
         return String::new();
-    }
+    };
     format!(
-        "\nrerouted: {}\nwrote_to: {}\nindexed_path: {}",
+        "\nworking_directory: {}\nrerouted: {}\nwrote_to: {}\nindexed_path: {}",
+        working_directory.display(),
         resolved.rerouted,
         resolved.target_path.display(),
         resolved.indexed_path.display(),
