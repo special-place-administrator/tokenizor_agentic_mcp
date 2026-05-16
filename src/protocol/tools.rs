@@ -7549,9 +7549,10 @@ impl SymForgeServer {
         let indented = edit::apply_indentation(normalized_str, &indent, line_ending);
         let new_content =
             edit::apply_splice(&file.content, (line_start, sym.byte_range.1), &indented);
-        if let Err(e) = edit::atomic_write_file(&resolved_path, &new_content) {
-            return format!("Error writing {}: {e}", params.0.path);
-        }
+        let write_report = match edit::atomic_write_file(&resolved_path, &new_content) {
+            Ok(report) => report,
+            Err(e) => return format!("Error writing {}: {e}", params.0.path),
+        };
         let old_sig = edit::extract_signature(&file.content, sym.byte_range);
         let new_sig = params.0.new_body.lines().next().unwrap_or("").to_string();
         // Detect parent impl type for type-aware reference filtering.
@@ -7595,6 +7596,7 @@ impl SymForgeServer {
             &params.0.name,
             &warnings,
         ));
+        result.push_str(&edit::format_tee_snapshot_suffix(&write_report));
         result.push_str(&edit_format::format_reroute_suffix(
             working_directory_supplied,
             &resolved_target,
@@ -7708,9 +7710,10 @@ impl SymForgeServer {
         } else {
             edit::build_insert_after(&file.content, &sym, &params.0.content, line_ending)
         };
-        if let Err(e) = edit::atomic_write_file(&resolved_path, &new_content) {
-            return format!("Error writing {}: {e}", params.0.path);
-        }
+        let write_report = match edit::atomic_write_file(&resolved_path, &new_content) {
+            Ok(report) => report,
+            Err(e) => return format!("Error writing {}: {e}", params.0.path),
+        };
         edit::reindex_after_write(
             &self.index,
             &resolved_path,
@@ -7738,6 +7741,7 @@ impl SymForgeServer {
             working_directory_supplied,
             &resolved_target,
         ));
+        out.push_str(&edit::format_tee_snapshot_suffix(&write_report));
         out
     }
 
@@ -7837,9 +7841,10 @@ impl SymForgeServer {
         let deleted_bytes = (sym.byte_range.1 - sym.byte_range.0) as usize;
         let line_ending = edit::detect_line_ending(&file.content);
         let new_content = edit::build_delete(&file.content, &sym, line_ending);
-        if let Err(e) = edit::atomic_write_file(&resolved_path, &new_content) {
-            return format!("Error writing {}: {e}", params.0.path);
-        }
+        let write_report = match edit::atomic_write_file(&resolved_path, &new_content) {
+            Ok(report) => report,
+            Err(e) => return format!("Error writing {}: {e}", params.0.path),
+        };
         edit::reindex_after_write(
             &self.index,
             &resolved_path,
@@ -7867,6 +7872,7 @@ impl SymForgeServer {
             working_directory_supplied,
             &resolved_target,
         ));
+        out.push_str(&edit::format_tee_snapshot_suffix(&write_report));
         out
     }
 
@@ -8075,9 +8081,10 @@ impl SymForgeServer {
         let old_sym_bytes = sym_end - sym_start;
         let effective_range = (sym.effective_start(), sym.byte_range.1);
         let new_content = edit::apply_splice(&file.content, effective_range, new_body.as_bytes());
-        if let Err(e) = edit::atomic_write_file(&resolved_path, &new_content) {
-            return format!("Error writing {}: {e}", params.0.path);
-        }
+        let write_report = match edit::atomic_write_file(&resolved_path, &new_content) {
+            Ok(report) => report,
+            Err(e) => return format!("Error writing {}: {e}", params.0.path),
+        };
         edit::reindex_after_write(
             &self.index,
             &resolved_path,
@@ -8106,6 +8113,7 @@ impl SymForgeServer {
             working_directory_supplied,
             &resolved_target,
         ));
+        out.push_str(&edit::format_tee_snapshot_suffix(&write_report));
         out
     }
 
@@ -15824,6 +15832,7 @@ mod tests {
     /// Helper: write a file to disk and build a server with it indexed.
     fn setup_edit_test(original: &[u8]) -> (TempDir, SymForgeServer, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
         let src_dir = dir.path().join("src");
         std::fs::create_dir_all(&src_dir).unwrap();
         let file_path = src_dir.join("lib.rs");
@@ -15939,7 +15948,7 @@ mod tests {
     #[tokio::test]
     async fn test_replace_symbol_body_replaces_and_reindexes() {
         let original = b"fn hello() {\n    println!(\"hello\");\n}\n\nfn world() {\n    println!(\"world\");\n}\n";
-        let (_dir, server, file_path) = setup_edit_test(original);
+        let (dir, server, file_path) = setup_edit_test(original);
 
         let input = crate::protocol::edit::ReplaceSymbolBodyInput {
             path: "src/lib.rs".to_string(),
@@ -15958,10 +15967,23 @@ mod tests {
         assert!(result.contains("Source authority: disk-refreshed"));
         assert!(result.contains("Write semantics: atomic write + reindex"));
         assert!(result.contains("Evidence: symbol anchor `src/lib.rs:1`"));
+        assert!(result.contains("Tee snapshot:"), "result was: {result}");
+        assert!(result.contains(".symforge/tee/"), "result was: {result}");
 
         let on_disk = std::fs::read_to_string(&file_path).unwrap();
         assert!(on_disk.contains("HELLO"), "disk: {on_disk}");
         assert!(on_disk.contains("world"), "other symbol intact: {on_disk}");
+        let tee_dir = dir.path().join(".symforge").join("tee");
+        let snapshots = std::fs::read_dir(&tee_dir)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            snapshots.len(),
+            1,
+            "expected one tee snapshot in {tee_dir:?}"
+        );
+        assert_eq!(std::fs::read(snapshots[0].path()).unwrap(), original);
 
         let guard = server.index.read();
         let file = guard.get_file("src/lib.rs").unwrap();
@@ -16550,6 +16572,7 @@ mod tests {
         use crate::protocol::edit::{BatchEditInput, EditOperation, SingleEdit};
 
         let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
         let src_dir = dir.path().join("src");
         std::fs::create_dir_all(&src_dir).unwrap();
 
@@ -16606,11 +16629,35 @@ mod tests {
             result.contains("Write semantics: transactional write + rollback + reindex"),
             "result: {result}"
         );
+        assert!(result.contains("Tee snapshot:"), "result: {result}");
+        assert!(result.contains(".symforge/tee/"), "result: {result}");
 
         let a = std::fs::read_to_string(src_dir.join("a.rs")).unwrap();
         assert!(a.contains("new"), "a.rs: {a}");
         let b = std::fs::read_to_string(src_dir.join("b.rs")).unwrap();
         assert!(!b.contains("beta"), "b.rs: {b}");
+        let tee_dir = dir.path().join(".symforge").join("tee");
+        let snapshots = std::fs::read_dir(&tee_dir)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            snapshots.len(),
+            2,
+            "expected two tee snapshots in {tee_dir:?}"
+        );
+        let snapshot_bytes = snapshots
+            .iter()
+            .map(|entry| std::fs::read(entry.path()).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            snapshot_bytes.iter().any(|bytes| bytes == a_content),
+            "a.rs original should be teed"
+        );
+        assert!(
+            snapshot_bytes.iter().any(|bytes| bytes == b_content),
+            "b.rs original should be teed"
+        );
     }
 
     #[tokio::test]

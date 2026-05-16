@@ -145,7 +145,12 @@ pub(crate) fn normalize_line_endings(text: &[u8], target: LineEnding) -> Vec<u8>
 /// then rename over the target. Using a `NamedTempFile` in the same directory ensures the
 /// rename is within a single filesystem (no cross-device move) and avoids collisions between
 /// concurrent callers that would occur with a fixed `.symforge_tmp` extension.
-pub(crate) fn atomic_write_file(path: &Path, content: &[u8]) -> std::io::Result<()> {
+#[derive(Debug, Clone)]
+pub(crate) struct AtomicWriteReport {
+    pub tee_snapshot: crate::edit_safety::tee::TeeSnapshot,
+}
+
+pub(crate) fn atomic_write_file(path: &Path, content: &[u8]) -> std::io::Result<AtomicWriteReport> {
     use std::io::Write;
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
@@ -153,6 +158,12 @@ pub(crate) fn atomic_write_file(path: &Path, content: &[u8]) -> std::io::Result<
             "path has no parent directory",
         )
     })?;
+    let tee_snapshot = crate::edit_safety::tee::Tee::for_target(path)
+        .snapshot(path)
+        .unwrap_or_else(|err| crate::edit_safety::tee::TeeSnapshot::Warning {
+            original_path: path.to_path_buf(),
+            message: format!("unexpected tee snapshot error: {err}"),
+        });
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     tmp.write_all(content)?;
     tmp.flush()?;
@@ -160,7 +171,15 @@ pub(crate) fn atomic_write_file(path: &Path, content: &[u8]) -> std::io::Result<
     // persist() uses rename(2) on Unix and MoveFileExW(MOVEFILE_REPLACE_EXISTING) on Windows,
     // atomically replacing any existing target file.
     tmp.persist(path).map_err(|e| e.error)?;
-    Ok(())
+    Ok(AtomicWriteReport { tee_snapshot })
+}
+
+pub(crate) fn format_tee_snapshot_suffix(report: &AtomicWriteReport) -> String {
+    report
+        .tee_snapshot
+        .response_hint()
+        .map(|hint| format!("\n{hint}"))
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -1355,11 +1374,17 @@ pub(crate) fn execute_batch_edit(
 
     // Phase 4: Apply all writes, rolling back any already-written files on failure.
     let mut written: Vec<usize> = Vec::new();
+    let mut write_reports: Vec<Option<AtomicWriteReport>> = vec![None; staged.len()];
     let mut write_error: Option<String> = None;
     for (i, staged_file) in staged.iter().enumerate() {
-        if let Err(e) = atomic_write_file(&staged_file.abs_path, &staged_file.new_content) {
-            write_error = Some(format!("Write failed for {}: {e}", staged_file.path));
-            break;
+        match atomic_write_file(&staged_file.abs_path, &staged_file.new_content) {
+            Ok(report) => {
+                write_reports[i] = Some(report);
+            }
+            Err(e) => {
+                write_error = Some(format!("Write failed for {}: {e}", staged_file.path));
+                break;
+            }
         }
         written.push(i);
     }
@@ -1412,7 +1437,7 @@ pub(crate) fn execute_batch_edit(
 
     // Phase 5: All writes succeeded — reindex every file and return summaries.
     let mut summaries = Vec::new();
-    for staged_file in &staged {
+    for (i, staged_file) in staged.iter().enumerate() {
         reindex_after_write(
             index,
             &staged_file.abs_path,
@@ -1427,7 +1452,18 @@ pub(crate) fn execute_batch_edit(
             working_directory: staged_file.working_directory.as_deref(),
         };
         super::edit_hooks::after_commit(&hook_ctx, &staged_file.abs_path);
-        summaries.extend(staged_file.summaries.iter().cloned());
+        let mut file_summaries = staged_file.summaries.clone();
+        if let Some(report) = &write_reports[i]
+            && let Some(hint) = report.tee_snapshot.response_hint()
+        {
+            if let Some(first) = file_summaries.first_mut() {
+                first.push_str("\n  ");
+                first.push_str(&hint);
+            } else {
+                file_summaries.push(hint);
+            }
+        }
+        summaries.extend(file_summaries);
     }
 
     Ok(summaries)
