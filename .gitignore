@@ -11,6 +11,9 @@ npm/*.tgz
 .env
 .claude/settings.local.json
 .claude/circuit-breaker-state.json
+.claude/gsd-local-patches/
+.claude/get-shit-done/
+.claude/gsd-*
 .planning/telemetry/*.jsonl
 spacetime/*/target/
 __pycache__/
