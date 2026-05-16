@@ -352,11 +352,11 @@ Foundation wave. Ships before any other roadmap work. Targets two fresh-from-dog
 - `cargo test --test sidecar_integration -- --test-threads=N --include-ignored` PASS on Windows in N=10+ consecutive runs, zero EADDRINUSE failures
 - AAP-side `crates/symforge/tests/sidecar_integration.rs::test_prompt_context_endpoint_*` `#[ignore]` can be removed downstream
 
-#### - [ ] **Unit 0.5: Wave 0 software-side gate + release**
+#### - [x] **Unit 0.5: Wave 0 software-side gate + release**
 
 **Goal:** Wave 0 close-out. All four hotfix units committed, gate criteria green, push to origin/main, release-please picks up patch bump.
 
-**Status 2026-05-16:** Software-side gates are green and captured in `docs/notes/2026-05-16-w0-close-out-evidence.md`. Final push/release remains pending. The original `v7.8.1` target is stale because `v7.8.1` was already published from Unit 0.2; release-please should determine the next patch version after Unit 0.3 lands on `main`.
+**Status 2026-05-16:** Complete. Software-side gates are green and captured in `docs/notes/2026-05-16-w0-close-out-evidence.md`. Final close-out landed on `origin/main` as `b5186cf`, release-please PR #234 merged at `9ec2765`, GitHub release `v7.8.2` is Latest, npm reports `symforge@7.8.2`, and the global CLI reports `symforge 7.8.2`.
 
 **Requirements:** R6
 
@@ -368,7 +368,7 @@ Foundation wave. Ships before any other roadmap work. Targets two fresh-from-dog
 
 **Approach:**
 - Same shape as Phase H C-2 close-out: per-unit landed-SHA + per-gate-criterion regression test + final consolidated cargo verification transcript.
-- Push, let release-please open PR, merge PR → v7.8.1 ships via npm.
+- Push, let release-please open PR, merge PR -> release-please ships the next patch via npm.
 
 **Test scenarios:**
 - N/A (verification gate, not behavioral)
@@ -378,7 +378,7 @@ Foundation wave. Ships before any other roadmap work. Targets two fresh-from-dog
 - `cargo test --all-targets` (default parallelism) PASS
 - `cargo clippy -- -D warnings` clean
 - `cargo check` clean
-- `git push origin main` succeeds, CI green, release-please opens v7.8.1 PR
+- `git push origin main` succeeded, release-please PR #234 merged, CI green, and `v7.8.2` shipped.
 
 ---
 
@@ -389,6 +389,8 @@ Small wave. One mechanical commit + one verification pass.
 #### - [ ] **Unit 1.1: `.gitignore` policy for `.claude/gsd-*` + remove from git index (Phase 2.3)**
 
 **Goal:** Add three gitignore rules + `git rm -r --cached` for `.claude/gsd-local-patches/` and `.claude/get-shit-done/`. Removes ~227 files / ~3400 symbols from the indexed tree. Runtime predicate `is_personal_tooling_path` already lives at `src/live_index/query.rs:786-789`; this is pure repo hygiene.
+
+**Status 2026-05-16:** Prepared and staged locally. `.gitignore` has the three GSD ignore rules, `git ls-files` returns zero for `.claude/gsd-local-patches/`, `.claude/get-shit-done/`, and `.claude/gsd-file-manifest.json`, and representative paths match the new ignore rules. Commit/push remains pending explicit commit permission.
 
 **Requirements:** R2
 
@@ -413,6 +415,8 @@ Small wave. One mechanical commit + one verification pass.
 
 **Goal:** Run the four cargo gates. Confirm clean.
 
+**Status 2026-05-16:** Local verification complete. After Unit 1.1 was staged, `cargo check`, `cargo test --all-targets -- --test-threads=1`, `cargo test --all-targets`, `cargo clippy -- -D warnings`, `cargo build --release`, and `cd npm && npm test` all passed. Push remains pending explicit commit permission.
+
 **Requirements:** R6
 
 **Dependencies:** Unit 1.1
@@ -421,7 +425,7 @@ Small wave. One mechanical commit + one verification pass.
 
 **Approach:**
 - `cargo check`, `cargo test --all-targets -- --test-threads=1`, `cargo test --all-targets`, `cargo clippy -- -D warnings`, `cargo build --release`. Mixed verification rule applies (also `cd npm && npm test`).
-- Single push; release-please may or may not bump (depends on whether unit 1.1's `chore:` triggers a patch). If no bump, Wave 1 ships under v7.8.1's existing version.
+- Single push; release-please may or may not bump (depends on whether unit 1.1's `chore:` triggers a patch). If no bump, Wave 1 ships under v7.8.2's existing version.
 
 **Test scenarios:** N/A.
 
@@ -1028,7 +1032,7 @@ Phase H C-4 deferred bucket + 3 P3 bugs from external evaluator catalog. **Calen
   - Wave 2 → status: shipped in `wiki/concepts/SymForge Co-Change Signal Fusion.md`
   - Wave 3 → status: shipped in `wiki/concepts/RTK Techniques for SymForge.md` (mark Tier 1 + Tier 2 done)
   - Wave 4 → mark P2/P3 items closed in `wiki/concepts/SymForge Phase H Stability Hotfix.md` C-4 bucket
-- **Release cadence:** Wave 0 → v7.8.1. Wave 1 → patch (rides v7.8.1 or v7.8.2 depending on release-please cadence). Wave 2 → v7.9.0. Wave 3 → v7.10.0. Wave 4 → v7.10.1.
+- **Release cadence:** Wave 0 completed across `v7.8.1` and `v7.8.2` (`v7.8.2` is final close-out). Wave 1 → patch (or rides `v7.8.2` if release-please does not bump). Wave 2 → v7.9.0. Wave 3 → v7.10.0. Wave 4 → v7.10.1.
 - **Push-gate discipline:** Each wave close ships with software-side cargo gates green + release-please patch/minor bump. User-side gates (Kimi-shaped idle + cross-root reload check) run after install of each release; record findings in agentmemory with `as_of YYYY-MM-DD`.
 - **Cross-check protocol during v7.8.0+ soak:** Per `mem_mp6yancf_820a54cae5ef`, treat SymForge `find_references`/`edit_plan` results as hypotheses; cross-check with raw `rg` until Wave 0 ships.
 
@@ -1045,7 +1049,7 @@ Phase H C-4 deferred bucket + 3 P3 bugs from external evaluator catalog. **Calen
 ## Sequencing Summary (one-glance)
 
 ```
-Wave 0  v7.8.1     Trust restoration       (4 units; foundation; 2-3 days; ships ALONE first)
+Wave 0  v7.8.2     Trust restoration       (5 units; foundation; shipped)
   -> Wave 1  patch     Index hygiene         (2 units; small; ~30 min once Wave 0 trusted)
     -> Wave 2  v7.9.0    CoChange ranker       (6 units; ~2 weeks; lights up CoChangeSignal::score)
       -> Wave 3  v7.10.0   RTK Tier 1+2 sprint   (~12 units; ~2-3 weeks; biggest wave)
