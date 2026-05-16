@@ -688,6 +688,8 @@ pub struct TextSearchResult {
     pub overflow_count: usize,
 }
 
+pub const SUPPRESSED_TEXT_MATCH_DISPLAY_CAP: usize = 100;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextSearchError {
     EmptyRegexQuery,
@@ -1105,9 +1107,9 @@ pub fn search_text_with_options(
 fn count_suppressed_text_matches<F>(
     index: &LiveIndex,
     candidate_paths: Vec<String>,
-    is_match: F,
-    label: String,
-    options: &TextSearchOptions,
+    mut is_match: F,
+    _label: String,
+    _options: &TextSearchOptions,
 ) -> usize
 where
     F: FnMut(&str) -> bool,
@@ -1115,15 +1117,26 @@ where
     if candidate_paths.is_empty() {
         return 0;
     }
-    let mut count_options = options.clone();
-    count_options.total_limit = usize::MAX / 4;
-    count_options.max_per_file = usize::MAX / 4;
-    count_options.ranked = false;
-    let hidden = collect_text_matches(index, candidate_paths, is_match, label, &count_options);
-    hidden
-        .total_matches
-        .saturating_add(hidden.overflow_count)
-        .saturating_add(hidden.suppressed_by_noise)
+
+    let mut suppressed = 0usize;
+    for path in candidate_paths {
+        let Some(file) = index.get_file(&path) else {
+            continue;
+        };
+        let content_str = String::from_utf8_lossy(&file.content);
+
+        for line in content_str.lines() {
+            let line = line.trim_end_matches('\r');
+            if !is_match(line) {
+                continue;
+            }
+            suppressed = suppressed.saturating_add(1);
+            if suppressed > SUPPRESSED_TEXT_MATCH_DISPLAY_CAP {
+                return SUPPRESSED_TEXT_MATCH_DISPLAY_CAP + 1;
+            }
+        }
+    }
+    suppressed
 }
 
 fn file_matches_text_base_scope(

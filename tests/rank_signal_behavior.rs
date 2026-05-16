@@ -225,7 +225,7 @@ Match type: constrained (tiered path relevance)
 Source authority: current index
 Parse state: parsed
 Completeness: full for current scope
-Scope: ranked indexed file paths
+Scope: ranked indexed file paths; filters: vendor filtered; personal tooling filtered
 Evidence: paths `src/protocol/tools.rs`
 
 1 matching file
@@ -237,7 +237,7 @@ Match type: constrained (tiered path relevance)
 Source authority: current index
 Parse state: parsed
 Completeness: full for current scope
-Scope: ranked indexed file paths
+Scope: ranked indexed file paths; filters: vendor filtered; personal tooling filtered
 Evidence: paths `src/protocol/tools.rs`
 
 1 matching file
@@ -249,7 +249,7 @@ Match type: heuristic (loose path relevance)
 Source authority: current index
 Parse state: parsed
 Completeness: full for current scope
-Scope: ranked indexed file paths
+Scope: ranked indexed file paths; filters: vendor filtered; personal tooling filtered
 Evidence: paths `src/protocol/mod.rs`, `src/protocol/tools.rs`, `src/protocol/format.rs`
 
 3 matching files
@@ -263,7 +263,7 @@ Match type: constrained (tiered path relevance)
 Source authority: current index
 Parse state: parsed
 Completeness: full for current scope
-Scope: ranked indexed file paths
+Scope: ranked indexed file paths; filters: vendor filtered; personal tooling filtered
 Evidence: paths `src/live_index/search.rs`
 
 1 matching file
@@ -275,7 +275,7 @@ Match type: constrained (tiered path relevance)
 Source authority: current index
 Parse state: parsed
 Completeness: full for current scope
-Scope: ranked indexed file paths; current file boost `src/protocol/tools.rs`
+Scope: ranked indexed file paths; current file boost `src/protocol/tools.rs`; filters: vendor filtered; personal tooling filtered
 Evidence: paths `src/protocol/mod.rs`, `src/live_index/mod.rs`
 
 2 matching files
@@ -288,7 +288,7 @@ Match type: constrained (tiered path relevance)
 Source authority: current index
 Parse state: parsed
 Completeness: full for current scope
-Scope: ranked indexed file paths
+Scope: ranked indexed file paths; filters: vendor filtered; personal tooling filtered
 Evidence: paths `src/protocol/format.rs`, `src/protocol/mod.rs`, `src/protocol/tools.rs`
 
 3 matching files
@@ -297,5 +297,7 @@ Evidence: paths `src/protocol/format.rs`, `src/protocol/mod.rs`, `src/protocol/t
   src/protocol/mod.rs  [0.80]
   src/protocol/tools.rs  [0.80]";
 
-const GOLDEN_NOT_FOUND: &str =
-    "No indexed source files matching 'definitely_not_in_fixture_xyzzy'";
+const GOLDEN_NOT_FOUND: &str = "\
+No indexed source files matching 'definitely_not_in_fixture_xyzzy'
+
+filters: vendor filtered; personal tooling filtered";

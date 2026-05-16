@@ -2072,9 +2072,16 @@ fn search_completeness_label(overflow_count: usize, suppressed_by_noise: usize) 
         "full for current scope".to_string()
     }];
     if suppressed_by_noise > 0 {
-        parts.push(format!(
-            "{suppressed_by_noise} noise-filtered match(es) suppressed"
-        ));
+        if suppressed_by_noise > search::SUPPRESSED_TEXT_MATCH_DISPLAY_CAP {
+            parts.push(format!(
+                "{}+ noise-filtered match(es) suppressed",
+                search::SUPPRESSED_TEXT_MATCH_DISPLAY_CAP
+            ));
+        } else {
+            parts.push(format!(
+                "{suppressed_by_noise} noise-filtered match(es) suppressed"
+            ));
+        }
     }
     parts.join("; ")
 }
@@ -2194,6 +2201,24 @@ fn search_symbols_total_matches(result: &search::SymbolSearchResult) -> usize {
     result.hits.len().saturating_add(result.overflow_count)
 }
 
+fn hidden_search_symbols_noise_count(
+    index: &LiveIndex,
+    query: &str,
+    kind: Option<&str>,
+    options: &search::SymbolSearchOptions,
+    visible: &search::SymbolSearchResult,
+) -> usize {
+    if options.noise_policy.include_vendor && options.include_personal_tooling {
+        return 0;
+    }
+
+    let mut unfiltered_options = options.clone();
+    unfiltered_options.noise_policy.include_vendor = true;
+    unfiltered_options.include_personal_tooling = true;
+    let unfiltered = search::search_symbols_with_options(index, query, kind, &unfiltered_options);
+    search_symbols_total_matches(&unfiltered).saturating_sub(search_symbols_total_matches(visible))
+}
+
 fn search_files_resolve_candidate_count(view: &SearchFilesResolveView) -> usize {
     match view {
         SearchFilesResolveView::Resolved { .. } => 1,
@@ -2232,6 +2257,44 @@ fn search_files_hidden_noise_note(
         "{hidden_count} vendor/personal-tooling {noun} hidden by default; pass {} to include suppressed noise.",
         flags.join(" or ")
     ))
+}
+
+fn search_files_filter_summary(include_vendor: bool, include_personal_tooling: bool) -> String {
+    let vendor = if include_vendor {
+        "vendor included"
+    } else {
+        "vendor filtered"
+    };
+    let personal = if include_personal_tooling {
+        "personal tooling included"
+    } else {
+        "personal tooling filtered"
+    };
+    format!("filters: {vendor}; {personal}")
+}
+
+fn search_files_scope_summary(
+    base_scope: impl Into<String>,
+    include_vendor: bool,
+    include_personal_tooling: bool,
+) -> String {
+    format!(
+        "{}; {}",
+        base_scope.into(),
+        search_files_filter_summary(include_vendor, include_personal_tooling)
+    )
+}
+
+fn append_search_files_filter_summary(
+    result: &mut String,
+    include_vendor: bool,
+    include_personal_tooling: bool,
+) {
+    result.push_str("\n\n");
+    result.push_str(&search_files_filter_summary(
+        include_vendor,
+        include_personal_tooling,
+    ));
 }
 
 fn search_files_resolve_match_type_label(view: &SearchFilesResolveView) -> &'static str {
@@ -3948,20 +4011,15 @@ impl SymForgeServer {
                 &options,
             )
         };
-        let hidden_noise_count = if options.noise_policy.include_vendor {
-            0
-        } else {
-            let mut unfiltered_options = options.clone();
-            unfiltered_options.noise_policy.include_vendor = true;
+        let hidden_noise_count = {
             let guard = self.index.read();
-            let unfiltered = search::search_symbols_with_options(
+            hidden_search_symbols_noise_count(
                 &guard,
                 query_str,
                 params.0.kind.as_deref(),
-                &unfiltered_options,
-            );
-            search_symbols_total_matches(&unfiltered)
-                .saturating_sub(search_symbols_total_matches(&result))
+                &options,
+                &result,
+            )
         };
         // In browse mode, sort by relevance: public symbols first, then kind priority,
         // then penalize very short/common names, then alphabetical tiebreaker.
@@ -4477,8 +4535,12 @@ impl SymForgeServer {
                         search_files_resolve_match_type_label(&view),
                         "current index",
                         search_parse_state_for_paths(&guard, std::iter::once(path.as_str())),
-                        "full for current scope",
-                        "resolve=true against indexed file paths",
+                        &search_completeness_label(0, hidden_noise_count),
+                        &search_files_scope_summary(
+                            "resolve=true against indexed file paths",
+                            include_vendor,
+                            include_personal_tooling,
+                        ),
                         &search_paths_evidence(std::iter::once(path.as_str())),
                     ))
                 }
@@ -4495,19 +4557,31 @@ impl SymForgeServer {
                             &guard,
                             matches.iter().map(std::string::String::as_str),
                         ),
-                        &search_completeness_label(*overflow_count, 0),
-                        "resolve=true against indexed file paths",
+                        &search_completeness_label(*overflow_count, hidden_noise_count),
+                        &search_files_scope_summary(
+                            "resolve=true against indexed file paths",
+                            include_vendor,
+                            include_personal_tooling,
+                        ),
                         &search_paths_evidence(matches.iter().map(std::string::String::as_str)),
                     ))
                 }
                 _ => None,
             };
             let output = format::search_files_resolve_result_view(&view);
+            let had_envelope = envelope.is_some();
             let result = match envelope {
                 Some(envelope) => format!("{envelope}\n\n{output}"),
                 None => output,
             };
             let mut result = result;
+            if !had_envelope {
+                append_search_files_filter_summary(
+                    &mut result,
+                    include_vendor,
+                    include_personal_tooling,
+                );
+            }
             if let Some(note) = search_files_hidden_noise_note(
                 hidden_noise_count,
                 include_vendor,
@@ -4792,18 +4866,26 @@ impl SymForgeServer {
                         "current index"
                     },
                     search_parse_state_for_paths(&guard, hits.iter().map(|hit| hit.path.as_str())),
-                    &search_completeness_label(*overflow_count, 0),
-                    &scope,
+                    &search_completeness_label(*overflow_count, hidden_noise_count),
+                    &search_files_scope_summary(scope, include_vendor, include_personal_tooling),
                     &search_paths_evidence(hits.iter().map(|hit| hit.path.as_str())),
                 ))
             }
             _ => None,
         };
         let output = format::search_files_result_view(&view);
+        let had_envelope = envelope.is_some();
         let mut result = match envelope {
             Some(envelope) => format!("{envelope}\n\n{output}"),
             None => output,
         };
+        if !had_envelope {
+            append_search_files_filter_summary(
+                &mut result,
+                include_vendor,
+                include_personal_tooling,
+            );
+        }
         if let Some(note) = cochange_note {
             result.push_str("\n\n");
             result.push_str(&note);
@@ -10059,6 +10141,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_search_symbols_counts_suppressed_personal_tooling_when_vendor_included() {
+        let server = make_server(make_live_index_ready(vec![
+            make_file(
+                "src/job.rs",
+                b"struct Job {}\n",
+                vec![make_symbol("Job", SymbolKind::Class, 1, 1)],
+            ),
+            make_file(
+                ".claude/gsd-local-patches/job.rs",
+                b"struct JobPersonal {}\n",
+                vec![make_symbol("JobPersonal", SymbolKind::Class, 1, 1)],
+            ),
+        ]));
+
+        let result = server
+            .search_symbols(Parameters(super::SearchSymbolsInput {
+                query: Some("job".to_string()),
+                kind: Some("class".to_string()),
+                path_prefix: None,
+                language: None,
+                limit: None,
+                include_generated: None,
+                include_tests: None,
+                include_vendor: Some(true),
+                include_personal_tooling: None,
+                estimate: None,
+                max_tokens: None,
+            }))
+            .await;
+
+        assert!(
+            result.contains("class Job"),
+            "source symbol should remain visible: {result}"
+        );
+        assert!(
+            !result.contains("JobPersonal"),
+            "personal-tooling symbol should stay hidden by default: {result}"
+        );
+        assert!(
+            result.contains("vendor included")
+                && result.contains("personal tooling filtered")
+                && result.contains("1 noise-filtered match(es) suppressed"),
+            "suppressed personal-tooling count should be explicit even when vendor is included: {result}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_search_symbols_hides_inline_test_module_symbols() {
         // src/lib.rs is NOT a test file, but contains `mod tests { struct TestHelper; }`.
         // With include_tests=false (default), symbols inside the inline test module
@@ -11108,7 +11237,14 @@ mod tests {
                 include_personal_tooling: None,
             }))
             .await;
-        assert_eq!(result, "No indexed source files matching 'src/service.rs'");
+        assert!(
+            result.contains("No indexed source files matching 'src/service.rs'"),
+            "got: {result}"
+        );
+        assert!(
+            result.contains("filters: vendor filtered; personal tooling filtered"),
+            "not-found search_files output should disclose active filters: {result}"
+        );
     }
 
     #[tokio::test]
@@ -11414,6 +11550,10 @@ mod tests {
             result.contains("1 vendor/personal-tooling path candidate hidden by default"),
             "suppressed-noise note should be visible: {result}"
         );
+        assert!(
+            result.contains("filters: vendor filtered; personal tooling filtered"),
+            "active search_files filters should be disclosed even on no-result output: {result}"
+        );
     }
 
     #[tokio::test]
@@ -11438,6 +11578,10 @@ mod tests {
         assert!(
             result.contains("vendor/foo/bar.rs"),
             "include_vendor=true should surface vendor path: {result}"
+        );
+        assert!(
+            result.contains("filters: vendor included; personal tooling filtered"),
+            "active search_files filters should be disclosed in the envelope: {result}"
         );
     }
 
@@ -11472,6 +11616,10 @@ mod tests {
             result.contains("1 vendor/personal-tooling path candidate hidden by default"),
             "resolve=true should explain suppressed vendor candidate: {result}"
         );
+        assert!(
+            result.contains("filters: vendor filtered; personal tooling filtered"),
+            "resolve=true output should disclose active search_files filters: {result}"
+        );
     }
 
     #[tokio::test]
@@ -11500,6 +11648,10 @@ mod tests {
         assert!(
             result.contains("Match type: exact (resolve)"),
             "include_vendor=true should keep normal resolve envelope: {result}"
+        );
+        assert!(
+            result.contains("filters: vendor included; personal tooling filtered"),
+            "include_vendor resolve output should disclose active filters: {result}"
         );
     }
 
@@ -11530,6 +11682,10 @@ mod tests {
             result.contains("1 vendor/personal-tooling path candidate hidden by default"),
             "glob search should report suppressed vendor candidate: {result}"
         );
+        assert!(
+            result.contains("filters: vendor filtered; personal tooling filtered"),
+            "glob search output should disclose active filters: {result}"
+        );
     }
 
     #[tokio::test]
@@ -11558,6 +11714,10 @@ mod tests {
         assert!(
             result.contains("Source authority: current index"),
             "got: {result}"
+        );
+        assert!(
+            result.contains("filters: vendor filtered; personal tooling filtered"),
+            "resolve=true envelope should disclose active filters: {result}"
         );
         assert!(result.contains("src/protocol/tools.rs"), "got: {result}");
     }
@@ -11593,6 +11753,10 @@ mod tests {
         );
         assert!(result.contains("src/lib.rs"), "got: {result}");
         assert!(result.contains("tests/lib.rs"), "got: {result}");
+        assert!(
+            result.contains("filters: vendor filtered; personal tooling filtered"),
+            "ambiguous resolve output should disclose active filters: {result}"
+        );
     }
 
     #[tokio::test]
@@ -14291,6 +14455,36 @@ mod tests {
         assert!(
             result.contains("3 noise-filtered match(es) suppressed"),
             "suppressed vendor matches should be counted: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_text_suppressed_count_caps_broad_vendor_matches() {
+        let mut vendor_content = String::new();
+        for index in 0..150 {
+            vendor_content.push_str(&format!("needle hidden_{index}\n"));
+        }
+        let source_content = b"needle source\n";
+        let server = make_server(make_live_index_ready(vec![
+            make_file("vendor/noisy/lib.rs", vendor_content.as_bytes(), vec![]),
+            make_file("src/normal.rs", source_content, vec![]),
+        ]));
+
+        let result = server
+            .search_text(Parameters(super::SearchTextInput {
+                query: Some("needle".to_string()),
+                limit: Some(1),
+                ..Default::default()
+            }))
+            .await;
+
+        assert!(
+            result.contains("src/normal.rs"),
+            "non-vendor hit must remain visible: {result}"
+        );
+        assert!(
+            result.contains("100+ noise-filtered match(es) suppressed"),
+            "broad hidden counts should be capped instead of exact-scanning vendor trees: {result}"
         );
     }
 
