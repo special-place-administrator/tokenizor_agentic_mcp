@@ -81,15 +81,15 @@
 
 ## Implementation Checklist
 
-- [ ] Re-read this task and list the plan.
-- [ ] Inspect `src/protocol/format.rs`, `src/live_index/frecency.rs`, `src/live_index/coupling/lifecycle.rs`, and `src/worktree.rs` to confirm naming conventions.
-- [ ] Add the new `src/capability/` module and export it from `src/lib.rs`.
-- [ ] Add focused tests for evidence rendering and default policy shape.
-- [ ] Implement the behavior.
-- [ ] Run `cargo test --test capability_evidence -- --test-threads=1`.
-- [ ] Run `cargo check`.
-- [ ] Run `cargo test --all-targets -- --test-threads=1` if shared Rust behavior changed beyond inert types/helpers.
-- [ ] Confirm every success criterion.
+- [x] Re-read this task and list the plan.
+- [x] Inspect `src/protocol/format.rs`, `src/live_index/frecency.rs`, `src/live_index/coupling/lifecycle.rs`, and `src/worktree.rs` to confirm naming conventions.
+- [x] Add the new `src/capability/` module and export it from `src/lib.rs`.
+- [x] Add focused tests for evidence rendering and default policy shape.
+- [x] Implement the behavior.
+- [x] Run `cargo test --test capability_evidence -- --test-threads=1`.
+- [x] Run `cargo check`.
+- [x] Run `cargo test --all-targets -- --test-threads=1` if shared Rust behavior changed beyond inert types/helpers.
+- [x] Confirm every success criterion.
 
 ## Implementation Chunks
 

@@ -43,6 +43,19 @@ use crate::live_index::{
 };
 use crate::{cli::hook::HookAdoptionSnapshot, sidecar::StatsSnapshot};
 
+pub fn capability_evidence_line(evidence: &crate::capability::CapabilityEvidence) -> String {
+    let mut line = format!("Capability: {} {}", evidence.capability, evidence.status);
+    if let Some(detail) = evidence.detail.as_deref().map(str::trim)
+        && !detail.is_empty()
+    {
+        let detail = detail.trim_end_matches('.');
+        line.push_str(" - ");
+        line.push_str(detail);
+    }
+    line.push('.');
+    line
+}
+
 /// Format the file outline for a given path.
 ///
 /// Header: `{path}  ({N} symbols)`
