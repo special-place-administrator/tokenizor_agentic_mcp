@@ -888,6 +888,29 @@ Per user direction: Tier 1 and Tier 2 combined into one cross-sprint. Sub-ordere
 
 ---
 
+### Wave 3g - Call-Time Capability Resolution + Derived Store Policy
+
+Bounded product-correctness slice after the current Wave 3 trust and edit-safety foundation work. This wave converts advertised optional capabilities from startup-env-shaped behavior toward request-time resolution while preserving one authoritative in-process `LiveIndex`.
+
+**Dependency:** after Wave 3 trust/edit-safety foundation work has landed, especially pre-write tee snapshots and `.symforge/` trust-gating decisions.
+
+**Scope:** execute tasks 01-06 from `docs/plans/2026-05-16-call-time-capability-resolution/`:
+
+- Task 01 records the product contract in ADR 0016, README wording, and this roadmap entry.
+- Task 02 adds the shared capability evidence and policy model.
+- Task 03 converts frecency request handling.
+- Task 04 converts co-change lazy preparation and fallback evidence.
+- Task 05 converts worktree routing to explicit call-time `working_directory` consent unless policy disables it.
+- Task 06 adds call-time ranking explanation.
+
+**Non-goals:** no multi-process router, no multi-index SymForge swarm, no broad generic `scope` parameter, no cloud control plane, and no replacement of `LiveIndex` as the current-byte authority.
+
+**Gate:** env-vars-unset call-time capability tests pass for frecency, co-change, worktree routing, and ranking explanation, or the response includes explicit unavailable/disabled/fallback evidence per ADR 0016.
+
+**Verification:** targeted tests for each task plus `cargo check`, `cargo test --all-targets -- --test-threads=1`, `cargo build --release`, and `git diff --check` before the wave is called complete.
+
+---
+
 ### Wave 4 — Stability Polish Sweep (Phase H C-4 + B-P3-x)
 
 Phase H C-4 deferred bucket + 3 P3 bugs from external evaluator catalog. **Calendar commitment: 1-week sprint within 30 days of Phase 4 (Wave 3) close.**
@@ -1078,6 +1101,7 @@ Phase H C-4 deferred bucket + 3 P3 bugs from external evaluator catalog. **Calen
   - Wave 3 → status: shipped in `wiki/concepts/RTK Techniques for SymForge.md` (mark Tier 1 + Tier 2 done)
   - Wave 4 → mark P2/P3 items closed in `wiki/concepts/SymForge Phase H Stability Hotfix.md` C-4 bucket
 - **Release cadence:** Wave 0 completed across `v7.8.1` and `v7.8.2` (`v7.8.2` is final close-out). Wave 1 → patch (or rides `v7.8.2` if release-please does not bump). Wave 2 → v7.9.0. Wave 3 → v7.10.0. Wave 4 → v7.10.1.
+- **Capability-resolution cadence:** Wave 3g is inserted after Wave 3 foundation work and before Wave 4 polish unless the plan owner explicitly reorders it. Release version is assigned when the implementation slice is dispatched.
 - **Push-gate discipline:** Each wave close ships with software-side cargo gates green + release-please patch/minor bump. User-side gates (Kimi-shaped idle + cross-root reload check) run after install of each release; record findings in agentmemory with `as_of YYYY-MM-DD`.
 - **Cross-check protocol during v7.8.0+ soak:** Per `mem_mp6yancf_820a54cae5ef`, treat SymForge `find_references`/`edit_plan` results as hypotheses; cross-check with raw `rg` until Wave 0 ships.
 
@@ -1098,7 +1122,8 @@ Wave 0  v7.8.2     Trust restoration       (5 units; foundation; shipped)
   -> Wave 1  patch     Index hygiene         (2 units; small; ~30 min once Wave 0 trusted)
     -> Wave 2  v7.9.0    CoChange ranker       (6 units; ~2 weeks; lights up CoChangeSignal::score)
       -> Wave 3  v7.10.0   RTK Tier 1+2 sprint   (~12 units; ~2-3 weeks; biggest wave)
-        -> Wave 4  v7.10.1   C-4 polish sweep      (10 units; 1-week sprint inside 30d of Wave 3 close)
+        -> Wave 3g unassigned Call-time capability  (tasks 01-06; env-vars-unset request gates)
+          -> Wave 4  v7.10.1   C-4 polish sweep      (10 units; 1-week sprint inside 30d of Wave 3 close)
 
   Parallel inside waves: max 2 CODEX agents per CLAUDE.md §12
   WSL fallback acceptable for libgit2 Class C + MSVC LNK1201/1140 flakes

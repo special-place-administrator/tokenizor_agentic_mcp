@@ -76,15 +76,15 @@
 
 ## Implementation Checklist
 
-- [ ] Re-read this task and list the plan.
-- [ ] Inspect the source material listed in Context.
-- [ ] Draft ADR 0016 with decision, rationale, non-goals, capability-state vocabulary, migration direction, and acceptance criteria.
-- [ ] Update README environment-variable wording so env vars are operational policy knobs.
-- [ ] Add a bounded roadmap entry for call-time capability resolution without implying that implementation is already complete.
-- [ ] Run documentation-focused grep checks.
-- [ ] Run `git diff --check`.
-- [ ] Run `cargo check` only if a tool or CI policy requires it after documentation edits.
-- [ ] Confirm every success criterion.
+- [x] Re-read this task and list the plan.
+- [x] Inspect the source material listed in Context.
+- [x] Draft ADR 0016 with decision, rationale, non-goals, capability-state vocabulary, migration direction, and acceptance criteria.
+- [x] Update README environment-variable wording so env vars are operational policy knobs.
+- [x] Add a bounded roadmap entry for call-time capability resolution without implying that implementation is already complete.
+- [x] Run documentation-focused grep checks.
+- [x] Run `git diff --check`.
+- [x] Run `cargo check` only if a tool or CI policy requires it after documentation edits.
+- [x] Confirm every success criterion.
 
 ## Implementation Chunks
 

@@ -116,7 +116,7 @@ After setup, confirm in your client that the SymForge MCP server is connected or
 |------|---------|
 | `search_symbols` | Find symbols by name, kind, language, path prefix |
 | `search_text` | Full-text search with enclosing symbol context. Supports literal, OR-terms, regex, and structural AST patterns (`structural=true`) |
-| `search_files` | File path discovery with default fuzzy ranking, `resolve=true` for exact path resolution, `rank_by="path+cochange"` with `anchor_path` for coupling-store fusion, and `rank_by="frecency"` with `SYMFORGE_FRECENCY=1`. The older `changed_with=path` path remains as deprecated compatibility |
+| `search_files` | File path discovery with default fuzzy ranking, `resolve=true` for exact path resolution, `rank_by="path+cochange"` with `anchor_path` for requested coupling-store fusion, and `rank_by="frecency"` for requested frecency ranking. The older `changed_with=path` path remains as deprecated compatibility |
 
 ### Tracing impact
 
@@ -145,7 +145,7 @@ After setup, confirm in your client that the SymForge MCP server is connected or
 
 ### Worktree awareness
 
-All seven edit tools accept an optional `working_directory` parameter pointing at a sibling `git worktree` of the indexed repo. With `SYMFORGE_WORKTREE_AWARE=1` set, SymForge re-roots the symbol's indexed path onto the supplied worktree before writing — so an agent running inside `../my-feature-worktree` can call an edit tool without silently writing to the indexed copy. Reads still come from the indexed path; only writes reroute. Responses include `wrote_to`, `indexed_path`, and `rerouted` so callers can verify the target. Omit the parameter (or leave the flag unset) for byte-identical pre-flag behavior. See [ADR 0010](docs/decisions/0010-worktree-working-directory.md).
+All seven edit tools accept an optional `working_directory` parameter pointing at a sibling `git worktree` of the indexed repo. The planned call-time contract treats that parameter as explicit routing consent: SymForge validates the supplied worktree before writing, re-roots the symbol's indexed path onto that worktree, and reports `wrote_to`, `indexed_path`, and `rerouted` so callers can verify the target. Reads still come from the indexed path; only writes reroute. During the migration from the original opt-in release, `SYMFORGE_WORKTREE_AWARE` is an operational policy/default knob for deployments that need to disable, dogfood, or default routing behavior; it is not the long-term semantic trigger for a caller that explicitly supplies `working_directory`. See [ADR 0010](docs/decisions/0010-worktree-working-directory.md) and [ADR 0016](docs/decisions/0016-call-time-capability-resolution.md).
 
 ```json
 {
@@ -159,9 +159,9 @@ All seven edit tools accept an optional `working_directory` parameter pointing a
 
 ### Ranking signals
 
-`search_files` ranks path matches by default and can opt into additional signals when the caller requests them.
+`search_files` ranks path matches by default and can opt into additional signals when the caller requests them. SymForge is migrating optional ranking capabilities to a call-time contract: a requested capability should be applied, prepared with evidence, reported unavailable, or reported disabled by policy. Current releases may still carry transitional environment gates until the call-time migration tasks land; the variables below are the policy/default controls for that migration, not the intended only path for an LLM to request advertised behavior. See [ADR 0016](docs/decisions/0016-call-time-capability-resolution.md).
 
-Use `rank_by="frecency"` to fuse a per-workspace frecency signal with path matching. Frecency decays on a 7-day half-life, so a file you touched five minutes ago outranks one you hit ten times six months ago. This mode requires `SYMFORGE_FRECENCY=1`; when the flag is unset or `rank_by` is omitted, ranking falls back to the default path-based order. See [ADR 0011](docs/decisions/0011-frecency-bump-policy.md).
+Use `rank_by="frecency"` to request fusion of a per-workspace frecency signal with path matching. Frecency decays on a 7-day half-life, so a file you touched five minutes ago outranks one you hit ten times six months ago. The planned call-time behavior is that this request uses available frecency history or returns explicit empty-history, fallback, unavailable, or disabled-by-policy evidence. `SYMFORGE_FRECENCY` controls operational collection, persistence, default-on, or disable policy during that migration. Omit `rank_by` for the default path-based order. See [ADR 0011](docs/decisions/0011-frecency-bump-policy.md).
 
 ```json
 {
@@ -170,9 +170,9 @@ Use `rank_by="frecency"` to fuse a per-workspace frecency signal with path match
 }
 ```
 
-Frecency scores bump on *commitment* tools — every edit tool plus the read tools that imply you're working on a known file (`get_file_context`, `get_file_content`, `get_symbol`, `get_symbol_context`). Discovery tools (`search_files`, `search_text`, `search_symbols`) deliberately never bump: searching for a file is not the same as working on it, and a searching-bumps-too policy corrupts rankings via a positive feedback loop. Batch tools dedup bumps per invocation, so editing 20 symbols in one `batch_edit` call bumps each touched path exactly once. Set `SYMFORGE_DEBUG_RANKING=1` to surface per-signal scores in `search_files` responses and a last-10 bumps list in `health`.
+Frecency scores bump on *commitment* tools - every edit tool plus the read tools that imply you're working on a known file (`get_file_context`, `get_file_content`, `get_symbol`, `get_symbol_context`). Discovery tools (`search_files`, `search_text`, `search_symbols`) deliberately never bump: searching for a file is not the same as working on it, and a searching-bumps-too policy corrupts rankings via a positive feedback loop. Batch tools dedup bumps per invocation, so editing 20 symbols in one `batch_edit` call bumps each touched path exactly once. Planned ranking explanations should be requestable per call; `SYMFORGE_DEBUG_RANKING` remains an operational default-on/debug knob for surfacing per-signal scores in `search_files` responses and a last-10 bumps list in `health`.
 
-Use `rank_by="path+cochange"` with `anchor_path="<repo-relative-path>"` to fuse path matches with the per-workspace co-change coupling store. This mode requires `SYMFORGE_COUPLING=1` and usable coupling evidence for the anchor. If the store is missing or has no usable neighbors, SymForge explains the fallback and returns path-ranked results. The older `changed_with=path` mode still works for compatibility and emits a deprecation warning.
+Use `rank_by="path+cochange"` with `anchor_path="<repo-relative-path>"` to request fusion of path matches with the per-workspace co-change coupling store. The planned call-time behavior is that SymForge uses ready coupling evidence, performs bounded lazy preparation, or returns path-ranked results with explicit fallback, unavailable, stale, or disabled-by-policy evidence. `SYMFORGE_COUPLING` controls operational warm-on-start, disable, persistence, and cost policy during that migration. The older `changed_with=path` mode still works for compatibility and emits a deprecation warning.
 
 ```json
 {
@@ -235,7 +235,7 @@ Two trait-based registries let feature code plug into the shared edit and ranker
 
 **`EditHook`** wraps the per-edit lifecycle for the seven edit tools (`replace_symbol_body`, `edit_within_symbol`, `insert_symbol`, `delete_symbol`, `batch_edit`, `batch_insert`, `batch_rename`). Implementations register at startup; the handlers delegate to the registry to resolve the target path before writing and to run bookkeeping after the edit commits. For example, a worktree-aware feature registers a hook that rewrites a symbol's indexed path onto the active worktree before the write lands.
 
-Each of the seven edit tools accepts an optional `working_directory` parameter pointing at a `git worktree` sibling of the indexed repo. When supplied, SymForge reroutes the write into that worktree and includes `rerouted: true`, `wrote_to:`, and `indexed_path:` lines in the response so callers can verify the target. Set `SYMFORGE_WORKTREE_AWARE=1` to enable this routing. Example:
+Each of the seven edit tools accepts an optional `working_directory` parameter pointing at a `git worktree` sibling of the indexed repo. Planned call-time routing treats that parameter as explicit consent: SymForge validates the worktree, reroutes the write there, and includes `rerouted: true`, `wrote_to:`, and `indexed_path:` lines in the response so callers can verify the target. `SYMFORGE_WORKTREE_AWARE` remains a transitional policy/default knob while this behavior migrates. Example:
 
 ```json
 {
@@ -268,10 +268,10 @@ See [ADR 0012](docs/decisions/0012-edit-and-ranker-hook-architecture.md) for the
 | `SYMFORGE_RECONCILE_INTERVAL` | `30` | Watcher reconciliation interval in seconds; `0` disables periodic sweeps |
 | `SYMFORGE_SIDECAR_BIND` | `127.0.0.1` | Sidecar bind host for local in-process mode |
 | `SYMFORGE_DAEMON_BIND` | `127.0.0.1` | Daemon bind host for shared local daemon |
-| `SYMFORGE_FRECENCY` | unset | Set to `1` to enable the frecency rank signal in `search_files` (`rank_by="frecency"`) |
-| `SYMFORGE_DEBUG_RANKING` | unset | Set to `1` to surface per-signal scores in `search_files` responses and a last-10 bumps list in `health` |
-| `SYMFORGE_COUPLING` | unset | Set to `1` to build and refresh the per-workspace co-change coupling store used by `search_files rank_by="path+cochange"` |
-| `SYMFORGE_WORKTREE_AWARE` | unset | Set to `1` to enable worktree routing on edit tools via the `working_directory` parameter |
+| `SYMFORGE_FRECENCY` | unset | Transitional policy/default knob for frecency collection, persistence, default-on, or disable behavior when `rank_by="frecency"` is requested |
+| `SYMFORGE_DEBUG_RANKING` | unset | Operational default-on/debug knob for ranking diagnostics; planned call-time explanations should also be requestable per call |
+| `SYMFORGE_COUPLING` | unset | Operational policy knob for co-change store warmup, refresh, persistence, cost, or disable behavior when `rank_by="path+cochange"` is requested |
+| `SYMFORGE_WORKTREE_AWARE` | unset | Transitional policy/default knob for worktree routing; `working_directory` is the planned call-time consent signal |
 | `SYMFORGE_INDEXING_THREAD_STACK_BYTES` | `4194304` (Windows only) | Override the indexing worker-thread stack size. Minimum 3 MiB on Windows; ignored elsewhere |
 
 For platform-specific setup scripts (PowerShell, CMD, bash, zsh), see the wiki:
