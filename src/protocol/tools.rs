@@ -8147,7 +8147,7 @@ impl SymForgeServer {
         if let Some(result) = self.proxy_tool_call("replace_symbol_body", &params.0).await {
             return result;
         }
-        self.note_worktree_misuse_if_flag_on(params.0.working_directory.as_deref());
+        self.note_worktree_misuse_if_active(params.0.working_directory.as_deref());
         {
             let guard = self.index.read();
             loading_guard!(guard);
@@ -8332,7 +8332,7 @@ impl SymForgeServer {
         if let Some(result) = self.proxy_tool_call("insert_symbol", &params.0).await {
             return result;
         }
-        self.note_worktree_misuse_if_flag_on(params.0.working_directory.as_deref());
+        self.note_worktree_misuse_if_active(params.0.working_directory.as_deref());
         let position = params.0.position.as_deref().unwrap_or("after");
         if position != "before" && position != "after" {
             return format!("Error: position must be 'before' or 'after', got '{position}'");
@@ -8472,7 +8472,7 @@ impl SymForgeServer {
         if let Some(result) = self.proxy_tool_call("delete_symbol", &params.0).await {
             return result;
         }
-        self.note_worktree_misuse_if_flag_on(params.0.working_directory.as_deref());
+        self.note_worktree_misuse_if_active(params.0.working_directory.as_deref());
         {
             let guard = self.index.read();
             loading_guard!(guard);
@@ -8605,7 +8605,7 @@ impl SymForgeServer {
         if let Some(result) = self.proxy_tool_call("edit_within_symbol", &params.0).await {
             return result;
         }
-        self.note_worktree_misuse_if_flag_on(params.0.working_directory.as_deref());
+        self.note_worktree_misuse_if_active(params.0.working_directory.as_deref());
         {
             let guard = self.index.read();
             loading_guard!(guard);
@@ -8843,7 +8843,7 @@ impl SymForgeServer {
         if let Some(result) = self.proxy_tool_call("batch_edit", &params.0).await {
             return result;
         }
-        self.note_worktree_misuse_if_flag_on(params.0.working_directory.as_deref());
+        self.note_worktree_misuse_if_active(params.0.working_directory.as_deref());
         {
             let guard = self.index.read();
             loading_guard!(guard);
@@ -8913,7 +8913,7 @@ impl SymForgeServer {
         if let Some(result) = self.proxy_tool_call("batch_rename", &params.0).await {
             return result;
         }
-        self.note_worktree_misuse_if_flag_on(params.0.working_directory.as_deref());
+        self.note_worktree_misuse_if_active(params.0.working_directory.as_deref());
         let repo_root = match self.capture_repo_root() {
             Some(root) => root,
             None => return "Error: no repository root configured.".to_string(),
@@ -8964,7 +8964,7 @@ impl SymForgeServer {
         if let Some(result) = self.proxy_tool_call("batch_insert", &params.0).await {
             return result;
         }
-        self.note_worktree_misuse_if_flag_on(params.0.working_directory.as_deref());
+        self.note_worktree_misuse_if_active(params.0.working_directory.as_deref());
         {
             let guard = self.index.read();
             loading_guard!(guard);

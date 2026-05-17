@@ -84,7 +84,11 @@ fn read_head_sha(repo_path: &Path) -> Option<String> {
 }
 
 fn run_calibration(name: &str, repo_path: &Path, include_symbols: bool) {
-    let mode = if include_symbols { "file+symbol" } else { "file-only" };
+    let mode = if include_symbols {
+        "file+symbol"
+    } else {
+        "file-only"
+    };
     println!("## {name} ({mode})\n");
     println!("- **Repo path:** `{}`", repo_path.display());
 
@@ -113,7 +117,10 @@ fn run_calibration(name: &str, repo_path: &Path, include_symbols: bool) {
     println!("- **Walker stats:**");
     println!("  - commits_scanned: `{}`", stats.commits_scanned);
     println!("  - commits_with_pairs: `{}`", stats.commits_with_pairs);
-    println!("  - commits_skipped_large: `{}`", stats.commits_skipped_large);
+    println!(
+        "  - commits_skipped_large: `{}`",
+        stats.commits_skipped_large
+    );
     println!("  - unique_edges: `{}`", stats.unique_edges);
     println!("  - rows_written: `{}`", stats.rows_written);
     println!();

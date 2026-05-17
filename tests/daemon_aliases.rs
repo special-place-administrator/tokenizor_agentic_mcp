@@ -168,7 +168,8 @@ async fn trace_symbol_alias_routes_to_get_symbol_context() {
 
     // --- Byte-identical parity is the alias contract ----------------------
     assert_eq!(
-        alias_body, destination_body,
+        alias_body,
+        destination_body,
         "trace_symbol alias output must be byte-identical to \
          get_symbol_context with the translated input.\n\
          Divergence here means the alias branch in \

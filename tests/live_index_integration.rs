@@ -1284,8 +1284,8 @@ fn test_persist_version_mismatch() {
 // --------------------------------------------------------------------------
 #[test]
 fn test_arcswap_concurrent_reads_under_writer_pressure() {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     let dir = tempdir().unwrap();
     for i in 0..20 {

@@ -283,7 +283,7 @@ See [ADR 0012](docs/decisions/0012-edit-and-ranker-hook-architecture.md) for the
 | `SYMFORGE_FRECENCY` | unset | Frecency policy: unset/session keeps collection in current-process memory; `1`/truthy/persistent writes `.symforge/frecency.db`; false/off/disabled blocks collection and requested ranking reports disabled-by-policy evidence |
 | `SYMFORGE_DEBUG_RANKING` | unset | Ranking diagnostics policy: unset keeps explanations per-call only; `1`/truthy/default-on enables explanations by default and the last-10 bumps debug section in `health`; `0`/false/no/off/disabled/disable and unknown values block requested explanations with disabled-by-policy evidence |
 | `SYMFORGE_COUPLING` | unset | Co-change policy: unset/lazy prepares `.symforge/coupling.db` only when `rank_by="path+cochange"` requests it; `1`/truthy values warm on startup; false/off/disabled blocks preparation and requested ranking |
-| `SYMFORGE_WORKTREE_AWARE` | unset | Worktree-routing policy/default knob: unset or truthy allows explicit `working_directory` routing; false/off/disabled blocks requested routing before write |
+| `SYMFORGE_WORKTREE_AWARE` | unset | Worktree-routing policy/default knob: unset or truthy allows explicit `working_directory` routing and counts edit calls that omit `working_directory` in `health`; false/off/disabled blocks requested routing before write and suppresses that misuse counter |
 | `SYMFORGE_INDEXING_THREAD_STACK_BYTES` | `4194304` (Windows only) | Override the indexing worker-thread stack size. Minimum 3 MiB on Windows; ignored elsewhere |
 
 For platform-specific setup scripts (PowerShell, CMD, bash, zsh), see the wiki:

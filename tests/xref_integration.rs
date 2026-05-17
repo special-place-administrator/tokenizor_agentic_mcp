@@ -189,7 +189,10 @@ fn test_ruby_multifile_xref_extraction() {
     assert!(
         !greet_calls.is_empty(),
         "should find a Call reference for `greet` from caller.rb, got: {:?}",
-        greet_refs.iter().map(|(_, r)| (&r.name, r.kind)).collect::<Vec<_>>()
+        greet_refs
+            .iter()
+            .map(|(_, r)| (&r.name, r.kind))
+            .collect::<Vec<_>>()
     );
 
     // XREF-01/02: `require_relative` produces Import references.
@@ -205,7 +208,10 @@ fn test_ruby_multifile_xref_extraction() {
         import_count >= 2,
         "expected >=2 Import refs (caller.rb + importer.rb), got {}: {:?}",
         import_count,
-        import_refs.iter().map(|(_, r)| (&r.name, r.kind)).collect::<Vec<_>>()
+        import_refs
+            .iter()
+            .map(|(_, r)| (&r.name, r.kind))
+            .collect::<Vec<_>>()
     );
 
     // XREF-01/02: `Greeter` appears as a TypeUsage across caller.rb and importer.rb.

@@ -218,17 +218,15 @@ fn compute_window(
     repo_root: &Path,
     cfg: &WalkerConfig,
 ) -> Result<(Vec<WindowEntry>, Option<String>)> {
-    let repo = git2::Repository::open(repo_root)
-        .map_err(|e| anyhow!("git2 open {:?}: {e}", repo_root))?;
+    let repo =
+        git2::Repository::open(repo_root).map_err(|e| anyhow!("git2 open {:?}: {e}", repo_root))?;
 
     let head_oid = match repo.head().ok().and_then(|h| h.target()) {
         Some(oid) => Some(oid.to_string()),
         None => return Ok((Vec::new(), None)),
     };
 
-    let mut revwalk = repo
-        .revwalk()
-        .map_err(|e| anyhow!("revwalk init: {e}"))?;
+    let mut revwalk = repo.revwalk().map_err(|e| anyhow!("revwalk init: {e}"))?;
     revwalk.push_head().map_err(|e| anyhow!("push_head: {e}"))?;
     revwalk
         .set_sorting(git2::Sort::TIME)
@@ -444,8 +442,8 @@ fn collect_file_hunks(diff: &git2::Diff) -> Result<Vec<FileHunks>> {
         let new_id = delta.new_file().id();
         let new_oid = if new_id.is_zero() { None } else { Some(new_id) };
 
-        let patch_opt = git2::Patch::from_diff(diff, delta_idx)
-            .map_err(|e| anyhow!("patch from_diff: {e}"))?;
+        let patch_opt =
+            git2::Patch::from_diff(diff, delta_idx).map_err(|e| anyhow!("patch from_diff: {e}"))?;
         let mut hunks = Vec::new();
         if let Some(patch) = patch_opt {
             for h in 0..patch.num_hunks() {
@@ -577,8 +575,8 @@ mod tests {
             index.write().unwrap();
             let tree_oid = index.write_tree().unwrap();
             let tree = self.repo.find_tree(tree_oid).unwrap();
-            let sig = git2::Signature::new("Test", "t@example.com", &git2::Time::new(ts, 0))
-                .unwrap();
+            let sig =
+                git2::Signature::new("Test", "t@example.com", &git2::Time::new(ts, 0)).unwrap();
             let parent_oid = self.repo.head().ok().and_then(|h| h.target());
             let parents: Vec<git2::Commit> = parent_oid
                 .and_then(|oid| self.repo.find_commit(oid).ok())
@@ -664,7 +662,12 @@ mod tests {
         let repo = TestRepo::init();
         let now = now_sec();
         repo.commit(
-            &[("f1.rs", "x"), ("f2.rs", "x"), ("f3.rs", "x"), ("f4.rs", "x")],
+            &[
+                ("f1.rs", "x"),
+                ("f2.rs", "x"),
+                ("f3.rs", "x"),
+                ("f4.rs", "x"),
+            ],
             now - 3600,
             "big",
         );
@@ -679,11 +682,7 @@ mod tests {
     #[test]
     fn cold_build_records_head_reference_ts_and_cold_built_at() {
         let repo = TestRepo::init();
-        let oid = repo.commit(
-            &[("a.rs", "x"), ("b.rs", "y")],
-            now_sec() - 3600,
-            "seed",
-        );
+        let oid = repo.commit(&[("a.rs", "x"), ("b.rs", "y")], now_sec() - 3600, "seed");
         let store = CouplingStore::open_in_memory().unwrap();
         let cfg = test_cfg(now_sec());
         cold_build(&store, &repo.path(), &cfg).unwrap();
@@ -710,8 +709,7 @@ mod tests {
             .unwrap()
             .weighted_score;
         let expected_size = 1.0 / 3.0f64.log2();
-        let expected_time =
-            (-(86400.0 * 5.0) * std::f64::consts::LN_2 / (86400.0 * 30.0)).exp();
+        let expected_time = (-(86400.0 * 5.0) * std::f64::consts::LN_2 / (86400.0 * 30.0)).exp();
         assert!((got - expected_size * expected_time).abs() < 1e-9);
     }
 
@@ -735,15 +733,15 @@ mod tests {
         let headed = TestRepo::init();
         headed.commit(&[("a.rs", "x"), ("b.rs", "y")], now - 3600, "seed");
         cold_build(&store, &headed.path(), &test_cfg(now)).unwrap();
-        assert_eq!(
-            store.query(&AnchorKey::file("a.rs"), 10).unwrap().len(),
-            1
-        );
+        assert_eq!(store.query(&AnchorKey::file("a.rs"), 10).unwrap().len(), 1);
         let empty = tempfile::tempdir().unwrap();
         git2::Repository::init(empty.path()).unwrap();
         cold_build(&store, empty.path(), &test_cfg(now)).unwrap();
         assert!(
-            store.query(&AnchorKey::file("a.rs"), 10).unwrap().is_empty()
+            store
+                .query(&AnchorKey::file("a.rs"), 10)
+                .unwrap()
+                .is_empty()
         );
     }
 
@@ -784,10 +782,7 @@ mod tests {
         let repo_a = TestRepo::init();
         repo_a.commit(&[("a.rs", "x"), ("b.rs", "y")], now - 3600, "seed");
         cold_build(&store, &repo_a.path(), &test_cfg(now)).unwrap();
-        assert_eq!(
-            store.query(&AnchorKey::file("a.rs"), 10).unwrap().len(),
-            1
-        );
+        assert_eq!(store.query(&AnchorKey::file("a.rs"), 10).unwrap().len(), 1);
 
         // Step 2: simulate HEAD loss.
         let empty = tempfile::tempdir().unwrap();
@@ -795,7 +790,10 @@ mod tests {
         apply_head_delta(&store, empty.path(), &test_cfg(now)).unwrap();
         assert_eq!(store.last_head().unwrap(), None);
         assert!(
-            store.query(&AnchorKey::file("a.rs"), 10).unwrap().is_empty(),
+            store
+                .query(&AnchorKey::file("a.rs"), 10)
+                .unwrap()
+                .is_empty(),
             "purge must have happened"
         );
 
@@ -806,7 +804,9 @@ mod tests {
                 panic!("must not NoOp after HEAD was lost and restored")
             }
             DeltaOutcome::Applied {
-                incoming_commits, outgoing_commits, ..
+                incoming_commits,
+                outgoing_commits,
+                ..
             } => {
                 assert_eq!(incoming_commits, 1);
                 assert_eq!(outgoing_commits, 0);
@@ -838,7 +838,10 @@ mod tests {
         apply_head_delta(&store, empty.path(), &test_cfg(now)).unwrap();
         assert_eq!(store.last_head().unwrap(), None);
         assert!(
-            store.query(&AnchorKey::file("a.rs"), 10).unwrap().is_empty()
+            store
+                .query(&AnchorKey::file("a.rs"), 10)
+                .unwrap()
+                .is_empty()
         );
     }
 
@@ -923,18 +926,16 @@ mod tests {
         let mut cfg = test_cfg(now_ts);
         cfg.window_days = 365_000;
 
-        repo.commit(
-            &[("a.rs", "v1"), ("b.rs", "v1")],
-            now_ts - 86400 * 30,
-            "c1",
-        );
+        repo.commit(&[("a.rs", "v1"), ("b.rs", "v1")], now_ts - 86400 * 30, "c1");
         let delta_store = CouplingStore::open_in_memory().unwrap();
         cold_build(&delta_store, &repo.path(), &cfg).unwrap();
 
         repo.commit(&[("a.rs", "v2"), ("b.rs", "v2")], now_ts - 86400, "c2");
         match apply_head_delta(&delta_store, &repo.path(), &cfg).unwrap() {
             DeltaOutcome::Applied {
-                incoming_commits, outgoing_commits, ..
+                incoming_commits,
+                outgoing_commits,
+                ..
             } => {
                 assert_eq!(incoming_commits, 1);
                 assert_eq!(outgoing_commits, 0);
@@ -1009,21 +1010,18 @@ mod tests {
         repo.commit(&[("a.rs", "1"), ("b.rs", "1")], now_ts - 86400 * 10, "c1");
         let store = CouplingStore::open_in_memory().unwrap();
         cold_build(&store, &repo.path(), &cfg).unwrap();
-        assert_eq!(
-            store.query(&AnchorKey::file("a.rs"), 10).unwrap().len(),
-            1
-        );
+        assert_eq!(store.query(&AnchorKey::file("a.rs"), 10).unwrap().len(), 1);
 
         repo.commit(&[("c.rs", "1"), ("d.rs", "1")], now_ts - 86400, "c2");
         apply_head_delta(&store, &repo.path(), &cfg).unwrap();
         assert!(
-            store.query(&AnchorKey::file("a.rs"), 10).unwrap().is_empty(),
+            store
+                .query(&AnchorKey::file("a.rs"), 10)
+                .unwrap()
+                .is_empty(),
             "pair must be deleted when its only commit is evicted"
         );
-        assert_eq!(
-            store.query(&AnchorKey::file("c.rs"), 10).unwrap().len(),
-            1
-        );
+        assert_eq!(store.query(&AnchorKey::file("c.rs"), 10).unwrap().len(), 1);
     }
 
     #[test]
@@ -1036,10 +1034,7 @@ mod tests {
         cfg.include_symbols = true;
 
         repo.commit(
-            &[
-                ("foo.rs", "fn alpha() {}\n"),
-                ("bar.rs", "fn beta() {}\n"),
-            ],
+            &[("foo.rs", "fn alpha() {}\n"), ("bar.rs", "fn beta() {}\n")],
             now_ts - 86400 * 10,
             "c1",
         );
@@ -1154,19 +1149,11 @@ mod tests {
         cfg.window_days = 365_000;
 
         let old_repo = TestRepo::init();
-        old_repo.commit(
-            &[("old1.rs", "x"), ("old2.rs", "y")],
-            now_ts - 3600,
-            "old",
-        );
+        old_repo.commit(&[("old1.rs", "x"), ("old2.rs", "y")], now_ts - 3600, "old");
         cold_build(&store, &old_repo.path(), &cfg).unwrap();
 
         let new_repo = TestRepo::init();
-        new_repo.commit(
-            &[("new1.rs", "x"), ("new2.rs", "y")],
-            now_ts - 1800,
-            "new",
-        );
+        new_repo.commit(&[("new1.rs", "x"), ("new2.rs", "y")], now_ts - 1800, "new");
         apply_head_delta(&store, &new_repo.path(), &cfg).unwrap();
 
         let scratch = CouplingStore::open_in_memory().unwrap();
@@ -1220,10 +1207,7 @@ mod tests {
 
         for i in 1..=5 {
             repo.commit(
-                &[
-                    ("a.rs", &format!("v{i}")),
-                    ("b.rs", &format!("v{i}")),
-                ],
+                &[("a.rs", &format!("v{i}")), ("b.rs", &format!("v{i}"))],
                 now_ts - 86400 * (100 - i),
                 &format!("c{i}"),
             );

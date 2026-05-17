@@ -285,26 +285,23 @@ fn is_forbidden_root(path: &Path) -> bool {
     //     `tmp` or `var` deeper in the tree is allowed.
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
         let lower = name.to_lowercase();
-        const CONTAINER_NAMES: &[&str] = &[
-            "users", "home", "tmp", "temp", "var", "appdata",
-        ];
+        const CONTAINER_NAMES: &[&str] = &["users", "home", "tmp", "temp", "var", "appdata"];
         if CONTAINER_NAMES.contains(&lower.as_str())
             && path
                 .parent()
                 .map(|p| {
                     // Parent is a drive root or filesystem root → forbid.
-                    p.parent().is_none()
-                        || {
-                            #[cfg(target_os = "windows")]
-                            {
-                                let pstr = p.to_string_lossy();
-                                pstr.len() <= 7 && pstr.ends_with('\\')
-                            }
-                            #[cfg(not(target_os = "windows"))]
-                            {
-                                false
-                            }
+                    p.parent().is_none() || {
+                        #[cfg(target_os = "windows")]
+                        {
+                            let pstr = p.to_string_lossy();
+                            pstr.len() <= 7 && pstr.ends_with('\\')
                         }
+                        #[cfg(not(target_os = "windows"))]
+                        {
+                            false
+                        }
+                    }
                 })
                 .unwrap_or(false)
         {
@@ -617,7 +614,10 @@ mod tests {
             // /tmp itself is a real path; canonicalize will succeed.
             let path = std::path::Path::new("/tmp");
             if path.exists() {
-                assert!(is_forbidden_root(path), "/tmp must still be blocked as system path");
+                assert!(
+                    is_forbidden_root(path),
+                    "/tmp must still be blocked as system path"
+                );
             }
         }
     }

@@ -374,12 +374,6 @@ pub fn routing_policy_from_env() -> WorktreeRoutingPolicy {
     }
 }
 
-/// Returns `true` when the transitional observability knob is set. This does
-/// not gate routing; it only keeps the health-visible misuse counter opt-in.
-pub fn feature_flag_enabled() -> bool {
-    std::env::var(WORKTREE_ROUTING_ENV).ok().as_deref() == Some("1")
-}
-
 /// Install [`WorktreeAwareEditHook`] on the process-wide edit-hook
 /// registry, exactly once. Routing policy is resolved inside the hook so
 /// callers can request worktree routing at call time with `working_directory`.
@@ -637,10 +631,8 @@ mod tests {
 
     #[test]
     fn resolve_omitted_working_directory_does_not_touch_filesystem() {
-        let missing_root = std::env::temp_dir().join(format!(
-            "symforge-missing-root-{}",
-            std::process::id()
-        ));
+        let missing_root =
+            std::env::temp_dir().join(format!("symforge-missing-root-{}", std::process::id()));
         let indexed_abs = missing_root.join("src/file.rs");
         let mut cache = WorktreeCache::new();
         let resolved = resolve_target_path(&indexed_abs, &missing_root, None, &mut cache)

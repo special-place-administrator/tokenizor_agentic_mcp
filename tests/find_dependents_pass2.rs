@@ -141,7 +141,10 @@ pub fn build_values() {
                 reference("new", Some("unrelated::Other::new"), ReferenceKind::Call, 6),
             ],
         );
-        let shared = build_index(vec![("src/target.rs", target), ("src/candidate.rs", candidate)]);
+        let shared = build_index(vec![
+            ("src/target.rs", target),
+            ("src/candidate.rs", candidate),
+        ]);
         let index = shared.read();
 
         let refs = dependent_refs_for(&index, "src/target.rs");
@@ -171,7 +174,12 @@ pub fn make_type() {
 }
 "#,
             vec![symbol("make_type", SymbolKind::Function)],
-            vec![reference("new", Some("target::new"), ReferenceKind::Call, 2)],
+            vec![reference(
+                "new",
+                Some("target::new"),
+                ReferenceKind::Call,
+                2,
+            )],
         );
         let shared = build_index(vec![("src/target.rs", target), ("src/caller.rs", caller)]);
         let index = shared.read();
@@ -327,7 +335,12 @@ impl TypeA {
             LanguageId::Rust,
             "pub fn make_real() { let _value = target::new(); }\n",
             vec![symbol("make_real", SymbolKind::Function)],
-            vec![reference("new", Some("target::new"), ReferenceKind::Call, 0)],
+            vec![reference(
+                "new",
+                Some("target::new"),
+                ReferenceKind::Call,
+                0,
+            )],
         );
 
         let mut files = Vec::with_capacity(NOISY_FILE_COUNT + 2);

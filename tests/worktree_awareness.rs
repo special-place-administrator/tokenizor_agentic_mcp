@@ -999,8 +999,8 @@ async fn matrix_cache_refresh_newly_created_worktree_accepted() {
 // ─── Item 4: health misuse counter + conventions answer ─────────────────────
 
 /// `health` surfaces a rolling "last hour" misuse counter whose value bumps
-/// each time an edit tool is called without `working_directory` while the
-/// transitional observability knob is set.
+/// each time an edit tool is called without `working_directory` while worktree
+/// routing policy is active.
 #[tokio::test]
 async fn health_surfaces_worktree_misuse_counter() {
     let _env = WorktreePolicyEnvGuard::set("1");
@@ -1047,6 +1047,56 @@ async fn health_surfaces_worktree_misuse_counter() {
     assert_contains(
         &after_two,
         "edit tool calls without working_directory (last hour): 2",
+    );
+}
+
+/// Env-unset defaults to active explicit call-time routing, so omitted
+/// `working_directory` still needs to be visible in health.
+#[tokio::test]
+async fn misuse_counter_increments_under_env_unset_default_policy() {
+    let _env = WorktreePolicyEnvGuard::remove();
+    let fx = IndexedOnlyFixture::new(&[("src/lib.rs", HELLO_RS)]);
+
+    let _ = call(
+        &fx.server,
+        "replace_symbol_body",
+        json!({
+            "path": "src/lib.rs",
+            "name": "hello",
+            "new_body": "fn hello() {\n    println!(\"default policy\");\n}",
+        }),
+    )
+    .await;
+
+    let after = call(&fx.server, "health", json!({})).await;
+    assert_contains(
+        &after,
+        "edit tool calls without working_directory (last hour): 1",
+    );
+}
+
+/// Disabled routing policy turns the worktree feature off, so omitted
+/// `working_directory` is not counted as worktree-awareness misuse.
+#[tokio::test]
+async fn misuse_counter_stays_zero_under_disabled_policy() {
+    let _env = WorktreePolicyEnvGuard::set("disabled");
+    let fx = IndexedOnlyFixture::new(&[("src/lib.rs", HELLO_RS)]);
+
+    let _ = call(
+        &fx.server,
+        "replace_symbol_body",
+        json!({
+            "path": "src/lib.rs",
+            "name": "hello",
+            "new_body": "fn hello() {\n    println!(\"disabled policy\");\n}",
+        }),
+    )
+    .await;
+
+    let after = call(&fx.server, "health", json!({})).await;
+    assert_contains(
+        &after,
+        "edit tool calls without working_directory (last hour): 0",
     );
 }
 

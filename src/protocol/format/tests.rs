@@ -91,7 +91,7 @@ fn make_index(files: Vec<(String, IndexedFile)>) -> LiveIndex {
         trigram_index,
         gitignore: None,
         skipped_files: Vec::new(),
-            coupling_store: None,
+        coupling_store: None,
         local_empty_reason: std::sync::Arc::new(parking_lot::RwLock::new(None)),
     };
     index.rebuild_path_indices();
@@ -683,7 +683,7 @@ fn test_health_report_empty_state() {
         trigram_index: crate::live_index::trigram::TrigramIndex::new(),
         gitignore: None,
         skipped_files: Vec::new(),
-            coupling_store: None,
+        coupling_store: None,
         local_empty_reason: std::sync::Arc::new(parking_lot::RwLock::new(None)),
     };
     let result = health_report(&index);
@@ -2107,7 +2107,7 @@ fn make_index_with_reverse(files: Vec<(String, IndexedFile)>) -> LiveIndex {
         trigram_index,
         gitignore: None,
         skipped_files: Vec::new(),
-            coupling_store: None,
+        coupling_store: None,
         local_empty_reason: std::sync::Arc::new(parking_lot::RwLock::new(None)),
     };
     index.rebuild_reverse_index();

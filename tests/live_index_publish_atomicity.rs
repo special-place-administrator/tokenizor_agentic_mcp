@@ -235,17 +235,23 @@ fn reload_across_different_roots_purges_prior_path_indices() {
         "B path src/main.rs must resolve via primary map after switch"
     );
     assert!(
-        guard.find_files_by_basename("main.rs").contains(&"src/main.rs"),
+        guard
+            .find_files_by_basename("main.rs")
+            .contains(&"src/main.rs"),
         "B basename main.rs must resolve via files_by_basename after switch; got {:?}",
         guard.find_files_by_basename("main.rs")
     );
     assert!(
-        guard.find_files_by_basename("baboon.rs").contains(&"src/baboon.rs"),
+        guard
+            .find_files_by_basename("baboon.rs")
+            .contains(&"src/baboon.rs"),
         "B basename baboon.rs must resolve after switch; got {:?}",
         guard.find_files_by_basename("baboon.rs")
     );
     assert!(
-        guard.find_files_by_basename("buffalo.rs").contains(&"lib/buffalo.rs"),
+        guard
+            .find_files_by_basename("buffalo.rs")
+            .contains(&"lib/buffalo.rs"),
         "B basename buffalo.rs must resolve after switch; got {:?}",
         guard.find_files_by_basename("buffalo.rs")
     );
@@ -255,7 +261,8 @@ fn reload_across_different_roots_purges_prior_path_indices() {
     // path and no phantom A entries.
     let shared_hits = guard.find_files_by_basename("shared.rs");
     assert_eq!(
-        shared_hits, vec!["shared.rs"],
+        shared_hits,
+        vec!["shared.rs"],
         "shared.rs basename must resolve to exactly one entry after switch"
     );
 }
@@ -285,7 +292,9 @@ fn publish_atomicity_stress_50_iterations() {
         let guard = handle.read();
         assert_snapshot_consistent(&guard, "stress iter=0 (fresh)");
         assert!(
-            guard.find_files_by_basename(&unique0).contains(&unique0.as_str()),
+            guard
+                .find_files_by_basename(&unique0)
+                .contains(&unique0.as_str()),
             "[iter=0] fresh load: {unique0} should resolve"
         );
     }
@@ -321,4 +330,3 @@ fn publish_atomicity_stress_50_iterations() {
         prior_unique = unique;
     }
 }
-

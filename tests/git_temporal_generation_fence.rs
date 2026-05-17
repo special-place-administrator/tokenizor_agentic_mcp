@@ -5,8 +5,8 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
 
-use symforge::live_index::git_temporal::{GitTemporalIndex, GitTemporalState};
 use symforge::live_index::LiveIndex;
+use symforge::live_index::git_temporal::{GitTemporalIndex, GitTemporalState};
 use tempfile::tempdir;
 
 fn write_file(dir: &Path, name: &str, content: &str) {

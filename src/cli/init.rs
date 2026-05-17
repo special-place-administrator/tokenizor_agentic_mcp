@@ -138,10 +138,7 @@ pub fn run_init_with_context(
     }
 
     if matches!(client, InitClient::ClaudeDesktop | InitClient::All) {
-        register_claude_desktop_mcp_server(
-            &paths.claude_desktop_config,
-            &binary_path_str,
-        )?;
+        register_claude_desktop_mcp_server(&paths.claude_desktop_config, &binary_path_str)?;
         eprintln!(
             "Claude Desktop MCP server registered in {}",
             paths.claude_desktop_config.display()

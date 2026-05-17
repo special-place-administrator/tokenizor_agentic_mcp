@@ -265,11 +265,7 @@ impl GitRepo {
 /// Returns `Ok(None)` when the two refs share no common ancestor (e.g., one
 /// branch was rebased onto unrelated history, or an orphan branch was created).
 /// In that case the distance is not a meaningful scalar.
-pub fn commit_distance(
-    from: &str,
-    to: &str,
-    repo_root: &Path,
-) -> Result<Option<u32>, String> {
+pub fn commit_distance(from: &str, to: &str, repo_root: &Path) -> Result<Option<u32>, String> {
     let repo = git2::Repository::discover(repo_root)
         .map_err(|e| format!("failed to open git repository: {e}"))?;
     let from_oid = repo

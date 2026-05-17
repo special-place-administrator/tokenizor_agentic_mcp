@@ -1142,7 +1142,7 @@ mod tests {
                 trigram_index: crate::live_index::trigram::TrigramIndex::new(),
                 gitignore: None,
                 skipped_files: Vec::new(),
-            coupling_store: None,
+                coupling_store: None,
                 local_empty_reason: std::sync::Arc::new(parking_lot::RwLock::new(None)),
             };
             index.update_file(rel_path.to_string(), indexed);
@@ -1222,7 +1222,7 @@ mod tests {
                 trigram_index: crate::live_index::trigram::TrigramIndex::new(),
                 gitignore: None,
                 skipped_files: Vec::new(),
-            coupling_store: None,
+                coupling_store: None,
                 local_empty_reason: std::sync::Arc::new(parking_lot::RwLock::new(None)),
             };
             index.update_file(rel_path.to_string(), indexed);

@@ -64,12 +64,7 @@ pub fn spawn_git_temporal_computation(index: SharedIndex, repo_root: PathBuf, ex
                 let commits = temporal.stats.total_commits_analyzed;
                 let duration_ms = temporal.stats.compute_duration.as_millis() as u64;
                 if index.update_git_temporal_at_generation(temporal, expected_gen) {
-                    tracing::info!(
-                        files,
-                        commits,
-                        duration_ms,
-                        "git temporal index computed"
-                    );
+                    tracing::info!(files, commits, duration_ms, "git temporal index computed");
                 } else {
                     tracing::trace!(
                         expected_gen,

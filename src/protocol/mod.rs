@@ -168,13 +168,15 @@ impl SymForgeServer {
     }
 
     /// Bump the worktree-awareness misuse counter when an edit handler
-    /// was called without `working_directory` and the transitional
-    /// observability knob is on. No-op when the caller supplied the
-    /// parameter or the knob is off. The counter surfaces in `health`
-    /// output as a rolling "last hour" signal for callers that should
-    /// already be passing worktree routing context.
-    pub(crate) fn note_worktree_misuse_if_flag_on(&self, working_directory: Option<&str>) {
-        if working_directory.is_none() && crate::worktree::feature_flag_enabled() {
+    /// was called without `working_directory` while worktree routing is active.
+    /// No-op when the caller supplied the parameter or policy disables routing.
+    /// The counter surfaces in `health` output as a rolling "last hour" signal
+    /// for callers that should already be passing worktree routing context.
+    pub(crate) fn note_worktree_misuse_if_active(&self, working_directory: Option<&str>) {
+        if working_directory.is_none()
+            && crate::worktree::routing_policy_from_env()
+                == crate::capability::WorktreeRoutingPolicy::ExplicitCallTime
+        {
             self.worktree_misuse.record_missing_working_directory();
         }
     }

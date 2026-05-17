@@ -46,26 +46,11 @@ const FIXTURE_FILES: &[(&str, &str)] = &[
         "src/protocol/tools.rs",
         "pub fn tools_handler() {}\npub fn search_files() {}\n",
     ),
-    (
-        "src/protocol/format.rs",
-        "pub fn format_path() {}\n",
-    ),
-    (
-        "src/protocol/mod.rs",
-        "pub mod tools;\npub mod format;\n",
-    ),
-    (
-        "src/live_index/store.rs",
-        "pub struct LiveIndex;\n",
-    ),
-    (
-        "src/live_index/search.rs",
-        "pub fn search_index() {}\n",
-    ),
-    (
-        "src/live_index/mod.rs",
-        "pub mod store;\npub mod search;\n",
-    ),
+    ("src/protocol/format.rs", "pub fn format_path() {}\n"),
+    ("src/protocol/mod.rs", "pub mod tools;\npub mod format;\n"),
+    ("src/live_index/store.rs", "pub struct LiveIndex;\n"),
+    ("src/live_index/search.rs", "pub fn search_index() {}\n"),
+    ("src/live_index/mod.rs", "pub mod store;\npub mod search;\n"),
     (
         "tests/tools_integration.rs",
         "// tests for the tools module\n",

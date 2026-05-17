@@ -62,7 +62,11 @@ impl Fixture {
             Some(root.clone()),
             None,
         );
-        Self { _dir: dir, root, server }
+        Self {
+            _dir: dir,
+            root,
+            server,
+        }
     }
 
     fn read(&self, rel: &str) -> String {
@@ -98,7 +102,8 @@ fn ensure_repo_root(path: &Path) {
 
 #[tokio::test]
 async fn replace_symbol_body_replaces_and_reindexes() {
-    let original = "fn hello() {\n    println!(\"hello\");\n}\n\nfn world() {\n    println!(\"world\");\n}\n";
+    let original =
+        "fn hello() {\n    println!(\"hello\");\n}\n\nfn world() {\n    println!(\"world\");\n}\n";
     let fx = Fixture::new(&[("src/lib.rs", original)]);
     ensure_repo_root(&fx.root);
 
@@ -121,7 +126,10 @@ async fn replace_symbol_body_replaces_and_reindexes() {
 
     let on_disk = fx.read("src/lib.rs");
     assert!(on_disk.contains("HELLO"), "replacement written: {on_disk}");
-    assert!(on_disk.contains("fn world()"), "sibling untouched: {on_disk}");
+    assert!(
+        on_disk.contains("fn world()"),
+        "sibling untouched: {on_disk}"
+    );
 }
 
 #[tokio::test]
@@ -496,10 +504,7 @@ async fn batch_rename_updates_definition_and_callers() {
         lib_after.contains("pub fn new_name()"),
         "definition renamed: {lib_after}"
     );
-    assert!(
-        !lib_after.contains("old_name"),
-        "old def gone: {lib_after}"
-    );
+    assert!(!lib_after.contains("old_name"), "old def gone: {lib_after}");
     assert!(
         caller_after.contains("new_name();"),
         "call site renamed: {caller_after}"
@@ -624,7 +629,10 @@ async fn replace_symbol_body_handles_symbol_at_file_end_without_trailing_newline
     assert_contains(&result, "replaced fn `tail`");
 
     let on_disk = fx.read("src/lib.rs");
-    assert!(on_disk.contains("new();"), "replaced body at EOF: {on_disk}");
+    assert!(
+        on_disk.contains("new();"),
+        "replaced body at EOF: {on_disk}"
+    );
     assert!(on_disk.contains("fn keeper()"), "sibling kept: {on_disk}");
     assert!(!on_disk.contains("old();"), "old body removed: {on_disk}");
 }
@@ -649,8 +657,14 @@ async fn delete_symbol_at_file_end_leaves_predecessor_intact() {
 
     let on_disk = fx.read("src/lib.rs");
     assert!(!on_disk.contains("goner"), "target removed: {on_disk}");
-    assert!(on_disk.contains("fn keeper()"), "predecessor intact: {on_disk}");
-    assert!(on_disk.contains("k();"), "predecessor body intact: {on_disk}");
+    assert!(
+        on_disk.contains("fn keeper()"),
+        "predecessor intact: {on_disk}"
+    );
+    assert!(
+        on_disk.contains("k();"),
+        "predecessor body intact: {on_disk}"
+    );
 }
 
 #[tokio::test]
@@ -792,6 +806,10 @@ async fn edit_within_symbol_replace_all_replaces_every_occurrence() {
     assert_contains(&result, "(3 replacement(s)");
 
     let on_disk = fx.read("src/lib.rs");
-    assert_eq!(on_disk.matches("log(\"y\")").count(), 3, "all replaced: {on_disk}");
+    assert_eq!(
+        on_disk.matches("log(\"y\")").count(),
+        3,
+        "all replaced: {on_disk}"
+    );
     assert!(!on_disk.contains("log(\"x\")"), "no residue: {on_disk}");
 }

@@ -275,9 +275,13 @@ async fn test_health_contract_golden() {
         make_rust_file_with_symbols("src/alpha.rs", vec![("alpha", SymbolKind::Function)]),
         make_rust_file_with_symbols("src/beta.rs", vec![("beta", SymbolKind::Function)]),
     ]);
-    let handle = spawn_sidecar(Arc::clone(&index), "127.0.0.1", Some(tmp.path().to_path_buf()))
-        .await
-        .expect("spawn_sidecar");
+    let handle = spawn_sidecar(
+        Arc::clone(&index),
+        "127.0.0.1",
+        Some(tmp.path().to_path_buf()),
+    )
+    .await
+    .expect("spawn_sidecar");
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -302,9 +306,13 @@ async fn test_stats_contract_golden() {
 
     // Empty index is fine — /stats is independent of index contents.
     let index = build_shared_index(vec![]);
-    let handle = spawn_sidecar(Arc::clone(&index), "127.0.0.1", Some(tmp.path().to_path_buf()))
-        .await
-        .expect("spawn_sidecar");
+    let handle = spawn_sidecar(
+        Arc::clone(&index),
+        "127.0.0.1",
+        Some(tmp.path().to_path_buf()),
+    )
+    .await
+    .expect("spawn_sidecar");
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -335,14 +343,17 @@ async fn test_outline_contract_golden() {
             ("Config", SymbolKind::Struct),
         ],
     )]);
-    let handle = spawn_sidecar(Arc::clone(&index), "127.0.0.1", Some(tmp.path().to_path_buf()))
-        .await
-        .expect("spawn_sidecar");
+    let handle = spawn_sidecar(
+        Arc::clone(&index),
+        "127.0.0.1",
+        Some(tmp.path().to_path_buf()),
+    )
+    .await
+    .expect("spawn_sidecar");
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let canonical =
-        raw_http_get(handle.port, "/outline", "path=src/lib.rs").expect("GET /outline");
+    let canonical = raw_http_get(handle.port, "/outline", "path=src/lib.rs").expect("GET /outline");
     let workflow = raw_http_get(handle.port, "/workflows/source-read", "path=src/lib.rs")
         .expect("GET /workflows/source-read");
 
@@ -378,9 +389,13 @@ async fn test_impact_edit_contract_golden() {
         "src/edit.rs",
         vec![("edited", SymbolKind::Function)],
     )]);
-    let handle = spawn_sidecar(Arc::clone(&index), "127.0.0.1", Some(tmp.path().to_path_buf()))
-        .await
-        .expect("spawn_sidecar");
+    let handle = spawn_sidecar(
+        Arc::clone(&index),
+        "127.0.0.1",
+        Some(tmp.path().to_path_buf()),
+    )
+    .await
+    .expect("spawn_sidecar");
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -392,8 +407,7 @@ async fn test_impact_edit_contract_golden() {
     let _warmup =
         raw_http_get(handle.port, "/impact", "path=src/edit.rs").expect("warmup GET /impact");
 
-    let canonical =
-        raw_http_get(handle.port, "/impact", "path=src/edit.rs").expect("GET /impact");
+    let canonical = raw_http_get(handle.port, "/impact", "path=src/edit.rs").expect("GET /impact");
     let workflow = raw_http_get(
         handle.port,
         "/workflows/post-edit-impact",
@@ -433,9 +447,13 @@ async fn test_impact_new_file_contract_golden() {
     .unwrap();
 
     let index = build_shared_index(vec![]);
-    let handle = spawn_sidecar(Arc::clone(&index), "127.0.0.1", Some(tmp.path().to_path_buf()))
-        .await
-        .expect("spawn_sidecar");
+    let handle = spawn_sidecar(
+        Arc::clone(&index),
+        "127.0.0.1",
+        Some(tmp.path().to_path_buf()),
+    )
+    .await
+    .expect("spawn_sidecar");
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -466,14 +484,18 @@ async fn test_symbol_context_contract_golden() {
         vec![("do_thing", ReferenceKind::Call, 1)],
     );
     let index = build_shared_index(vec![definer, caller]);
-    let handle = spawn_sidecar(Arc::clone(&index), "127.0.0.1", Some(tmp.path().to_path_buf()))
-        .await
-        .expect("spawn_sidecar");
+    let handle = spawn_sidecar(
+        Arc::clone(&index),
+        "127.0.0.1",
+        Some(tmp.path().to_path_buf()),
+    )
+    .await
+    .expect("spawn_sidecar");
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let canonical = raw_http_get(handle.port, "/symbol-context", "name=do_thing")
-        .expect("GET /symbol-context");
+    let canonical =
+        raw_http_get(handle.port, "/symbol-context", "name=do_thing").expect("GET /symbol-context");
     let workflow = raw_http_get(
         handle.port,
         "/workflows/search-hit-expansion",
@@ -508,15 +530,19 @@ async fn test_repo_map_contract_golden() {
         make_rust_file_with_symbols("src/beta.rs", vec![("beta", SymbolKind::Function)]),
         make_rust_file_with_symbols("src/gamma.rs", vec![("gamma", SymbolKind::Function)]),
     ]);
-    let handle = spawn_sidecar(Arc::clone(&index), "127.0.0.1", Some(tmp.path().to_path_buf()))
-        .await
-        .expect("spawn_sidecar");
+    let handle = spawn_sidecar(
+        Arc::clone(&index),
+        "127.0.0.1",
+        Some(tmp.path().to_path_buf()),
+    )
+    .await
+    .expect("spawn_sidecar");
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let canonical = raw_http_get(handle.port, "/repo-map", "").expect("GET /repo-map");
-    let workflow = raw_http_get(handle.port, "/workflows/repo-start", "")
-        .expect("GET /workflows/repo-start");
+    let workflow =
+        raw_http_get(handle.port, "/workflows/repo-start", "").expect("GET /workflows/repo-start");
 
     assert_eq!(
         normalize_newlines(&workflow),
@@ -544,9 +570,13 @@ async fn test_prompt_context_contract_golden() {
         "src/lib.rs",
         vec![("hello", SymbolKind::Function)],
     )]);
-    let handle = spawn_sidecar(Arc::clone(&index), "127.0.0.1", Some(tmp.path().to_path_buf()))
-        .await
-        .expect("spawn_sidecar");
+    let handle = spawn_sidecar(
+        Arc::clone(&index),
+        "127.0.0.1",
+        Some(tmp.path().to_path_buf()),
+    )
+    .await
+    .expect("spawn_sidecar");
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 

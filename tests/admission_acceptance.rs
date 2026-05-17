@@ -274,7 +274,10 @@ fn test_admission_tiers_stable_across_reindex() {
             .unwrap_or_else(|| panic!("Tier-2 missing {suffix}: {tier2:?}"))
             .1
     };
-    assert_eq!(by_suffix("assets/logo.png"), SkipReason::DenylistedExtension);
+    assert_eq!(
+        by_suffix("assets/logo.png"),
+        SkipReason::DenylistedExtension
+    );
     assert_eq!(by_suffix("data/big.json"), SkipReason::SizeThreshold);
     assert_eq!(by_suffix("data/custom.dat"), SkipReason::BinaryContent);
 }

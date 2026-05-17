@@ -239,7 +239,10 @@ async fn batch_edit_bumps_each_touched_file_once() {
 async fn batch_rename_bumps_definition_and_call_site() {
     let fx = Fixture::new(&[
         ("src/a.rs", "pub fn old_name() {}\n"),
-        ("src/b.rs", "use crate::old_name;\nfn caller() { old_name(); }\n"),
+        (
+            "src/b.rs",
+            "use crate::old_name;\nfn caller() { old_name(); }\n",
+        ),
     ]);
     let _flag = FlagGuard::on();
 
@@ -300,7 +303,12 @@ async fn get_file_context_bumps_frecency() {
     let fx = Fixture::new(&[("src/foo.rs", "pub fn foo() {}\n")]);
     let _flag = FlagGuard::on();
 
-    let _ = call(&fx.server, "get_file_context", json!({"path": "src/foo.rs"})).await;
+    let _ = call(
+        &fx.server,
+        "get_file_context",
+        json!({"path": "src/foo.rs"}),
+    )
+    .await;
 
     let bumps = bump_paths(&fx.open_store());
     assert!(
@@ -314,7 +322,12 @@ async fn get_file_content_bumps_frecency() {
     let fx = Fixture::new(&[("src/foo.rs", "pub fn foo() {}\n")]);
     let _flag = FlagGuard::on();
 
-    let _ = call(&fx.server, "get_file_content", json!({"path": "src/foo.rs"})).await;
+    let _ = call(
+        &fx.server,
+        "get_file_content",
+        json!({"path": "src/foo.rs"}),
+    )
+    .await;
 
     let bumps = bump_paths(&fx.open_store());
     assert!(
@@ -456,7 +469,9 @@ fn score_decays_to_half_after_seven_days() {
     let now: i64 = 1_700_000_000;
     let seven_days = 7 * 24 * 60 * 60;
 
-    store.bump(std::slice::from_ref(&p), now - seven_days).expect("bump");
+    store
+        .bump(std::slice::from_ref(&p), now - seven_days)
+        .expect("bump");
     let score = store.score(&p, now).expect("score");
 
     let delta = (score - 0.5).abs();
@@ -475,7 +490,10 @@ fn fresh_file_with_no_row_returns_baseline_score() {
     let score = store
         .score(Path::new("src/never-bumped.rs"), 1_700_000_000)
         .expect("score on missing path");
-    assert_eq!(score, 0.0, "fresh file must score 0 (not error, not negative)");
+    assert_eq!(
+        score, 0.0,
+        "fresh file must score 0 (not error, not negative)"
+    );
 }
 
 // ─── Fusion (1 test) ────────────────────────────────────────────────────────
@@ -496,7 +514,9 @@ async fn recent_single_bump_outranks_old_ten_bumps() {
         let a = PathBuf::from("src/file_a_old.rs");
         let b = PathBuf::from("src/file_b_new.rs");
         for _ in 0..10 {
-            store.bump(std::slice::from_ref(&a), six_months_ago).expect("bump a");
+            store
+                .bump(std::slice::from_ref(&a), six_months_ago)
+                .expect("bump a");
         }
         store.bump(&[b], now).expect("bump b");
     }
@@ -510,7 +530,10 @@ async fn recent_single_bump_outranks_old_ten_bumps() {
 
     let a_pos = result.find("file_a_old.rs");
     let b_pos = result.find("file_b_new.rs");
-    assert!(a_pos.is_some() && b_pos.is_some(), "both files must appear: {result}");
+    assert!(
+        a_pos.is_some() && b_pos.is_some(),
+        "both files must appear: {result}"
+    );
     assert!(
         b_pos < a_pos,
         "file_b (recent 1×) must rank above file_a (old 10×) under frecency fusion; result:\n{result}"
@@ -546,11 +569,7 @@ fn advance_head(root: &Path, count: usize) {
     };
     let tree = repo.find_tree(tree_id).expect("find tree");
     for i in 0..count {
-        let parent_oid = repo
-            .head()
-            .expect("head")
-            .target()
-            .expect("head target");
+        let parent_oid = repo.head().expect("head").target().expect("head target");
         let parent = repo.find_commit(parent_oid).expect("find parent");
         repo.commit(
             Some("HEAD"),

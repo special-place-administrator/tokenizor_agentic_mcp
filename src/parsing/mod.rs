@@ -154,10 +154,7 @@ fn collect_first_error_node(root: &Node, source: &str) -> Option<(String, u32, u
             // Clamp the 40-byte snippet window down to the nearest UTF-8 char
             // boundary — tree-sitter reports byte offsets, and `snippet_start +
             // 40` can land mid-multibyte-char, which would panic str slicing.
-            let mut snippet_end = node
-                .end_byte()
-                .min(snippet_start + 40)
-                .min(source.len());
+            let mut snippet_end = node.end_byte().min(snippet_start + 40).min(source.len());
             while snippet_end > snippet_start && !source.is_char_boundary(snippet_end) {
                 snippet_end -= 1;
             }
@@ -188,7 +185,10 @@ fn collect_first_error_node(root: &Node, source: &str) -> Option<(String, u32, u
     None
 }
 
-pub(crate) fn parse_source(source: &str, language: &LanguageId) -> Result<ParseSourceOutput, String> {
+pub(crate) fn parse_source(
+    source: &str,
+    language: &LanguageId,
+) -> Result<ParseSourceOutput, String> {
     let mut parser = Parser::new();
 
     let ts_language = match language {

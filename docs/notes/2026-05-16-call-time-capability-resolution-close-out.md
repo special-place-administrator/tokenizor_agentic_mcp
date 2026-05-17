@@ -76,3 +76,9 @@ edit: rerouted: true
 Gap: `RankingDiagnosticsPolicy::Disabled` existed, but `search_files(debug_ranking=true)`, ranking diagnostics health, and the last-10 bumps health gate read `SYMFORGE_DEBUG_RANKING` directly and only recognized `1`.
 
 Close: ranking diagnostics now use one env-to-policy helper. `disabled`/`off`/`0`/`false`/`no`/`disable` and unknown values map to disabled policy; requested ranking diagnostics return disabled-by-policy evidence and omit the ranking explanation block. Health reports `ranking diagnostics: disabled by policy` under the same policy.
+
+## Follow-Up: Worktree Misuse Counter Gate (2026-05-17)
+
+Gap: worktree routing became active by default under `WorktreeRoutingPolicy::ExplicitCallTime`, but the health-visible `edit tool calls without working_directory` counter was still gated on the legacy `SYMFORGE_WORKTREE_AWARE=1` check.
+
+Close: the misuse counter now increments whenever routing policy is `ExplicitCallTime` and an edit omits `working_directory`, including env-unset default deployments. `SYMFORGE_WORKTREE_AWARE=disabled` suppresses the counter because worktree routing is off.

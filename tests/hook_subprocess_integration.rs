@@ -80,15 +80,9 @@ fn run_hook_stale_port_writes_source_read_no_sidecar_event() {
     // `sync_http_get_with_timeout` trips, producing an `Err` that drives
     // `run_hook` into the stale-port branch.
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind stale-port listener");
-    let stale_port = listener
-        .local_addr()
-        .expect("stale-port local_addr")
-        .port();
-    std::fs::write(
-        tmp.path().join(PORT_FILE_RELATIVE),
-        stale_port.to_string(),
-    )
-    .expect("write stale port file");
+    let stale_port = listener.local_addr().expect("stale-port local_addr").port();
+    std::fs::write(tmp.path().join(PORT_FILE_RELATIVE), stale_port.to_string())
+        .expect("write stale port file");
 
     let contents = run_hook_in_tempdir(tmp.path(), READ_PAYLOAD);
     drop(listener);
@@ -194,10 +188,7 @@ fn run_hook_in_tempdir(cwd: &Path, payload: &str) -> String {
 /// Poll the child for exit with a timeout. `Ok(Some)` on clean exit,
 /// `Ok(None)` on timeout (after killing the child), `Err` on wait
 /// failure. Local to avoid pulling in an async runtime just for this.
-fn wait_with_timeout(
-    child: &mut Child,
-    timeout: Duration,
-) -> std::io::Result<Option<ExitStatus>> {
+fn wait_with_timeout(child: &mut Child, timeout: Duration) -> std::io::Result<Option<ExitStatus>> {
     let start = Instant::now();
     loop {
         match child.try_wait()? {

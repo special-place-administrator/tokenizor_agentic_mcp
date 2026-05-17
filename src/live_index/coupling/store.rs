@@ -14,9 +14,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use super::AnchorKey;
 use super::decay_factor;
-use super::schema::{
-    CURRENT_SCHEMA_VERSION, META_LAST_HEAD, META_SCHEMA_VERSION, SCHEMA_V1,
-};
+use super::schema::{CURRENT_SCHEMA_VERSION, META_LAST_HEAD, META_SCHEMA_VERSION, SCHEMA_V1};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CouplingRow {
@@ -55,8 +53,8 @@ impl CouplingStore {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating coupling db parent dir {:?}", parent))?;
         }
-        let conn = Connection::open(path)
-            .with_context(|| format!("opening coupling db at {:?}", path))?;
+        let conn =
+            Connection::open(path).with_context(|| format!("opening coupling db at {:?}", path))?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -252,11 +250,7 @@ impl CouplingStore {
     /// composition looks up the file-level pair corresponding to a symbol-
     /// level pair. Direction matters: the PK at schema.rs:22 is ordered, so
     /// `pair_row(a, b)` and `pair_row(b, a)` are distinct queries.
-    pub fn pair_row(
-        &self,
-        anchor: &AnchorKey,
-        partner: &AnchorKey,
-    ) -> Result<Option<CouplingRow>> {
+    pub fn pair_row(&self, anchor: &AnchorKey, partner: &AnchorKey) -> Result<Option<CouplingRow>> {
         let conn = self.conn.lock().expect("coupling mutex poisoned");
         let row = conn
             .query_row(
@@ -353,7 +347,9 @@ impl CouplingStore {
         let conn = self.conn.lock().expect("coupling mutex poisoned");
         let mut stmt = conn.prepare("SELECT commit_oid, commit_ts FROM coupling_active_commits")?;
         let rows = stmt
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows.into_iter().collect())
     }
@@ -444,10 +440,7 @@ impl CouplingStore {
         tx.execute(
             "INSERT INTO coupling_meta (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![
-                super::schema::META_COLD_BUILT_AT,
-                reference_ts.to_string()
-            ],
+            params![super::schema::META_COLD_BUILT_AT, reference_ts.to_string()],
         )?;
         tx.commit()?;
         Ok(())
@@ -575,8 +568,8 @@ impl CouplingStore {
                     edge.base_weight,
                     edge.commit_ts,
                 ])?;
-                let contribution =
-                    edge.base_weight * decay_factor(new_reference_ts - edge.commit_ts, half_life_secs);
+                let contribution = edge.base_weight
+                    * decay_factor(new_reference_ts - edge.commit_ts, half_life_secs);
                 agg_upsert.execute(params![
                     edge.anchor_key,
                     edge.partner_key,
@@ -637,7 +630,6 @@ impl CouplingStore {
         tx.commit()?;
         Ok(())
     }
-
 }
 
 #[cfg(test)]
@@ -846,7 +838,12 @@ mod tests {
             .bulk_upsert(&[sample_row("a.rs", "b.rs", 1, 1.0, 0)])
             .unwrap();
         store.replace_all_rows(&[]).unwrap();
-        assert!(store.query(&AnchorKey::file("a.rs"), 10).unwrap().is_empty());
+        assert!(
+            store
+                .query(&AnchorKey::file("a.rs"), 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -858,10 +855,7 @@ mod tests {
             .unwrap();
         store.replace_all_rows(&[]).unwrap();
         // Meta survives.
-        assert_eq!(
-            store.last_head().unwrap().as_deref(),
-            Some("head-oid-abc")
-        );
+        assert_eq!(store.last_head().unwrap().as_deref(), Some("head-oid-abc"));
         assert_eq!(store.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
     }
 

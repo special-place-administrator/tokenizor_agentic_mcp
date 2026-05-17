@@ -145,11 +145,8 @@ mod tests {
             } else {
                 socket2::Domain::IPV6
             };
-            let socket = socket2::Socket::new(
-                domain,
-                socket2::Type::STREAM,
-                Some(socket2::Protocol::TCP),
-            )?;
+            let socket =
+                socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
             socket.set_reuse_address(true)?;
             socket.bind(&addr.into())?;
             socket.listen(16)?;
@@ -165,8 +162,9 @@ mod tests {
         // Immediate rebind on the same port via SO_REUSEADDR must succeed.
         // Without SO_REUSEADDR on Windows, this is the failure mode that
         // surfaces under rapid spawn_sidecar churn.
-        let explicit: std::net::SocketAddr =
-            format!("127.0.0.1:{bound_port}").parse().expect("parse explicit");
+        let explicit: std::net::SocketAddr = format!("127.0.0.1:{bound_port}")
+            .parse()
+            .expect("parse explicit");
         let second = bind_reuse(explicit).expect("rebind on freed port");
         assert_eq!(
             second.local_addr().expect("local_addr").port(),

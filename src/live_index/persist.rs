@@ -115,10 +115,21 @@ fn write_snapshot(snapshot: IndexSnapshot, project_root: &Path) -> anyhow::Resul
     let final_path = dir.join(INDEX_FILENAME);
     let tmp_path = dir.join(format!("{INDEX_FILENAME}.tmp"));
 
-    std::fs::write(&tmp_path, &bytes)
-        .map_err(|e| anyhow::anyhow!("writing index snapshot tmp at {}: {}", tmp_path.display(), e))?;
-    std::fs::rename(&tmp_path, &final_path)
-        .map_err(|e| anyhow::anyhow!("renaming index snapshot {} -> {}: {}", tmp_path.display(), final_path.display(), e))?;
+    std::fs::write(&tmp_path, &bytes).map_err(|e| {
+        anyhow::anyhow!(
+            "writing index snapshot tmp at {}: {}",
+            tmp_path.display(),
+            e
+        )
+    })?;
+    std::fs::rename(&tmp_path, &final_path).map_err(|e| {
+        anyhow::anyhow!(
+            "renaming index snapshot {} -> {}: {}",
+            tmp_path.display(),
+            final_path.display(),
+            e
+        )
+    })?;
 
     info!(
         bytes = bytes.len(),
@@ -391,8 +402,8 @@ pub fn init_frecency_store(project_root: &Path) {
 /// Split so unit tests can drive the work against a known db path + git repo
 /// without process-wide env mutation.
 fn run_frecency_init(db_path: &Path, repo_root: &Path) -> Result<(), String> {
-    let store = crate::live_index::frecency::FrecencyStore::open(db_path)
-        .map_err(|e| e.to_string())?;
+    let store =
+        crate::live_index::frecency::FrecencyStore::open(db_path).map_err(|e| e.to_string())?;
     store.apply_head_reset_policy(repo_root)
 }
 
@@ -1230,7 +1241,10 @@ mod tests {
                 "parse_diagnostic for {bp}"
             );
             assert_eq!(bf.alias_map, af.alias_map, "alias_map for {bp}");
-            assert_eq!(bf.classification, af.classification, "classification for {bp}");
+            assert_eq!(
+                bf.classification, af.classification,
+                "classification for {bp}"
+            );
         }
 
         // Per-file: get_file + symbols_for_file
