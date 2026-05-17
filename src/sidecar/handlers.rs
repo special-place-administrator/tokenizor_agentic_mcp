@@ -431,7 +431,7 @@ fn outline_text(
     if include_section("outline") {
         let symbol_cap = params
             .max_tokens
-            .map(|tokens| ((tokens as usize).saturating_div(12)).max(25).min(500));
+            .map(|tokens| ((tokens as usize).saturating_div(12)).clamp(25, 500));
         let symbols_to_render = symbol_cap
             .map(|cap| cap.min(file.symbols.len()))
             .unwrap_or(file.symbols.len());
