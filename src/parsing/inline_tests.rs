@@ -1,4 +1,4 @@
-// TODO(SRTK04): Add inline_test! cases for the remaining language extractors in follow-up goals.
+// TODO: Add inline_test! cases for the remaining language extractors tracked in docs/live-code-backlog.md.
 macro_rules! inline_test {
     (
         $name:ident,

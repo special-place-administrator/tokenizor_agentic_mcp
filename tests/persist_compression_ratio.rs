@@ -1,7 +1,7 @@
 //! Regression coverage for the `get_file_context` output-size contract.
 //!
-//! SRTK02 pins a representative, stable corpus so context-ratio regressions do
-//! not hide behind whichever files happen to exist in the working repository.
+//! This pins a representative, stable corpus so context-ratio regressions do not
+//! hide behind whichever files happen to exist in the working repository.
 
 use std::fs;
 use std::path::{Path, PathBuf};

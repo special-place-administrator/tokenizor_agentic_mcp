@@ -44,7 +44,7 @@
     }
   ],
   "audit": {
-    "created_for": "SRTK02",
+    "created_for": "compression-ratio-regression",
     "threshold": "context bytes must be less than or equal to half of raw bytes, measured with the same byte-counting method for raw fixture contents and rendered get_file_context output",
     "small_file_policy": "files below one hundred bytes require a named exclusion reason because fixed response envelopes, source authority lines, parse-state labels, and next-step hints can be larger than the source itself"
   },

@@ -46,11 +46,9 @@ No source code was changed.
 
 ## 2026-05-19 Surgical Correction
 
-- [x] Inspect revised `symforge-rtk-surgical` package copied from the external agent.
-- [x] Verify root `RTK_SURGICAL_INDEX.md` duplicates `.agent/goals/symforge-rtk-surgical/INDEX.md`.
-- [x] Verify root `SYMF_RTK_CODE_ANALYSIS.md` duplicates `docs/plans/2026-05-19-symforge-rtk-surgical-code-analysis.md`.
-- [x] Confirm the new package removes broad default implementation work for analytics, integrity sidecars, frecency rewrites, parser pooling, worktree env caching, config registry cleanup, and regex/glob/Aho-Corasick global caches.
+- [x] Inspect revised surgical RTK package copied from the external agent.
+- [x] Confirm the package removed broad default implementation work for analytics, integrity sidecars, frecency rewrites, parser pooling, worktree env caching, config registry cleanup, and regex/glob/Aho-Corasick global caches.
 - [x] Record correction lesson in `tasks/lessons.md`.
-- [x] Stage canonical surgical package and analysis report.
 - [x] Remove superseded broad `.agent/goals/rtk-symforge-integration/` package from git.
-- [x] Verify staged diff and commit the correction.
+- [x] Consolidate remaining useful work into `docs/live-code-backlog.md`.
+- [x] Remove stale surgical RTK goal files after implementation/backlog consolidation.
