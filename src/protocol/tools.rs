@@ -361,7 +361,7 @@ where
 }
 
 use crate::domain::index::{AdmissionTier, BINARY_SNIFF_BYTES, SkipReason};
-use crate::domain::{LanguageId, ReferenceKind};
+use crate::domain::{FileClassification, LanguageId, ReferenceKind};
 use crate::live_index::qualified_usages::{self, QualifiedUsage};
 use crate::live_index::{
     FindReferencesView, IndexedFile, ReferenceContextLineView, ReferenceFileView, ReferenceHitView,
@@ -3030,6 +3030,289 @@ where
     anchored_search_evidence(anchors, "paths")
 }
 
+fn normalize_untracked_search_path(raw: &str) -> String {
+    let mut normalized = raw.trim().replace('\\', "/");
+    while normalized.starts_with("./") {
+        normalized = normalized[2..].to_string();
+    }
+    normalized.trim_matches('/').to_string()
+}
+
+fn untracked_path_has_component(path: &str, component: &str) -> bool {
+    path.split('/')
+        .any(|part| part.eq_ignore_ascii_case(component))
+}
+
+fn language_for_path(path: &str) -> Option<LanguageId> {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .and_then(|extension| LanguageId::from_extension(&extension))
+}
+
+fn untracked_common_path_filters_allow(
+    path: &str,
+    include_vendor: bool,
+    include_personal_tooling: bool,
+) -> bool {
+    (include_vendor || !crate::live_index::query::is_vendor_path(path))
+        && (include_personal_tooling || !crate::live_index::query::is_personal_tooling_path(path))
+}
+
+fn untracked_paths_not_in_index(server: &SymForgeServer) -> Vec<String> {
+    let Some(repo_root) = server.effective_repo_root_for_git_tools() else {
+        return Vec::new();
+    };
+    let Ok(repo) = crate::git::GitRepo::open(&repo_root) else {
+        return Vec::new();
+    };
+    let Ok(mut paths) = repo.untracked_paths() else {
+        return Vec::new();
+    };
+
+    {
+        let guard = server.index.read();
+        paths.retain(|path| guard.get_file(path).is_none());
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn untracked_file_diagnostic(paths: &[String]) -> Option<String> {
+    let first = paths.first()?;
+    Some(format!(
+        "untracked file may match: {} untracked path(s) are not indexed. To index the first match, call analyze_file_impact(\"{}\", new_file=true).",
+        paths.len(),
+        first
+    ))
+}
+
+fn append_untracked_file_diagnostic(output: &mut String, paths: &[String]) {
+    if let Some(diagnostic) = untracked_file_diagnostic(paths) {
+        output.push_str("\n\n");
+        output.push_str(&diagnostic);
+    }
+}
+
+fn untracked_path_matches_search_files_query(path: &str, query: &str) -> bool {
+    let normalized_query = normalize_untracked_search_path(query);
+    if normalized_query.is_empty() {
+        return false;
+    }
+
+    let is_glob = normalized_query.contains('*')
+        || normalized_query.contains('?')
+        || normalized_query.contains('[');
+    if is_glob
+        && let Ok(glob) = globset::GlobBuilder::new(&normalized_query)
+            .literal_separator(false)
+            .build()
+    {
+        return glob.compile_matcher().is_match(path);
+    }
+
+    let path_lower = path.to_ascii_lowercase();
+    let normalized_query_lower = normalized_query.to_ascii_lowercase();
+    let has_path_context = normalized_query.contains('/');
+    if path_lower == normalized_query_lower
+        || (has_path_context && path_lower.ends_with(&normalized_query_lower))
+    {
+        return true;
+    }
+
+    let tokens: Vec<String> = normalized_query
+        .split(|ch: char| ch == '/' || ch.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let Some(basename_token) = tokens.last() else {
+        return false;
+    };
+    let component_tokens = if tokens.len() > 1 {
+        &tokens[..tokens.len() - 1]
+    } else {
+        &[][..]
+    };
+    let file_name = Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    if file_name.eq_ignore_ascii_case(basename_token)
+        && component_tokens
+            .iter()
+            .all(|component| untracked_path_has_component(path, component))
+    {
+        return true;
+    }
+
+    if basename_token.len() >= 3 {
+        let file_stem = Path::new(path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("");
+        if file_stem.to_ascii_lowercase().starts_with(basename_token) {
+            return true;
+        }
+    }
+
+    tokens.iter().all(|token| path_lower.contains(token))
+}
+
+fn matching_untracked_paths_for_search_files(
+    server: &SymForgeServer,
+    query: &str,
+    include_vendor: bool,
+    include_personal_tooling: bool,
+) -> Vec<String> {
+    untracked_paths_not_in_index(server)
+        .into_iter()
+        .filter(|path| {
+            untracked_common_path_filters_allow(path, include_vendor, include_personal_tooling)
+                && untracked_path_matches_search_files_query(path, query)
+        })
+        .collect()
+}
+
+fn untracked_text_path_allowed(path: &str, options: &search::TextSearchOptions) -> bool {
+    let classification = FileClassification::for_code_path(path);
+    options.path_scope.matches(path)
+        && options.search_scope.allows(&classification)
+        && options.noise_policy.allows(&classification)
+        && (options.noise_policy.include_vendor || !crate::live_index::query::is_vendor_path(path))
+        && (options.include_personal_tooling
+            || !crate::live_index::query::is_personal_tooling_path(path))
+        && options
+            .language_filter
+            .as_ref()
+            .is_none_or(|language| language_for_path(path).as_ref() == Some(language))
+        && untracked_text_globs_allow(path, options)
+}
+
+fn untracked_text_globs_allow(path: &str, options: &search::TextSearchOptions) -> bool {
+    let include_matches = match options.glob.as_deref() {
+        Some(pattern) => globset::GlobBuilder::new(pattern)
+            .literal_separator(false)
+            .build()
+            .map(|glob| glob.compile_matcher().is_match(path))
+            .unwrap_or(false),
+        None => true,
+    };
+    let exclude_matches = match options.exclude_glob.as_deref() {
+        Some(pattern) => globset::GlobBuilder::new(pattern)
+            .literal_separator(false)
+            .build()
+            .map(|glob| glob.compile_matcher().is_match(path))
+            .unwrap_or(false),
+        None => false,
+    };
+    include_matches && !exclude_matches
+}
+
+fn whole_word_contains(haystack: &str, needle: &str) -> bool {
+    haystack.match_indices(needle).any(|(idx, matched)| {
+        let before_is_word = haystack[..idx]
+            .chars()
+            .next_back()
+            .is_some_and(|ch| ch == '_' || ch.is_alphanumeric());
+        let after_idx = idx + matched.len();
+        let after_is_word = haystack[after_idx..]
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_alphanumeric());
+        !before_is_word && !after_is_word
+    })
+}
+
+fn untracked_text_matches(
+    content: &str,
+    query: Option<&str>,
+    terms: Option<&[String]>,
+    is_regex: bool,
+    options: &search::TextSearchOptions,
+) -> bool {
+    let case_sensitive = options.case_sensitive.unwrap_or(is_regex);
+    if is_regex {
+        let Some(pattern) = query.map(str::trim).filter(|pattern| !pattern.is_empty()) else {
+            return false;
+        };
+        return regex::RegexBuilder::new(pattern)
+            .case_insensitive(!case_sensitive)
+            .build()
+            .map(|regex| regex.is_match(content))
+            .unwrap_or(false);
+    }
+
+    let normalized_terms: Vec<&str> = match terms {
+        Some(raw_terms) if !raw_terms.is_empty() => raw_terms
+            .iter()
+            .map(|term| term.trim())
+            .filter(|term| !term.is_empty())
+            .collect(),
+        _ => query
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(|text| vec![text])
+            .unwrap_or_default(),
+    };
+    if normalized_terms.is_empty() {
+        return false;
+    }
+
+    if case_sensitive {
+        if options.whole_word {
+            normalized_terms
+                .iter()
+                .any(|term| whole_word_contains(content, term))
+        } else {
+            normalized_terms.iter().any(|term| content.contains(term))
+        }
+    } else {
+        let lowered = content.to_lowercase();
+        normalized_terms.iter().any(|term| {
+            let lowered_term = term.to_lowercase();
+            if options.whole_word {
+                whole_word_contains(&lowered, &lowered_term)
+            } else {
+                lowered.contains(&lowered_term)
+            }
+        })
+    }
+}
+
+fn matching_untracked_paths_for_search_text(
+    server: &SymForgeServer,
+    query: Option<&str>,
+    terms: Option<&[String]>,
+    structural: bool,
+    is_regex: bool,
+    options: &search::TextSearchOptions,
+) -> Vec<String> {
+    if structural {
+        return Vec::new();
+    }
+    let Some(repo_root) = server.effective_repo_root_for_git_tools() else {
+        return Vec::new();
+    };
+    let Ok(repo) = crate::git::GitRepo::open(&repo_root) else {
+        return Vec::new();
+    };
+
+    untracked_paths_not_in_index(server)
+        .into_iter()
+        .filter(|path| untracked_text_path_allowed(path, options))
+        .filter(|path| {
+            repo.file_from_workdir(path)
+                .ok()
+                .flatten()
+                .is_some_and(|content| {
+                    untracked_text_matches(&content, query, terms, is_regex, options)
+                })
+        })
+        .collect()
+}
+
 struct AdmissionDegradationView {
     tier: AdmissionTier,
     path: String,
@@ -3647,6 +3930,7 @@ fn apply_path_predicate_filter(
 fn render_search_text_output(
     server: &SymForgeServer,
     result: Result<search::TextSearchResult, search::TextSearchError>,
+    query: Option<&str>,
     structural: bool,
     group_by: Option<&str>,
     terms: Option<&[String]>,
@@ -3687,6 +3971,14 @@ fn render_search_text_output(
         }
         _ => None,
     };
+    let matching_untracked_paths = match &result {
+        Ok(result) if result.files.is_empty() && result.suppressed_by_noise == 0 => {
+            matching_untracked_paths_for_search_text(
+                server, query, terms, structural, is_regex, options,
+            )
+        }
+        _ => Vec::new(),
+    };
     let confidence = if auto_corrected_regex {
         0.75f32
     } else if is_regex && auto_detected_regex {
@@ -3699,10 +3991,12 @@ fn render_search_text_output(
         0.95
     };
     let output = format::search_text_result_view(result, group_by, terms, Some(confidence));
-    match envelope {
+    let mut rendered = match envelope {
         Some(envelope) => format!("{envelope}\n\n{output}"),
         None => output,
-    }
+    };
+    append_untracked_file_diagnostic(&mut rendered, &matching_untracked_paths);
+    rendered
 }
 
 fn resolve_text_search_enclosing_symbols(
@@ -5006,6 +5300,7 @@ impl SymForgeServer {
             let output = render_search_text_output(
                 self,
                 result,
+                Some(pattern),
                 true,
                 params.0.group_by.as_deref(),
                 params.0.terms.as_deref(),
@@ -5148,6 +5443,7 @@ impl SymForgeServer {
                     let mut output = render_search_text_output(
                         self,
                         retry_result,
+                        Some(fixed.as_str()),
                         false,
                         params.0.group_by.as_deref(),
                         params.0.terms.as_deref(),
@@ -5177,6 +5473,7 @@ impl SymForgeServer {
         let output = render_search_text_output(
             self,
             result,
+            params.0.query.as_deref(),
             false,
             params.0.group_by.as_deref(),
             params.0.terms.as_deref(),
@@ -5434,6 +5731,15 @@ impl SymForgeServer {
             ) {
                 result.push_str("\n\n");
                 result.push_str(&note);
+            }
+            if matches!(view, SearchFilesResolveView::NotFound { .. }) {
+                let matching_untracked_paths = matching_untracked_paths_for_search_files(
+                    self,
+                    &params.0.query,
+                    include_vendor,
+                    include_personal_tooling,
+                );
+                append_untracked_file_diagnostic(&mut result, &matching_untracked_paths);
             }
             let result = format::enforce_token_budget(result, params.0.max_tokens);
             self.session_context.record_summary_output(
@@ -5844,6 +6150,15 @@ impl SymForgeServer {
         ) {
             result.push_str("\n\n");
             result.push_str(&note);
+        }
+        if matches!(view, SearchFilesView::NotFound { .. }) {
+            let matching_untracked_paths = matching_untracked_paths_for_search_files(
+                self,
+                &params.0.query,
+                include_vendor,
+                include_personal_tooling,
+            );
+            append_untracked_file_diagnostic(&mut result, &matching_untracked_paths);
         }
         self.session_context.record_summary_output(
             "search_files",
@@ -11666,6 +11981,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_search_text_empty_result_reports_matching_untracked_file() {
+        let dir = init_git_repo();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "fn tracked() {}\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-m", "tracked"]);
+        fs::write(
+            dir.path().join("src/new_text.rs"),
+            "fn new_text() { let _ = \"unique_untracked_needle\"; }\n",
+        )
+        .unwrap();
+
+        let (key, file) = make_file("src/lib.rs", b"fn tracked() {}\n", vec![]);
+        let server = make_server_with_root(
+            make_live_index_ready(vec![(key, file)]),
+            Some(dir.path().into()),
+        );
+
+        let result = server
+            .search_text(Parameters(super::SearchTextInput {
+                query: Some("unique_untracked_needle".to_string()),
+                terms: None,
+                regex: None,
+                path_prefix: None,
+                language: None,
+                limit: None,
+                max_per_file: None,
+                include_generated: None,
+                include_tests: None,
+                glob: None,
+                exclude_glob: None,
+                context: None,
+                case_sensitive: None,
+                whole_word: None,
+                group_by: None,
+                follow_refs: None,
+                follow_refs_limit: None,
+                ranked: None,
+                estimate: None,
+                max_tokens: None,
+                structural: None,
+                include_vendor: None,
+                include_personal_tooling: None,
+            }))
+            .await;
+
+        assert!(
+            result.contains("No matches for 'unique_untracked_needle'"),
+            "got: {result}"
+        );
+        assert!(
+            result.contains("untracked file may match: 1 untracked path(s) are not indexed"),
+            "missing diagnostic count: {result}"
+        );
+        assert!(
+            result.contains("analyze_file_impact(\"src/new_text.rs\", new_file=true)"),
+            "missing recovery call: {result}"
+        );
+        assert!(server.index.read().get_file("src/new_text.rs").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_search_text_non_empty_result_omits_untracked_diagnostic() {
+        let dir = init_git_repo();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "fn tracked() {}\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-m", "tracked"]);
+        fs::write(
+            dir.path().join("src/new_text.rs"),
+            "fn new_text() { let _ = \"shared_needle\"; }\n",
+        )
+        .unwrap();
+
+        let (key, file) = make_file(
+            "src/lib.rs",
+            b"fn tracked() { let _ = \"shared_needle\"; }\n",
+            vec![],
+        );
+        let server = make_server_with_root(
+            make_live_index_ready(vec![(key, file)]),
+            Some(dir.path().into()),
+        );
+
+        let result = server
+            .search_text(Parameters(super::SearchTextInput {
+                query: Some("shared_needle".to_string()),
+                terms: None,
+                regex: None,
+                path_prefix: None,
+                language: None,
+                limit: None,
+                max_per_file: None,
+                include_generated: None,
+                include_tests: None,
+                glob: None,
+                exclude_glob: None,
+                context: None,
+                case_sensitive: None,
+                whole_word: None,
+                group_by: None,
+                follow_refs: None,
+                follow_refs_limit: None,
+                ranked: None,
+                estimate: None,
+                max_tokens: None,
+                structural: None,
+                include_vendor: None,
+                include_personal_tooling: None,
+            }))
+            .await;
+
+        assert!(result.contains("src/lib.rs"), "got: {result}");
+        assert!(
+            !result.contains("untracked file may match"),
+            "diagnostic must be zero-hit only: {result}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_search_text_structural_envelope_reports_ast_grep_match_type() {
         let (key, file) = make_file("src/lib.rs", b"fn find_user() {}", vec![]);
         let server = make_server(make_live_index_ready(vec![(key, file)]));
@@ -12325,6 +12760,100 @@ mod tests {
         assert!(
             result.contains("filters: vendor filtered; personal tooling filtered"),
             "not-found search_files output should disclose active filters: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_files_empty_result_reports_matching_untracked_file() {
+        let dir = init_git_repo();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "fn tracked() {}\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-m", "tracked"]);
+        fs::write(
+            dir.path().join("src/new_service.rs"),
+            "fn new_service() {}\n",
+        )
+        .unwrap();
+
+        let (key, file) = make_file("src/lib.rs", b"fn tracked() {}\n", vec![]);
+        let server = make_server_with_root(
+            make_live_index_ready(vec![(key, file)]),
+            Some(dir.path().into()),
+        );
+
+        let result = server
+            .search_files(Parameters(super::SearchFilesInput {
+                query: "src/new_service.rs".to_string(),
+                limit: None,
+                current_file: None,
+                changed_with: None,
+                resolve: None,
+                estimate: None,
+                max_tokens: None,
+                debug_ranking: None,
+                rank_by: None,
+                anchor_path: None,
+                include_vendor: None,
+                include_personal_tooling: None,
+            }))
+            .await;
+
+        assert!(
+            result.contains("No indexed source files matching 'src/new_service.rs'"),
+            "got: {result}"
+        );
+        assert!(
+            result.contains("untracked file may match: 1 untracked path(s) are not indexed"),
+            "missing diagnostic count: {result}"
+        );
+        assert!(
+            result.contains("analyze_file_impact(\"src/new_service.rs\", new_file=true)"),
+            "missing recovery call: {result}"
+        );
+        assert!(server.index.read().get_file("src/new_service.rs").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_search_files_non_empty_result_omits_untracked_diagnostic() {
+        let dir = init_git_repo();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/service.rs"), "fn service() {}\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-m", "tracked"]);
+        fs::write(
+            dir.path().join("src/new_service.rs"),
+            "fn new_service() {}\n",
+        )
+        .unwrap();
+
+        let (key, file) = make_file("src/service.rs", b"fn service() {}\n", vec![]);
+        let server = make_server_with_root(
+            make_live_index_ready(vec![(key, file)]),
+            Some(dir.path().into()),
+        );
+
+        let result = server
+            .search_files(Parameters(super::SearchFilesInput {
+                query: "service.rs".to_string(),
+                limit: None,
+                current_file: None,
+                changed_with: None,
+                resolve: None,
+                estimate: None,
+                max_tokens: None,
+                debug_ranking: None,
+                rank_by: None,
+                anchor_path: None,
+                include_vendor: None,
+                include_personal_tooling: None,
+            }))
+            .await;
+
+        assert!(result.contains("src/service.rs"), "got: {result}");
+        assert!(
+            !result.contains("untracked file may match"),
+            "diagnostic must be zero-hit only: {result}"
         );
     }
 

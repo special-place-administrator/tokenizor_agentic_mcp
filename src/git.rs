@@ -56,6 +56,32 @@ impl GitRepo {
         Ok(paths)
     }
 
+    /// Return untracked working-tree paths only, excluding ignored and staged files.
+    pub fn untracked_paths(&self) -> Result<Vec<String>, String> {
+        let mut opts = git2::StatusOptions::new();
+        opts.include_untracked(true)
+            .include_ignored(false)
+            .recurse_untracked_dirs(true);
+
+        let statuses = self
+            .repo
+            .statuses(Some(&mut opts))
+            .map_err(|e| format!("git status failed: {e}"))?;
+
+        let mut paths: Vec<String> = statuses
+            .iter()
+            .filter(|entry| {
+                let status = entry.status();
+                status.is_wt_new() && !status.is_index_new() && !status.is_ignored()
+            })
+            .filter_map(|entry| entry.path().map(|p| p.replace('\\', "/")))
+            .collect();
+        paths.sort();
+        paths.dedup();
+
+        Ok(paths)
+    }
+
     /// Return file paths changed between two refs (using merge-base for 3-dot semantics).
     ///
     /// Replaces: `git diff --name-only base...target`
@@ -471,6 +497,23 @@ mod tests {
         fs::write(dir.path().join("new_file.rs"), "fn new() {}").unwrap();
         let paths = repo.uncommitted_paths().unwrap();
         assert!(paths.contains(&"new_file.rs".to_string()));
+    }
+
+    #[test]
+    fn test_untracked_paths_returns_only_worktree_new_files() {
+        let (dir, repo) = make_test_repo();
+        fs::write(dir.path().join("file1.rs"), "fn changed() {}").unwrap();
+        fs::write(dir.path().join("new_file.rs"), "fn new() {}").unwrap();
+        fs::write(dir.path().join("staged_new.rs"), "fn staged() {}").unwrap();
+        Command::new("git")
+            .args(["add", "staged_new.rs"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git add staged file");
+
+        let paths = repo.untracked_paths().unwrap();
+
+        assert_eq!(paths, vec!["new_file.rs".to_string()]);
     }
 
     #[test]
