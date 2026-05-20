@@ -17,9 +17,9 @@
   - `cargo test --all-targets -- --test-threads=1`
   - `rg "result_status|ResultStatus|outcome_class" src/protocol src/live_index tests`
 - [x] Run default full verification if task-specific verification passes and time permits.
-- [ ] Commit verified implementation work.
-- [ ] Update SFB10 frontmatter to `Completed` with the verified work commit hash.
-- [ ] Commit the SFB10 goal-status update separately.
+- [x] Commit verified implementation work.
+- [x] Update SFB10 frontmatter to `Completed` with the verified work commit hash.
+- [x] Commit the SFB10 goal-status update separately.
 
 ## Evidence Log
 
@@ -62,6 +62,8 @@
   - `cargo check`: exit 0.
   - `cargo test --all-targets -- --test-threads=1`: exit 0; full all-targets suite passed again.
   - `cargo build --release`: exit 0; finished release profile successfully.
+- Verified implementation commit: `ee2207eca5a20f6c9a5241dc36aa58c2073fc3e7`.
+- Goal frontmatter completed at `2026-05-20T15:26:17.1425475+02:00` with that implementation commit hash.
 
 ## Review
 
