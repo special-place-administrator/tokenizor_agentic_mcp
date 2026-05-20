@@ -4242,6 +4242,121 @@ pub struct ExploreResultViewInput<'a> {
     pub depth: u32,
 }
 
+const EXPLORE_STRONG_CONTEXT_SCORE: f32 = 0.80;
+
+fn explore_symbol_score(symbol_scores: &[f32], index: usize) -> Option<f32> {
+    let score = *symbol_scores.get(index)?;
+    score.is_finite().then(|| score.clamp(0.0, 1.0))
+}
+
+fn should_show_explore_symbol(name: &str, score: Option<f32>) -> bool {
+    !is_low_signal_explore_symbol_name(name)
+        || score.unwrap_or_default() >= EXPLORE_STRONG_CONTEXT_SCORE
+}
+
+fn visible_explore_symbol_count(
+    symbol_hits: &[(String, String, String)],
+    symbol_scores: &[f32],
+) -> usize {
+    symbol_hits
+        .iter()
+        .enumerate()
+        .filter(|(index, (name, _, _))| {
+            should_show_explore_symbol(name, explore_symbol_score(symbol_scores, *index))
+        })
+        .count()
+}
+
+fn is_low_signal_explore_symbol_name(name: &str) -> bool {
+    const LOW_SIGNAL_SYMBOL_NAMES: &[&str] = &[
+        "as_mut",
+        "as_ref",
+        "bool",
+        "build",
+        "clone",
+        "collect",
+        "create",
+        "default",
+        "err",
+        "expect",
+        "from",
+        "get",
+        "handle",
+        "i32",
+        "i64",
+        "init",
+        "into",
+        "into_iter",
+        "iter",
+        "iter_mut",
+        "len",
+        "main",
+        "map",
+        "new",
+        "none",
+        "ok",
+        "option",
+        "process",
+        "result",
+        "run",
+        "set",
+        "some",
+        "str",
+        "string",
+        "to_owned",
+        "to_string",
+        "u32",
+        "u64",
+        "unwrap",
+        "update",
+        "usize",
+        "vec",
+    ];
+
+    name.len() <= 2 || LOW_SIGNAL_SYMBOL_NAMES.contains(&name.to_ascii_lowercase().as_str())
+}
+
+fn explore_symbol_score_suffix(score: Option<f32>) -> String {
+    let reason = explore_symbol_reason(score);
+    match score {
+        Some(score) => format!("  [{score:.2}; {reason}]"),
+        None => format!("  [{reason}]"),
+    }
+}
+
+fn explore_symbol_reason(score: Option<f32>) -> &'static str {
+    match score {
+        Some(score) if score >= EXPLORE_STRONG_CONTEXT_SCORE => "reason: strong match",
+        Some(score) if score >= 0.45 => "reason: contextual match",
+        Some(_) => "reason: query match",
+        None => "reason: matched query",
+    }
+}
+
+fn is_low_signal_explore_text_hit(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if trimmed.starts_with("# TODO")
+        || trimmed.starts_with("# FIXME")
+        || trimmed.starts_with("# NOTE")
+        || trimmed.starts_with("# HACK")
+    {
+        return false;
+    }
+    trimmed.starts_with("///")
+        || trimmed.starts_with("//!")
+        || trimmed.starts_with("/**")
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with("//")
+        || trimmed.starts_with("* ")
+        || trimmed.starts_with("*/")
+        || trimmed.starts_with("# ")
+        || trimmed == "#"
+        || trimmed.starts_with("--")
+}
+
 pub fn explore_result_view(input: ExploreResultViewInput<'_>) -> String {
     let ExploreResultViewInput {
         label,
@@ -4285,46 +4400,54 @@ pub fn explore_result_view(input: ExploreResultViewInput<'_>) -> String {
         lines.push(String::new());
     }
 
-    if depth >= 2 && !enriched_symbols.is_empty() {
-        // Depth 2+: show enriched symbols with signatures
-        lines.push(format!("Symbols ({} found):", symbol_hits.len()));
-        for (i, (name, kind, path, signature, dependents)) in enriched_symbols.iter().enumerate() {
-            let score_suffix = symbol_scores
-                .get(i)
-                .map(|s| format!("  [{:.2}]", s))
-                .unwrap_or_default();
-            if let Some(sig) = signature {
-                // Show first line of signature only to keep it compact
-                let first_line = sig.lines().next().unwrap_or(sig);
-                lines.push(format!("  {first_line}  [{kind}, {path}]{score_suffix}"));
-            } else {
-                lines.push(format!("  {kind} {name}  {path}{score_suffix}"));
-            }
-            if !dependents.is_empty() {
-                lines.push(format!("    <- used by: {}", dependents.join(", ")));
-            }
-        }
-        // Show remaining non-enriched symbols in compact form
-        if symbol_hits.len() > enriched_symbols.len() {
-            for (i, (name, kind, path)) in symbol_hits[enriched_symbols.len()..].iter().enumerate()
+    let visible_symbol_count = visible_explore_symbol_count(symbol_hits, symbol_scores);
+    if visible_symbol_count > 0 {
+        lines.push(format!("Symbols ({visible_symbol_count} found):"));
+        if depth >= 2 && !enriched_symbols.is_empty() {
+            // Depth 2+: show enriched symbols with signatures.
+            for (i, (name, kind, path, signature, dependents)) in
+                enriched_symbols.iter().enumerate()
             {
-                let score_suffix = symbol_scores
-                    .get(enriched_symbols.len() + i)
-                    .map(|s| format!("  [{:.2}]", s))
-                    .unwrap_or_default();
+                let score = explore_symbol_score(symbol_scores, i);
+                if !should_show_explore_symbol(name, score) {
+                    continue;
+                }
+                let score_suffix = explore_symbol_score_suffix(score);
+                if let Some(sig) = signature {
+                    // Show first line of signature only to keep it compact.
+                    let first_line = sig.lines().next().unwrap_or(sig);
+                    lines.push(format!("  {first_line}  [{kind}, {path}]{score_suffix}"));
+                } else {
+                    lines.push(format!("  {kind} {name}  {path}{score_suffix}"));
+                }
+                if !dependents.is_empty() {
+                    lines.push(format!("    <- used by: {}", dependents.join(", ")));
+                }
+            }
+            // Show remaining non-enriched symbols in compact form.
+            if symbol_hits.len() > enriched_symbols.len() {
+                for (i, (name, kind, path)) in
+                    symbol_hits[enriched_symbols.len()..].iter().enumerate()
+                {
+                    let original_index = enriched_symbols.len() + i;
+                    let score = explore_symbol_score(symbol_scores, original_index);
+                    if !should_show_explore_symbol(name, score) {
+                        continue;
+                    }
+                    let score_suffix = explore_symbol_score_suffix(score);
+                    lines.push(format!("  {kind} {name}  {path}{score_suffix}"));
+                }
+            }
+        } else {
+            // Depth 1: compact symbol list.
+            for (i, (name, kind, path)) in symbol_hits.iter().enumerate() {
+                let score = explore_symbol_score(symbol_scores, i);
+                if !should_show_explore_symbol(name, score) {
+                    continue;
+                }
+                let score_suffix = explore_symbol_score_suffix(score);
                 lines.push(format!("  {kind} {name}  {path}{score_suffix}"));
             }
-        }
-        lines.push(String::new());
-    } else if !symbol_hits.is_empty() {
-        // Depth 1: original compact format
-        lines.push(format!("Symbols ({} found):", symbol_hits.len()));
-        for (i, (name, kind, path)) in symbol_hits.iter().enumerate() {
-            let score_suffix = symbol_scores
-                .get(i)
-                .map(|s| format!("  [{:.2}]", s))
-                .unwrap_or_default();
-            lines.push(format!("  {kind} {name}  {path}{score_suffix}"));
         }
         lines.push(String::new());
     }
@@ -4356,10 +4479,17 @@ pub fn explore_result_view(input: ExploreResultViewInput<'_>) -> String {
         lines.push(String::new());
     }
 
-    if !text_hits.is_empty() {
-        lines.push(format!("Code patterns ({} found):", text_hits.len()));
+    let visible_text_hits: Vec<_> = text_hits
+        .iter()
+        .filter(|(_, line, _)| !is_low_signal_explore_text_hit(line))
+        .collect();
+    if !visible_text_hits.is_empty() {
+        lines.push(format!(
+            "Code patterns ({} found):",
+            visible_text_hits.len()
+        ));
         let mut last_path: Option<&str> = None;
-        for (path, line, line_number) in text_hits {
+        for (path, line, line_number) in &visible_text_hits {
             if last_path != Some(path.as_str()) {
                 lines.push(format!("  {path}"));
                 last_path = Some(path.as_str());
@@ -4376,7 +4506,7 @@ pub fn explore_result_view(input: ExploreResultViewInput<'_>) -> String {
         }
     }
 
-    if symbol_hits.is_empty() && text_hits.is_empty() {
+    if visible_symbol_count == 0 && visible_text_hits.is_empty() {
         lines.push("No matches found.".to_string());
     }
 
@@ -4747,6 +4877,113 @@ pub(crate) fn extract_declaration_name(line: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod sfb15_tests {
+    use super::*;
+
+    #[test]
+    fn explore_result_view_filters_weak_trivial_symbols_and_doc_only_patterns() {
+        let symbol_hits = vec![
+            (
+                "new".to_string(),
+                "fn".to_string(),
+                "src/cache/builder.rs".to_string(),
+            ),
+            (
+                "TokenCache".to_string(),
+                "struct".to_string(),
+                "src/cache/token_cache.rs".to_string(),
+            ),
+        ];
+        let text_hits = vec![
+            (
+                "src/cache/token_cache.rs".to_string(),
+                "/// Token cache mentions authentication.".to_string(),
+                1,
+            ),
+            (
+                "src/cache/token_cache.rs".to_string(),
+                "let cache = TokenCache::new();".to_string(),
+                8,
+            ),
+        ];
+        let related_files = vec![("src/cache/token_cache.rs".to_string(), 2)];
+        let symbol_scores = vec![0.20, 0.95];
+
+        let output = explore_result_view(ExploreResultViewInput {
+            label: "cache",
+            symbol_hits: &symbol_hits,
+            text_hits: &text_hits,
+            related_files: &related_files,
+            enriched_symbols: &[],
+            symbol_impls: &[],
+            symbol_deps: &[],
+            derived_seed_terms: &[],
+            derived_symbols: &[],
+            derived_seed_files: &[],
+            enriched_imports: &[],
+            symbol_scores: &symbol_scores,
+            depth: 1,
+        });
+
+        assert!(
+            !output.contains("fn new"),
+            "weak trivial symbol should be filtered: {output}"
+        );
+        assert!(
+            output.contains("struct TokenCache"),
+            "high-signal project symbol should remain visible: {output}"
+        );
+        assert!(
+            output.contains("reason: strong match"),
+            "visible suggestions should carry concise reason text: {output}"
+        );
+        assert!(
+            !output.contains("/// Token cache"),
+            "doc-only pattern hit should be filtered from explore guidance: {output}"
+        );
+        assert!(
+            output.contains("let cache = TokenCache::new();"),
+            "real code pattern should remain visible: {output}"
+        );
+    }
+
+    #[test]
+    fn explore_result_view_keeps_trivial_symbol_when_strongly_contextualized() {
+        let symbol_hits = vec![(
+            "new".to_string(),
+            "fn".to_string(),
+            "src/cache/builder.rs".to_string(),
+        )];
+        let symbol_scores = vec![0.92];
+
+        let output = explore_result_view(ExploreResultViewInput {
+            label: "builder",
+            symbol_hits: &symbol_hits,
+            text_hits: &[],
+            related_files: &[],
+            enriched_symbols: &[],
+            symbol_impls: &[],
+            symbol_deps: &[],
+            derived_seed_terms: &[],
+            derived_symbols: &[],
+            derived_seed_files: &[],
+            enriched_imports: &[],
+            symbol_scores: &symbol_scores,
+            depth: 1,
+        });
+
+        assert!(
+            output.contains("fn new"),
+            "strongly contextualized trivial symbol should remain visible: {output}"
+        );
+        assert!(
+            output.contains("reason: strong match"),
+            "kept trivial symbol should explain why it was suggested: {output}"
+        );
+    }
 }
 
 #[cfg(test)]

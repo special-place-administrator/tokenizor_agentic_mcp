@@ -67,7 +67,6 @@ pub fn suggest_next_steps(
                             && reference.line_range.1 <= sym.line_range.1
                             && matches!(reference.kind, ReferenceKind::Call)
                             && !loaded_symbol_names.contains(reference.name.as_str())
-                            && is_actionable_suggestion_name(&reference.name)
                             && !is_external_reference(reference.qualified_name.as_deref())
                         {
                             let Some(definition_paths) =
@@ -78,10 +77,26 @@ pub fn suggest_next_steps(
                             let Some(definition_path) = definition_paths.first() else {
                                 continue;
                             };
+                            if !is_actionable_suggestion_for_context(
+                                &reference.name,
+                                path,
+                                definition_path,
+                            ) {
+                                continue;
+                            }
+                            let reason = if is_strongly_contextualized_suggestion(
+                                &reference.name,
+                                path,
+                                definition_path,
+                            ) {
+                                "called by loaded symbol in same file"
+                            } else {
+                                "called by loaded symbol"
+                            };
                             suggested_symbols.push((
                                 definition_path.clone(),
                                 reference.name.clone(),
-                                "called by loaded symbol",
+                                reason,
                             ));
                         }
                     }
@@ -167,7 +182,7 @@ fn project_defined_symbols(index: &LiveIndex) -> BTreeMap<String, Vec<String>> {
 
         for symbol in &file.symbols {
             if !is_actionable_symbol_kind(symbol.kind)
-                || !is_actionable_suggestion_name(&symbol.name)
+                || !is_candidate_suggestion_name(&symbol.name)
             {
                 continue;
             }
@@ -214,6 +229,33 @@ fn is_actionable_symbol_kind(kind: SymbolKind) -> bool {
 }
 
 fn is_actionable_suggestion_name(name: &str) -> bool {
+    is_candidate_suggestion_name(name) && !is_low_signal_suggestion_name(name)
+}
+
+fn is_candidate_suggestion_name(name: &str) -> bool {
+    name.len() > 2
+}
+
+fn is_actionable_suggestion_for_context(
+    name: &str,
+    loaded_path: &str,
+    definition_path: &str,
+) -> bool {
+    is_actionable_suggestion_name(name)
+        || is_strongly_contextualized_suggestion(name, loaded_path, definition_path)
+}
+
+fn is_strongly_contextualized_suggestion(
+    name: &str,
+    loaded_path: &str,
+    definition_path: &str,
+) -> bool {
+    is_low_signal_suggestion_name(name)
+        && loaded_path == definition_path
+        && is_project_source_path(definition_path)
+}
+
+fn is_low_signal_suggestion_name(name: &str) -> bool {
     const LOW_SIGNAL_NAMES: &[&str] = &[
         "as_mut",
         "as_ref",
@@ -240,7 +282,7 @@ fn is_actionable_suggestion_name(name: &str) -> bool {
         "unwrap",
     ];
 
-    name.len() > 2 && !LOW_SIGNAL_NAMES.contains(&name.to_ascii_lowercase().as_str())
+    LOW_SIGNAL_NAMES.contains(&name.to_ascii_lowercase().as_str())
 }
 
 fn is_external_reference(qualified_name: Option<&str>) -> bool {
@@ -394,6 +436,48 @@ mod tests {
         assert!(output.contains("get_symbol_context(name=\"helper\", path=\"src/helper.rs\""));
         assert!(!output.contains("clone"));
         assert!(!output.contains("Some"));
+    }
+
+    #[test]
+    fn suggest_next_steps_allows_trivial_name_only_with_same_file_context() {
+        let caller = make_symbol("caller", SymbolKind::Function, 0, 4);
+        let local_run = make_symbol("run", SymbolKind::Function, 5, 6);
+        let builder_new = make_symbol("new", SymbolKind::Method, 0, 1);
+
+        let (caller_key, caller_file) = make_file(
+            "src/service.rs",
+            b"fn caller() { run(); Builder::new(); }\nfn run() {}",
+            vec![caller, local_run],
+            vec![
+                make_reference("run", Some("crate::service::run")),
+                make_reference("new", Some("crate::builder::Builder::new")),
+            ],
+        );
+        let (builder_key, builder_file) = make_file(
+            "src/builder.rs",
+            b"impl Builder { fn new() -> Self { Self } }",
+            vec![builder_new],
+            vec![],
+        );
+        let index = make_index(vec![(caller_key, caller_file), (builder_key, builder_file)]);
+
+        let session = SessionContext::new();
+        session.record_symbol("src/service.rs", "caller", 120);
+
+        let output = suggest_next_steps(&index, &session, None);
+
+        assert!(
+            output.contains("run (src/service.rs)"),
+            "same-file trivial project symbol should be kept as strongly contextualized: {output}"
+        );
+        assert!(
+            !output.contains("new (src/builder.rs)"),
+            "cross-file trivial constructor should remain filtered: {output}"
+        );
+        assert!(
+            output.contains("called by loaded symbol"),
+            "suggestions should include concise reason text: {output}"
+        );
     }
 
     #[test]
