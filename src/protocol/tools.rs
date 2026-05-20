@@ -13925,6 +13925,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_what_changed_include_symbol_diff_appends_compact_symbol_summary() {
+        let repo = init_git_repo();
+        fs::create_dir_all(repo.path().join("src")).expect("create src dir");
+        fs::create_dir_all(repo.path().join("docs")).expect("create docs dir");
+        fs::write(repo.path().join("src/lib.rs"), "fn existing() {}\n")
+            .expect("write initial file");
+        fs::write(repo.path().join("docs/readme.md"), "# initial\n").expect("write initial docs");
+        run_git(repo.path(), &["add", "."]);
+        run_git(repo.path(), &["commit", "-m", "init", "-q"]);
+        fs::write(
+            repo.path().join("src/lib.rs"),
+            "fn existing() {}\nfn added_symbol() {}\n",
+        )
+        .expect("modify tracked code file");
+        fs::write(repo.path().join("docs/readme.md"), "# changed\n")
+            .expect("modify tracked docs file");
+
+        let (key, file) = make_file(
+            "src/lib.rs",
+            b"fn existing() {}\nfn added_symbol() {}\n",
+            vec![],
+        );
+        let server = make_server_with_root(
+            make_live_index_ready(vec![(key, file)]),
+            Some(repo.path().to_path_buf()),
+        );
+        let result = server
+            .what_changed(Parameters(super::WhatChangedInput {
+                since: None,
+                git_ref: None,
+                uncommitted: Some(true),
+                path_prefix: None,
+                language: None,
+                code_only: Some(true),
+                include_symbol_diff: Some(true),
+                estimate: None,
+                max_tokens: None,
+            }))
+            .await;
+
+        assert!(
+            result.contains(
+                "Scope: uncommitted working tree; code-only filter; symbol diff appended"
+            ),
+            "scope should report the combined code-only symbol-diff mode: {result}"
+        );
+        assert!(
+            result.contains("Symbol diff: HEAD...working tree"),
+            "symbol diff section missing: {result}"
+        );
+        assert!(
+            result.contains("src/lib.rs (+1: added_symbol)"),
+            "compact symbol summary should name added symbols: {result}"
+        );
+        assert!(
+            !result.contains("docs/readme.md"),
+            "code_only must keep docs out of both path list and symbol diff: {result}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_what_changed_recovers_repo_root_from_cwd_when_missing() {
         let repo = init_git_repo();
         fs::create_dir_all(repo.path().join("src")).expect("create src dir");
@@ -17606,6 +17667,65 @@ mod tests {
         assert!(
             result.contains("2 matches") || result.contains("match"),
             "should show match count: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_text_group_by_names_returns_flat_unique_symbol_names() {
+        let fetch_user = make_symbol("fetch_user", SymbolKind::Function, 0, 3);
+        let fetch_team = make_symbol("fetch_team", SymbolKind::Function, 4, 6);
+        let content = b"fn fetch_user() {\n    let needle = 1;\n    let needle = 2;\n}\nfn fetch_team() {\n    let needle = 3;\n}\n";
+        let (key, file) = make_file("src/search.rs", content, vec![fetch_user, fetch_team]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let result = server
+            .search_text(Parameters(super::SearchTextInput {
+                query: Some("needle".to_string()),
+                terms: None,
+                regex: None,
+                path_prefix: None,
+                language: None,
+                limit: None,
+                max_per_file: None,
+                include_generated: None,
+                include_tests: None,
+                glob: None,
+                exclude_glob: None,
+                context: None,
+                case_sensitive: None,
+                whole_word: None,
+                group_by: Some("names".to_string()),
+                follow_refs: None,
+                follow_refs_limit: None,
+                ranked: None,
+                estimate: None,
+                max_tokens: None,
+                structural: None,
+                include_vendor: None,
+                include_personal_tooling: None,
+            }))
+            .await;
+
+        assert!(
+            result.contains("3 matches in 1 files"),
+            "header should keep match/file evidence: {result}"
+        );
+        assert_eq!(
+            result.matches("fetch_user").count(),
+            1,
+            "fetch_user should be listed once despite two matching lines: {result}"
+        );
+        assert_eq!(
+            result.matches("fetch_team").count(),
+            1,
+            "fetch_team should be listed once: {result}"
+        );
+        assert!(
+            !result.contains("let needle"),
+            "names mode should not echo source lines: {result}"
+        );
+        assert!(
+            !result.contains("in fn"),
+            "names mode should be a flat name list, not grouped source snippets: {result}"
         );
     }
 

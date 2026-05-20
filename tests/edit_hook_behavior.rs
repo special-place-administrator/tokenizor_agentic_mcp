@@ -538,6 +538,49 @@ async fn batch_rename_dry_run_does_not_touch_disk() {
     assert_eq!(fx.read("src/caller.rs"), call_site);
 }
 
+#[tokio::test]
+async fn batch_rename_code_only_excludes_docs_from_qualified_usage_scan() {
+    let lib = "pub struct Widget;\n\nimpl Widget {\n    pub fn new() -> Self { Widget }\n}\n";
+    let caller = "fn build() {\n    let _ = crate::Widget::new();\n}\n";
+    let docs = "# Example\n\nCall `Widget::new()` from Rust code.\n";
+    let fx = Fixture::new(&[
+        ("src/lib.rs", lib),
+        ("src/caller.rs", caller),
+        ("docs/readme.md", docs),
+    ]);
+
+    let broad_result = call(
+        &fx.server,
+        "batch_rename",
+        json!({
+            "path": "src/lib.rs",
+            "name": "Widget",
+            "new_name": "Gadget",
+            "dry_run": true,
+        }),
+    )
+    .await;
+    assert_contains(&broad_result, "docs/readme.md");
+
+    let code_only_result = call(
+        &fx.server,
+        "batch_rename",
+        json!({
+            "path": "src/lib.rs",
+            "name": "Widget",
+            "new_name": "Gadget",
+            "dry_run": true,
+            "code_only": true,
+        }),
+    )
+    .await;
+
+    assert_contains(&code_only_result, "src/lib.rs");
+    assert_contains(&code_only_result, "src/caller.rs");
+    assert_not_contains(&code_only_result, "docs/readme.md");
+    assert_eq!(fx.read("docs/readme.md"), docs);
+}
+
 // ─── batch_insert ────────────────────────────────────────────────────────────
 
 #[tokio::test]

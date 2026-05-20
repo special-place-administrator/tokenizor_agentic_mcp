@@ -577,6 +577,26 @@ pub fn search_text_result_view(
             result.files.len()
         )
     }];
+    if group_by == Some("names") {
+        let mut names = Vec::new();
+        for file in &result.files {
+            for line_match in &file.matches {
+                if let Some(enc) = &line_match.enclosing_symbol {
+                    if !names.iter().any(|seen| seen == &enc.name) {
+                        names.push(enc.name.clone());
+                    }
+                }
+            }
+        }
+        if names.is_empty() {
+            lines.push("  (no enclosing symbol names)".to_string());
+        } else {
+            for name in names {
+                lines.push(format!("  {name}"));
+            }
+        }
+        return lines.join("\n");
+    }
     for file in &result.files {
         lines.push(file.path.clone());
         if let Some(rendered_lines) = &file.rendered_lines {
