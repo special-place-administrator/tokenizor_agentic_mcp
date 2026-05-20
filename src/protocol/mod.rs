@@ -441,6 +441,72 @@ impl SymForgeServer {
             other => format!("dispatch_tool_for_tests: unknown tool '{other}'"),
         }
     }
+
+    /// Test-only dispatcher that preserves public `CallToolResult` status metadata.
+    ///
+    /// This intentionally wires only handlers that already emit the SFB09 result-status
+    /// contract. It lets conformance tests replay canonical JSON requests without
+    /// starting an MCP transport or accepting string-only fake success paths.
+    #[doc(hidden)]
+    pub async fn dispatch_tool_result_for_tests(
+        &self,
+        tool_name: &str,
+        params: serde_json::Value,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        use rmcp::handler::server::wrapper::Parameters;
+
+        fn invalid_request_result(
+            tool_name: &str,
+            message: impl Into<String>,
+        ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+            let text = format!(
+                "Invalid request for tool `{tool_name}`: {}\nRecovery: compare the request JSON with the advertised input schema from tool_definitions().",
+                message.into()
+            );
+            Ok(
+                result_status::ResultStatus::new(result_status::OutcomeClass::InvalidRequest)
+                    .into_call_tool_result(text),
+            )
+        }
+
+        fn decode<T: serde::de::DeserializeOwned>(params: serde_json::Value) -> Result<T, String> {
+            serde_json::from_value(params).map_err(|e| format!("invalid tool parameters: {e}"))
+        }
+
+        macro_rules! call_statused {
+            ($method:ident, $input:ty) => {{
+                match decode::<$input>(params) {
+                    Ok(input) => self.$method(Parameters(input)).await,
+                    Err(error) => invalid_request_result(tool_name, error),
+                }
+            }};
+        }
+
+        match tool_name {
+            "replace_symbol_body" => {
+                call_statused!(replace_symbol_body_tool, edit::ReplaceSymbolBodyInput)
+            }
+            "batch_edit" => call_statused!(batch_edit_tool, edit::BatchEditInput),
+            "batch_insert" => call_statused!(batch_insert_tool, edit::BatchInsertInput),
+            "search_files" => call_statused!(search_files_tool, tools::SearchFilesInput),
+            "search_text" => call_statused!(search_text_tool, tools::SearchTextInput),
+            "search_symbols" => call_statused!(search_symbols_tool, tools::SearchSymbolsInput),
+            "get_file_content" => {
+                call_statused!(get_file_content_tool, tools::GetFileContentInput)
+            }
+            "get_symbol" => call_statused!(get_symbol_tool, tools::GetSymbolInput),
+            "find_references" => call_statused!(find_references_tool, tools::FindReferencesInput),
+            other => {
+                let text = format!(
+                    "Unsupported tool `{other}` in public conformance harness.\nRecovery: add a statused dispatcher branch before adding the case, or remove the case from the public corpus."
+                );
+                Ok(
+                    result_status::ResultStatus::new(result_status::OutcomeClass::InvalidRequest)
+                        .into_call_tool_result(text),
+                )
+            }
+        }
+    }
 }
 
 /// Wire `SymForgeServer` as an MCP `ServerHandler`.

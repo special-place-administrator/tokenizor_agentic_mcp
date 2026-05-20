@@ -5,9 +5,20 @@
 //! This catches runtime/source drift: if a tool is added to the allowlist
 //! but not registered (or vice versa), this test fails.
 
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use serde_json::{Value, json};
+use symforge::live_index::LiveIndex;
 use symforge::protocol::SymForgeServer;
-use symforge::protocol::result_status::{OutcomeClass, RESULT_STATUS_META_KEY, ResultStatus};
+use symforge::protocol::result_status::{
+    OutcomeClass, RESULT_STATUS_CONTRACT_VERSION, RESULT_STATUS_META_KEY, ResultStatus,
+};
+use symforge::watcher::WatcherInfo;
+use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
 // The canonical tool surface — must match SYMFORGE_TOOL_NAMES in cli/init.rs
@@ -45,6 +56,75 @@ const EXPECTED_TOOLS: &[&str] = &[
     "context_inventory",
     "investigation_suggest",
     "health_compact",
+];
+
+const PUBLIC_CONFORMANCE_CORPUS_VERSION: u8 = 1;
+
+struct PublicContractCase {
+    name: &'static str,
+    tool_name: &'static str,
+    request_json: fn(&ConformanceFixture) -> Value,
+    expected_outcome: OutcomeClass,
+    expected_edit_status: Option<&'static str>,
+    expected_text_contains: &'static [&'static str],
+    expected_recovery_hint: Option<&'static str>,
+    dry_run_preserves_file: Option<&'static str>,
+}
+
+const PUBLIC_CONTRACT_CONFORMANCE_CORPUS: &[PublicContractCase] = &[
+    PublicContractCase {
+        name: "read_get_file_content_found_v1",
+        tool_name: "get_file_content",
+        request_json: request_get_file_content_found,
+        expected_outcome: OutcomeClass::Found,
+        expected_edit_status: None,
+        expected_text_contains: &["src/lib.rs", "pub fn alpha"],
+        expected_recovery_hint: None,
+        dry_run_preserves_file: None,
+    },
+    PublicContractCase {
+        name: "search_text_found_v1",
+        tool_name: "search_text",
+        request_json: request_search_text_found,
+        expected_outcome: OutcomeClass::Found,
+        expected_edit_status: None,
+        expected_text_contains: &["Match type:", "src/lib.rs", "alpha"],
+        expected_recovery_hint: None,
+        dry_run_preserves_file: None,
+    },
+    PublicContractCase {
+        name: "edit_replace_symbol_body_dry_run_v1",
+        tool_name: "replace_symbol_body",
+        request_json: request_replace_symbol_body_dry_run,
+        expected_outcome: OutcomeClass::Found,
+        expected_edit_status: Some("dry_run_success"),
+        expected_text_contains: &[
+            "Write semantics: dry run (no writes)",
+            "[DRY RUN] Would replace `alpha`",
+        ],
+        expected_recovery_hint: None,
+        dry_run_preserves_file: Some("src/lib.rs"),
+    },
+    PublicContractCase {
+        name: "invalid_get_file_content_mode_hint_v1",
+        tool_name: "get_file_content",
+        request_json: request_get_file_content_invalid_mode,
+        expected_outcome: OutcomeClass::InvalidRequest,
+        expected_edit_status: None,
+        expected_text_contains: &["mode=lines conflicts with chunk_index"],
+        expected_recovery_hint: Some("Use mode=chunk"),
+        dry_run_preserves_file: None,
+    },
+    PublicContractCase {
+        name: "unsupported_tool_name_hint_v1",
+        tool_name: "definitely_not_a_symforge_tool",
+        request_json: request_empty_object,
+        expected_outcome: OutcomeClass::InvalidRequest,
+        expected_edit_status: None,
+        expected_text_contains: &["Unsupported tool `definitely_not_a_symforge_tool`"],
+        expected_recovery_hint: Some("add a statused dispatcher branch"),
+        dry_run_preserves_file: None,
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -399,9 +479,204 @@ fn invalid_request_status_marks_call_tool_result_as_error() {
     );
 }
 
+#[test]
+fn public_contract_conformance_corpus_is_versioned_and_named() {
+    assert_eq!(PUBLIC_CONFORMANCE_CORPUS_VERSION, 1);
+
+    let mut names = BTreeSet::new();
+    for case in PUBLIC_CONTRACT_CONFORMANCE_CORPUS {
+        assert!(
+            names.insert(case.name),
+            "duplicate conformance case name `{}`",
+            case.name
+        );
+        assert!(
+            !case.tool_name.is_empty(),
+            "case `{}` must name a public tool",
+            case.name
+        );
+    }
+}
+
+#[tokio::test]
+async fn public_contract_conformance_corpus_replays() {
+    let fixture = ConformanceFixture::new();
+
+    for case in PUBLIC_CONTRACT_CONFORMANCE_CORPUS {
+        let request = (case.request_json)(&fixture);
+        assert!(
+            request.is_object(),
+            "case `{}` request must be a canonical JSON object: {request}",
+            case.name
+        );
+        serde_json::to_string(&request)
+            .unwrap_or_else(|error| panic!("case `{}` request must serialize: {error}", case.name));
+
+        let before = case
+            .dry_run_preserves_file
+            .map(|path| (path, fixture.read(path)));
+        let result = fixture
+            .server
+            .dispatch_tool_result_for_tests(case.tool_name, request)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("case `{}` returned transport error: {error:?}", case.name)
+            });
+        let serialized = serde_json::to_value(&result)
+            .unwrap_or_else(|error| panic!("case `{}` result must serialize: {error}", case.name));
+        let text = result_text(&serialized);
+
+        assert_result_status(case, &serialized);
+        for needle in case.expected_text_contains {
+            assert!(
+                text.contains(needle),
+                "case `{}` expected response text to contain `{needle}`; text was:\n{text}",
+                case.name
+            );
+        }
+        if let Some(hint) = case.expected_recovery_hint {
+            assert!(
+                text.contains(hint),
+                "case `{}` expected recovery hint `{hint}`; text was:\n{text}",
+                case.name
+            );
+        }
+
+        if let Some((path, original)) = before {
+            assert_eq!(
+                fixture.read(path),
+                original,
+                "case `{}` must not write `{path}` in dry-run mode",
+                case.name
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+struct ConformanceFixture {
+    _dir: TempDir,
+    root: PathBuf,
+    server: SymForgeServer,
+}
+
+impl ConformanceFixture {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        write_fixture_file(
+            &root,
+            "src/lib.rs",
+            "pub fn alpha() -> i32 {\n    1\n}\n\npub fn beta() -> i32 {\n    alpha() + 1\n}\n",
+        );
+        let shared = LiveIndex::load(&root).expect("LiveIndex::load conformance fixture");
+        let watcher_info = Arc::new(Mutex::new(WatcherInfo::default()));
+        let server = SymForgeServer::new(
+            shared,
+            "public_contract_conformance_test".to_string(),
+            watcher_info,
+            Some(root.clone()),
+            None,
+        );
+        Self {
+            _dir: dir,
+            root,
+            server,
+        }
+    }
+
+    fn read(&self, relative_path: &str) -> String {
+        fs::read_to_string(self.root.join(relative_path)).expect("read fixture file")
+    }
+}
+
+fn write_fixture_file(root: &std::path::Path, relative_path: &str, content: &str) {
+    let path = root.join(relative_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create fixture parent");
+    }
+    fs::write(path, content).expect("write fixture file");
+}
+
+fn request_get_file_content_found(_fixture: &ConformanceFixture) -> Value {
+    json!({
+        "path": "src/lib.rs",
+        "start_line": 1,
+        "end_line": 3,
+        "show_line_numbers": true,
+        "header": true
+    })
+}
+
+fn request_search_text_found(_fixture: &ConformanceFixture) -> Value {
+    json!({
+        "query": "alpha",
+        "path_prefix": "src/",
+        "include_tests": true
+    })
+}
+
+fn request_replace_symbol_body_dry_run(_fixture: &ConformanceFixture) -> Value {
+    json!({
+        "path": "src/lib.rs",
+        "name": "alpha",
+        "new_body": "pub fn alpha() -> i32 {\n    42\n}",
+        "dry_run": true
+    })
+}
+
+fn request_get_file_content_invalid_mode(_fixture: &ConformanceFixture) -> Value {
+    json!({
+        "path": "src/lib.rs",
+        "mode": "lines",
+        "chunk_index": 1,
+        "max_lines": 5
+    })
+}
+
+fn request_empty_object(_fixture: &ConformanceFixture) -> Value {
+    json!({})
+}
+
+fn assert_result_status(case: &PublicContractCase, serialized: &Value) {
+    let status = &serialized["_meta"][RESULT_STATUS_META_KEY];
+    assert_eq!(
+        status["contract_version"],
+        json!(RESULT_STATUS_CONTRACT_VERSION),
+        "case `{}` must include corpus-compatible result-status version",
+        case.name
+    );
+    assert_eq!(
+        status["outcome_class"],
+        json!(case.expected_outcome.as_str()),
+        "case `{}` outcome class mismatch",
+        case.name
+    );
+    assert_eq!(
+        serialized["isError"],
+        json!(case.expected_outcome.is_error()),
+        "case `{}` isError must match the result-status outcome class",
+        case.name
+    );
+
+    if let Some(expected_edit_status) = case.expected_edit_status {
+        assert_eq!(
+            status["status"],
+            json!(expected_edit_status),
+            "case `{}` edit status mismatch",
+            case.name
+        );
+    }
+}
+
+fn result_text(serialized: &Value) -> &str {
+    serialized["content"][0]["text"]
+        .as_str()
+        .expect("tool result must contain text content")
+}
 
 fn build_minimal_payload(schema: &serde_json::Map<String, Value>) -> Value {
     let required: Vec<String> = schema
