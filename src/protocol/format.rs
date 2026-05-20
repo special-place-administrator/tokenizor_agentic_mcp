@@ -1246,6 +1246,52 @@ pub fn health_report_compact_from_published_state(
     output
 }
 
+fn sidecar_pid_label(status: &crate::sidecar::port_file::SidecarStatus) -> String {
+    status
+        .pid
+        .map(|pid| pid.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn sidecar_port_label(status: &crate::sidecar::port_file::SidecarStatus) -> String {
+    status
+        .port
+        .map(|port| port.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+pub(crate) fn format_sidecar_status(status: &crate::sidecar::port_file::SidecarStatus) -> String {
+    if status.liveness == crate::sidecar::port_file::SidecarLiveness::NoSidecar {
+        return "Sidecar: none (.symforge/sidecar.* absent)".to_string();
+    }
+
+    let mut line = format!(
+        "Sidecar: pid={} port={} state={}",
+        sidecar_pid_label(status),
+        sidecar_port_label(status),
+        status.liveness.as_str(),
+    );
+    if let Some(detail) = status.detail.as_deref() {
+        line.push_str(&format!(" ({detail})"));
+    }
+    line
+}
+
+pub(crate) fn format_sidecar_status_compact(
+    status: &crate::sidecar::port_file::SidecarStatus,
+) -> String {
+    if status.liveness == crate::sidecar::port_file::SidecarLiveness::NoSidecar {
+        return "Sidecar: none".to_string();
+    }
+
+    format!(
+        "Sidecar: {} pid={} port={}",
+        status.liveness.as_str(),
+        sidecar_pid_label(status),
+        sidecar_port_label(status),
+    )
+}
+
 pub fn health_report_from_stats(
     status: &str,
     stats: &HealthStats,

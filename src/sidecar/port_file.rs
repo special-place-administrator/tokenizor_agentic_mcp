@@ -5,7 +5,7 @@
 
 use std::io::{self, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const DIR_NAME: &str = crate::paths::SYMFORGE_DIR_NAME;
@@ -61,12 +61,135 @@ pub fn cleanup_session_file() {
 ///
 /// Returns an error if the file doesn't exist or contains invalid data.
 pub fn read_port() -> io::Result<u16> {
-    let path = PathBuf::from(DIR_NAME).join(PORT_FILE);
+    read_port_at(&PathBuf::from(DIR_NAME))
+}
+
+fn read_port_at(dir: &Path) -> io::Result<u16> {
+    let path = dir.join(PORT_FILE);
     let contents = std::fs::read_to_string(&path)?;
     contents
         .trim()
         .parse::<u16>()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+fn read_pid_at(dir: &Path) -> io::Result<u32> {
+    let path = dir.join(PID_FILE);
+    let contents = std::fs::read_to_string(&path)?;
+    contents
+        .trim()
+        .parse::<u32>()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidecarLiveness {
+    Alive,
+    Dead,
+    Unknown,
+    NoSidecar,
+}
+
+impl SidecarLiveness {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Alive => "alive",
+            Self::Dead => "dead",
+            Self::Unknown => "unknown",
+            Self::NoSidecar => "none",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidecarStatus {
+    pub pid: Option<u32>,
+    pub port: Option<u16>,
+    pub liveness: SidecarLiveness,
+    pub detail: Option<String>,
+}
+
+impl SidecarStatus {
+    fn no_sidecar() -> Self {
+        Self {
+            pid: None,
+            port: None,
+            liveness: SidecarLiveness::NoSidecar,
+            detail: None,
+        }
+    }
+}
+
+fn sidecar_files_exist(dir: &Path) -> bool {
+    dir.join(PORT_FILE).exists() || dir.join(PID_FILE).exists() || dir.join(SESSION_FILE).exists()
+}
+
+fn sidecar_socket_addr(bind_host: &str, port: u16) -> io::Result<std::net::SocketAddr> {
+    let addr = if bind_host.contains(':') {
+        format!("[{bind_host}]:{port}")
+    } else {
+        format!("{bind_host}:{port}")
+    };
+    addr.parse()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+}
+
+fn sidecar_port_is_alive(bind_host: &str, port: u16) -> io::Result<bool> {
+    let sock_addr = sidecar_socket_addr(bind_host, port)?;
+    Ok(TcpStream::connect_timeout(&sock_addr, Duration::from_millis(200)).is_ok())
+}
+
+pub fn read_sidecar_status_at(symforge_dir: &Path, bind_host: &str) -> SidecarStatus {
+    if !sidecar_files_exist(symforge_dir) {
+        return SidecarStatus::no_sidecar();
+    }
+
+    let mut details = Vec::new();
+    let pid = match read_pid_at(symforge_dir) {
+        Ok(pid) => Some(pid),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            details.push("sidecar.pid missing".to_string());
+            None
+        }
+        Err(error) => {
+            details.push(format!("sidecar.pid invalid: {error}"));
+            None
+        }
+    };
+    let port = match read_port_at(symforge_dir) {
+        Ok(port) => Some(port),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            details.push("sidecar.port missing".to_string());
+            None
+        }
+        Err(error) => {
+            details.push(format!("sidecar.port invalid: {error}"));
+            None
+        }
+    };
+
+    let liveness = match port {
+        Some(port) => match sidecar_port_is_alive(bind_host, port) {
+            Ok(true) => SidecarLiveness::Alive,
+            Ok(false) => SidecarLiveness::Dead,
+            Err(error) => {
+                details.push(format!("sidecar port probe unavailable: {error}"));
+                SidecarLiveness::Unknown
+            }
+        },
+        None => SidecarLiveness::Unknown,
+    };
+
+    SidecarStatus {
+        pid,
+        port,
+        liveness,
+        detail: (!details.is_empty()).then(|| details.join("; ")),
+    }
+}
+
+pub fn read_sidecar_status(bind_host: &str) -> SidecarStatus {
+    read_sidecar_status_at(&PathBuf::from(DIR_NAME), bind_host)
 }
 
 /// Remove both port and PID files. Ignores all errors.
@@ -100,26 +223,17 @@ pub fn check_stale(bind_host: &str) -> bool {
         Err(_) => return false, // No port file — nothing to clean up.
     };
 
-    // Bracket IPv6 addresses for correct SocketAddr parsing (e.g. "[::1]:8080").
-    let addr = if bind_host.contains(':') {
-        format!("[{bind_host}]:{port}")
-    } else {
-        format!("{bind_host}:{port}")
-    };
-    let sock_addr = match addr.parse() {
-        Ok(a) => a,
-        Err(_) => {
-            // Cannot determine staleness when the address is unparseable —
-            // default to "not stale" to avoid deleting a live sidecar's files.
-            return false;
-        }
-    };
-    match TcpStream::connect_timeout(&sock_addr, Duration::from_millis(200)) {
-        Ok(_) => false, // Connection succeeded — sidecar is still alive.
-        Err(_) => {
+    match sidecar_port_is_alive(bind_host, port) {
+        Ok(true) => false, // Connection succeeded — sidecar is still alive.
+        Ok(false) => {
             // Connection refused or timed out — files are stale.
             cleanup_files();
             true
+        }
+        Err(_) => {
+            // Cannot determine staleness when the address is unparseable —
+            // default to "not stale" to avoid deleting a live sidecar's files.
+            false
         }
     }
 }

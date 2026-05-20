@@ -4088,6 +4088,16 @@ fn sidecar_state_for_server(server: &SymForgeServer) -> SidecarState {
     }
 }
 
+fn sidecar_status_for_server(server: &SymForgeServer) -> crate::sidecar::port_file::SidecarStatus {
+    let bind_host =
+        std::env::var("SYMFORGE_SIDECAR_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
+    if let Some(repo_root) = server.capture_repo_root() {
+        let symforge_dir = repo_root.join(crate::sidecar::port_file::DIR_NAME);
+        return crate::sidecar::port_file::read_sidecar_status_at(&symforge_dir, &bind_host);
+    }
+    crate::sidecar::port_file::read_sidecar_status(&bind_host)
+}
+
 fn symbol_candidate_paths(index: &crate::live_index::store::LiveIndex, name: &str) -> Vec<String> {
     let mut candidates: Vec<String> = index
         .all_files()
@@ -6193,6 +6203,9 @@ impl SymForgeServer {
             &watcher_guard,
             rejected_stale_mutations,
         );
+        let sidecar_status = sidecar_status_for_server(self);
+        result.push('\n');
+        result.push_str(&format::format_sidecar_status(&sidecar_status));
 
         // Append token savings section if the sidecar's TokenStats are available.
         if let Some(ref stats) = self.token_stats {
@@ -6302,6 +6315,9 @@ impl SymForgeServer {
             &watcher_guard,
             rejected_stale_mutations,
         );
+        let sidecar_status = sidecar_status_for_server(self);
+        result.push('\n');
+        result.push_str(&format::format_sidecar_status_compact(&sidecar_status));
 
         if let Some(ref stats) = self.token_stats {
             let snap = stats.summary();
@@ -10000,6 +10016,18 @@ mod tests {
         make_server_with_root(index, None)
     }
 
+    fn write_sidecar_state(repo_root: &Path, port: Option<u16>, pid: Option<&str>) {
+        let dir = crate::paths::ensure_symforge_dir(repo_root)
+            .expect("test repo root should allow .symforge creation");
+        if let Some(port) = port {
+            fs::write(dir.join("sidecar.port"), port.to_string())
+                .expect("sidecar port file should be writable");
+        }
+        if let Some(pid) = pid {
+            fs::write(dir.join("sidecar.pid"), pid).expect("sidecar pid file should be writable");
+        }
+    }
+
     struct EnvVarGuard {
         key: &'static str,
         previous: Option<OsString>,
@@ -13622,6 +13650,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_health_surfaces_alive_sidecar_pid_and_state() {
+        let temp = TempDir::new().expect("tempdir should be created");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("test listener should bind to an ephemeral port");
+        let port = listener
+            .local_addr()
+            .expect("test listener should have a local address")
+            .port();
+        write_sidecar_state(temp.path(), Some(port), Some("4242"));
+
+        let (key, file) = make_file("src/lib.rs", b"fn foo() {}", vec![]);
+        let server = make_server_with_root(
+            make_live_index_ready(vec![(key, file)]),
+            Some(temp.path().to_path_buf()),
+        );
+
+        let result = server.health().await;
+        assert!(
+            result.contains(&format!("Sidecar: pid=4242 port={port} state=alive")),
+            "full health should surface alive sidecar state: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_health_distinguishes_no_sidecar_state() {
+        let temp = TempDir::new().expect("tempdir should be created");
+        let (key, file) = make_file("src/lib.rs", b"fn foo() {}", vec![]);
+        let server = make_server_with_root(
+            make_live_index_ready(vec![(key, file)]),
+            Some(temp.path().to_path_buf()),
+        );
+
+        let result = server.health().await;
+        assert!(
+            result.contains("Sidecar: none"),
+            "full health should distinguish no sidecar state: {result}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_health_compact_keeps_core_fields_small() {
         let (key, file) = make_file("src/lib.rs", b"fn foo() {}", vec![]);
         let server = make_server(make_live_index_ready(vec![(key, file)]));
@@ -13632,6 +13700,51 @@ mod tests {
         assert!(
             !result.contains("Partial parse files"),
             "compact health should omit expanded path lists"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_health_compact_surfaces_dead_sidecar_pid_and_state() {
+        let temp = TempDir::new().expect("tempdir should be created");
+        let port = 0;
+        write_sidecar_state(temp.path(), Some(port), Some("4242"));
+
+        let (key, file) = make_file("src/lib.rs", b"fn foo() {}", vec![]);
+        let server = make_server_with_root(
+            make_live_index_ready(vec![(key, file)]),
+            Some(temp.path().to_path_buf()),
+        );
+
+        let result = server.health_compact().await;
+        assert!(
+            result.contains(&format!("Sidecar: dead pid=4242 port={port}")),
+            "compact health should surface dead sidecar state: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_health_surfaces_unknown_sidecar_state_for_malformed_port_file() {
+        let temp = TempDir::new().expect("tempdir should be created");
+        let dir = crate::paths::ensure_symforge_dir(temp.path())
+            .expect("test repo root should allow .symforge creation");
+        fs::write(dir.join("sidecar.port"), "not-a-port")
+            .expect("sidecar port file should be writable");
+        fs::write(dir.join("sidecar.pid"), "4242").expect("sidecar pid file should be writable");
+
+        let (key, file) = make_file("src/lib.rs", b"fn foo() {}", vec![]);
+        let server = make_server_with_root(
+            make_live_index_ready(vec![(key, file)]),
+            Some(temp.path().to_path_buf()),
+        );
+
+        let result = server.health().await;
+        assert!(
+            result.contains("Sidecar: pid=4242 port=unknown state=unknown"),
+            "full health should surface unknown sidecar state: {result}"
+        );
+        assert!(
+            result.contains("sidecar.port invalid"),
+            "full health should explain malformed sidecar state: {result}"
         );
     }
 
