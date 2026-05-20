@@ -37,6 +37,11 @@ use crate::watcher::{self, WatcherInfo};
 pub(crate) const DAEMON_PORT_FILE: &str = "daemon.port";
 const DAEMON_PID_FILE: &str = "daemon.pid";
 const DAEMON_START_LOCK_FILE: &str = "daemon.starting";
+const TRACE_SYMBOL_ALIAS_DEPRECATION: &str = concat!(
+    "Deprecation warning: `trace_symbol` is retired; ",
+    "use `get_symbol_context` with `sections=[...]` or `find_references` instead. ",
+    "Compatibility policy: KEEP_WITH_DEPRECATION."
+);
 
 pub type SharedDaemonState = Arc<DaemonState>;
 
@@ -1633,7 +1638,7 @@ async fn execute_tool_call(
             let tp: TraceSymbolInput = decode_params(params)?;
             // Convert: trace_symbol's None sections = "all" = empty vec in get_symbol_context
             let sections = tp.sections.unwrap_or_default();
-            Ok(server
+            let output = server
                 .get_symbol_context(Parameters(GetSymbolContextInput {
                     name: tp.name,
                     file: None,
@@ -1646,7 +1651,8 @@ async fn execute_tool_call(
                     max_tokens: None,
                     estimate: None,
                 }))
-                .await)
+                .await;
+            Ok(format!("{TRACE_SYMBOL_ALIAS_DEPRECATION}\n\n{output}"))
         }
         "inspect_match" => Ok(server
             .inspect_match(Parameters(decode_params::<InspectMatchInput>(params)?))

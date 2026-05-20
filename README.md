@@ -124,7 +124,7 @@ After setup, confirm in your client that the SymForge MCP server is connected or
 |------|---------|
 | `find_references` | Call sites, imports, type usages, implementations |
 | `find_dependents` | File-level dependency graph |
-| `get_symbol_context` (with `sections=[...]`) | Multi-hop caller/callee chains for a symbol. `trace_symbol` remains available as a compatibility alias |
+| `get_symbol_context` (with `sections=[...]`) | Multi-hop caller/callee chains for a symbol. Deprecated daemon-only `trace_symbol` compatibility calls emit a warning; generated client setup does not allow-list the old name |
 | `what_changed` | Files changed since a timestamp, ref, or uncommitted |
 | `diff_symbols` | Symbol-level diff between git refs (AST-based for supported languages) |
 | `analyze_file_impact` | Re-index a file after editing and report affected dependents |

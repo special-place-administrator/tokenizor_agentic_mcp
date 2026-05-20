@@ -5788,7 +5788,8 @@ impl SymForgeServer {
     }
 
     /// Internal: trace_symbol logic, called by get_symbol_context when sections are provided.
-    /// Also called directly by daemon backward-compat alias.
+    /// The daemon compatibility alias routes through get_symbol_context so this
+    /// canonical path owns trace-mode behavior.
     pub(crate) async fn trace_symbol(&self, params: Parameters<TraceSymbolInput>) -> String {
         if let Some(result) = self.proxy_tool_call("trace_symbol", &params.0).await {
             return result;

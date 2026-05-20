@@ -1,25 +1,24 @@
 //! Pins every backward-compat alias in `src/daemon.rs::execute_tool_call`.
 //!
-//! ADR 0001 codifies that aliases are permanent. An alias is a promise to
-//! every client that learned the old name: "this tool still routes to the
-//! same handler". If the destination handler is renamed, its input shape
-//! drifts, or the alias branch is silently dropped, the alias breaks for
-//! every agent session that still uses the old name — and nothing in CI
-//! notices, because aliases aren't exposed via `tools/list`.
+//! Aliases are deliberate compatibility routes for clients that learned an old
+//! name. Retired aliases must warn explicitly while still routing to the
+//! translated destination payload. If the destination handler is renamed, its
+//! input shape drifts, or the alias branch is silently dropped, the alias
+//! breaks for every agent session that still uses the old name — and nothing
+//! in CI notices, because aliases aren't exposed via `tools/list`.
 //!
 //! Each alias below has one test that:
 //!   1. Calls the tool by its **old** name via the MCP dispatch HTTP path
 //!      (the same path an MCP client reaches the daemon through).
 //!   2. Asserts no "unknown tool" error and no dispatch-layer failure.
-//!   3. Asserts the response is byte-identical to calling the **destination**
-//!      handler with the exact input that the alias branch translates to —
-//!      the strongest possible "alias still routes to the same handler"
-//!      contract. Any divergence means the alias and its destination have
-//!      drifted apart.
+//!   3. Asserts the response contains any required deprecation warning and
+//!      preserves the **destination** handler payload for the exact input that
+//!      the alias branch translates to.
 //!
 //! Enumerated aliases (source of truth: `src/daemon.rs::execute_tool_call`):
 //!   - `trace_symbol` → `get_symbol_context` (sections=None translates to
-//!     `Some(vec![])`, which switches `get_symbol_context` into trace mode).
+//!     `Some(vec![])`, which switches `get_symbol_context` into trace mode)
+//!     with an explicit deprecation warning.
 //!
 //! When a new alias is added or removed in `execute_tool_call`, update this
 //! file in the same commit. A new alias without a test here is a silent
@@ -54,15 +53,15 @@ async fn wait_for_shutdown(port: u16) {
     }
 }
 
-/// Pin the `trace_symbol` → `get_symbol_context` alias.
+/// Pin the deprecated `trace_symbol` → `get_symbol_context` alias.
 ///
 /// `execute_tool_call` translates `trace_symbol` input into a
 /// `GetSymbolContextInput` with `sections = Some(vec![])` (which puts
 /// `get_symbol_context` into trace mode). If either side of that translation
 /// drifts — e.g., a field is added to `GetSymbolContextInput` without
 /// matching the alias branch, or `get_symbol_context` changes how
-/// `sections = Some(empty)` behaves — the two responses diverge and this
-/// test fails loudly.
+/// `sections = Some(empty)` behaves — the post-warning payload diverges and
+/// this test fails loudly.
 #[allow(unsafe_code)] // test-only daemon home override is scoped to this async test.
 #[tokio::test]
 async fn trace_symbol_alias_routes_to_get_symbol_context() {
@@ -121,8 +120,17 @@ async fn trace_symbol_alias_routes_to_get_symbol_context() {
     let alias_body = alias_resp.text().await.expect("trace_symbol alias body");
     assert!(
         !alias_body.contains("unknown tool"),
-        "trace_symbol alias must not return 'unknown tool' — it is a permanent \
-         backward-compat alias (ADR 0001). Got body: {alias_body}"
+        "trace_symbol alias must not return 'unknown tool' while retained for \
+         compatibility. Got body: {alias_body}"
+    );
+    let deprecation_warning = concat!(
+        "Deprecation warning: `trace_symbol` is retired; ",
+        "use `get_symbol_context` with `sections=[...]` or `find_references` instead. ",
+        "Compatibility policy: KEEP_WITH_DEPRECATION."
+    );
+    assert!(
+        alias_body.starts_with(deprecation_warning),
+        "trace_symbol alias must emit an explicit deprecation warning. Got body: {alias_body}"
     );
     assert!(
         !alias_body.starts_with("Error in trace_symbol:"),
@@ -167,18 +175,22 @@ async fn trace_symbol_alias_routes_to_get_symbol_context() {
         .await
         .expect("get_symbol_context destination body");
 
-    // --- Byte-identical parity is the alias contract ----------------------
+    // --- Deprecated alias preserves destination payload after warning ------
+    let alias_payload = alias_body
+        .strip_prefix(deprecation_warning)
+        .and_then(|body| body.strip_prefix("\n\n"))
+        .expect("trace_symbol alias should return warning plus destination payload");
     assert_eq!(
-        alias_body,
-        destination_body,
-        "trace_symbol alias output must be byte-identical to \
-         get_symbol_context with the translated input.\n\
+        alias_payload,
+        destination_body.as_str(),
+        "trace_symbol alias payload must match get_symbol_context with the \
+         translated input after removing the deprecation warning.\n\
          Divergence here means the alias branch in \
          src/daemon.rs::execute_tool_call has drifted from its destination \
-         handler — an ADR 0001 violation.\n\
-         alias bytes:       {}\n\
+         handler.\n\
+         alias payload bytes: {}\n\
          destination bytes: {}",
-        alias_body.len(),
+        alias_payload.len(),
         destination_body.len(),
     );
 

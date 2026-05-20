@@ -287,7 +287,6 @@ const SYMFORGE_TOOL_NAMES: &[&str] = &[
     "mcp__symforge__edit_plan",
     "mcp__symforge__context_inventory",
     "mcp__symforge__investigation_suggest",
-    "mcp__symforge__trace_symbol",
 ];
 
 const KILO_ALWAYS_ALLOW: &[&str] = &[
@@ -321,7 +320,6 @@ const KILO_ALWAYS_ALLOW: &[&str] = &[
     "edit_plan",
     "context_inventory",
     "investigation_suggest",
-    "trace_symbol",
 ];
 
 const CLAUDE_ALWAYS_ALLOW: &[&str] = &[
@@ -355,7 +353,6 @@ const CLAUDE_ALWAYS_ALLOW: &[&str] = &[
     "edit_plan",
     "context_inventory",
     "investigation_suggest",
-    "trace_symbol",
 ];
 
 fn merge_allowed_tools(settings: &mut Value) {
@@ -1540,11 +1537,33 @@ mod tests {
                 .any(|v| v.as_str() == Some("mcp__symforge__get_file_context")),
             "should include get_file_context"
         );
+        assert!(
+            !allowed
+                .iter()
+                .any(|v| v.as_str() == Some("mcp__symforge__trace_symbol")),
+            "retired trace_symbol alias must not be granted by default: {allowed:?}"
+        );
         let first_len = allowed.len();
         // Should not duplicate on re-run
         merge_symforge_hooks(&mut settings, "/usr/bin/symforge");
         let allowed2 = settings["allowedTools"].as_array().unwrap();
         assert_eq!(first_len, allowed2.len(), "should not duplicate entries");
+    }
+
+    #[test]
+    fn test_default_client_allow_lists_exclude_retired_trace_symbol() {
+        assert!(
+            !SYMFORGE_TOOL_NAMES.contains(&"mcp__symforge__trace_symbol"),
+            "Codex/client allow list should not grant retired trace_symbol alias"
+        );
+        assert!(
+            !KILO_ALWAYS_ALLOW.contains(&"trace_symbol"),
+            "Kilo allow list should not grant retired trace_symbol alias"
+        );
+        assert!(
+            !CLAUDE_ALWAYS_ALLOW.contains(&"trace_symbol"),
+            "Claude allow list should not grant retired trace_symbol alias"
+        );
     }
 
     #[test]
@@ -1564,6 +1583,10 @@ mod tests {
         assert!(
             content.contains("get_file_context"),
             "should contain canonical context tool: {content}"
+        );
+        assert!(
+            !content.contains("trace_symbol"),
+            "Codex allow list must not include retired trace_symbol alias: {content}"
         );
         assert!(
             content.contains("project_doc_fallback_filenames = [\"AGENTS.md\", \"CLAUDE.md\"]"),
