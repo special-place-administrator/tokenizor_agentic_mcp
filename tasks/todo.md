@@ -1,3 +1,74 @@
+# SFB09 - Define machine-readable MCP result-status contract
+
+## Plan
+
+- [x] Run Branch Guard from the original checkout.
+- [x] Switch to `.worktrees/backlog-implementation` and confirm branch/status there.
+- [x] Index the target worktree with SymForge and check agentmemory for prior context.
+- [x] Copy the SFB09 goal file into the worktree and mark it `In progress`.
+- [x] Inspect existing protocol response construction and RMCP content constraints.
+- [x] Decide whether structured metadata is safe or whether a delimited footer/envelope is required.
+- [x] Inspect existing schema/conformance/read/search tests for the lowest-blast-radius fixture.
+- [x] Add failing contract tests for the status vocabulary and serialization/envelope shape.
+- [x] Add a failing fixture showing one existing read/search tool can emit machine status while preserving human text.
+- [x] Implement the central result-status type/formatter.
+- [x] Run focused tests and capture example response output.
+- [x] Run exact goal verification:
+  - `cargo fmt --check`
+  - `cargo check`
+  - `cargo test --all-targets -- --test-threads=1`
+  - `rg "ResultStatus|result_status|outcome_class|not_found|ambiguous" src tests`
+- [x] Run default full verification if task-specific verification passes and time permits.
+- [ ] Commit verified implementation work.
+- [ ] Update SFB09 frontmatter to `Completed` with the verified work commit hash.
+- [ ] Commit the SFB09 goal-status update separately.
+
+## Evidence Log
+
+- Branch Guard from the original checkout returned `main` with a clean status, so edits moved to `.worktrees/backlog-implementation`.
+- Branch Guard in the worktree returned `backlog-implementation` with a clean status before goal edits.
+- The SFB09 goal file was absent from the worktree and was copied from the original checkout per Branch Guard.
+- SymForge indexed the worktree: 190 files, 9272 symbols.
+- agentmemory recall for SFB09/result-status context returned no matching prior observations.
+- `tasks/lessons.md` is absent in this worktree; no prior lesson file was available to review.
+- Goal status changed to `In progress` at `2026-05-20T13:59:47.0838734+02:00`.
+- Response construction finding: most existing read/search handlers still return human-readable `String`, while RMCP `CallToolResult` supports `content`, `structuredContent`, `isError`, and `_meta`.
+- Decision: use RMCP `_meta["symforge/result_status"]` as the additive machine contract. No footer is needed because `_meta` is available, and `structuredContent` is avoided here because the goal requires preserving existing human text instead of converting read tools to JSON.
+- Added central status contract in `src/protocol/result_status.rs`:
+  - stable `OutcomeClass` vocabulary: `found`, `not_found`, `ambiguous`, `invalid_request`, `empty_result`, `internal_failure`;
+  - `ResultStatus { contract_version: 1, outcome_class }`;
+  - `into_call_tool_result` formatter that keeps the text content unchanged and attaches the namespaced `_meta` payload.
+- Red test evidence:
+  - `cargo test --test conformance result_status -- --nocapture` initially failed with unresolved import `symforge::protocol::result_status`.
+  - The first integration fixture attempt also exposed that `SymForgeServer::new()` requires test setup arguments, so the read-tool preservation fixture was moved into the existing `src/protocol/tools.rs` test module.
+- Focused verification passed:
+  - `cargo test --test conformance result_status -- --nocapture`: 2 passed, 0 failed for the filtered contract tests at that point.
+  - `cargo test --test conformance -- --test-threads=1`: 12 passed, 0 failed.
+  - `cargo test test_get_file_content_text_can_carry_result_status_without_changing_text -- --nocapture`: matching read-tool fixture passed.
+- Example response shape preserving human text:
+  - human text: `src/lib.rs\nfn present() {}`;
+  - machine status: `_meta["symforge/result_status"] = {"contract_version":1,"outcome_class":"found"}`;
+  - serialized response keeps `content[0].text` exactly equal to the original human text and does not add `structuredContent`.
+- Exact goal verification passed:
+  - `cargo fmt --check`: exit 0 after rustfmt formatting.
+  - `cargo check`: exit 0.
+  - `cargo test --all-targets -- --test-threads=1`: exit 0; observed key totals include `src/lib.rs` 1758 passed and `src/main.rs` 6 passed, plus integration test targets.
+  - `rg "ResultStatus|result_status|outcome_class|not_found|ambiguous" src tests`: exit 0 and showed the new status module, conformance tests, read-tool fixture, and existing not-found/ambiguous call sites.
+- Default verification passed:
+  - `git branch --show-current`: `backlog-implementation`.
+  - `git diff --check`: exit 0; Git reported CRLF replacement warnings for touched files, not whitespace errors.
+  - `cargo fmt --check`: exit 0.
+  - `cargo check`: exit 0.
+  - `cargo test --all-targets -- --test-threads=1`: full all-targets suite passed again.
+  - `cargo build --release`: finished release profile successfully.
+
+## Review
+
+- SFB09 acceptance criteria passed before commit: the central contract/formatter exists, conformance tests pin vocabulary and `_meta` serialization shape, `invalid_request` maps to `isError`, and an existing `get_file_content` fixture demonstrates status attachment without changing human text.
+- Changes stayed inside the allowed tracked areas: `src/protocol/**`, `tests/conformance.rs`, and `tasks/todo.md`. No live-index, daemon, sidecar, npm, docs, plans, `.planning`, or openspec files were modified.
+
+---
+
 # SFB08 - Preserve same-line inline docs in replace_symbol_body
 
 ## Plan

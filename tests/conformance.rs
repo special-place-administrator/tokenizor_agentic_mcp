@@ -7,6 +7,7 @@
 
 use serde_json::{Value, json};
 use symforge::protocol::SymForgeServer;
+use symforge::protocol::result_status::{OutcomeClass, RESULT_STATUS_META_KEY, ResultStatus};
 
 // ---------------------------------------------------------------------------
 // The canonical tool surface — must match SYMFORGE_TOOL_NAMES in cli/init.rs
@@ -333,6 +334,68 @@ fn all_tools_have_annotations() {
         classified,
         EXPECTED_TOOLS.len(),
         "classification lists must cover all expected tools"
+    );
+}
+
+#[test]
+fn result_status_vocabulary_is_stable() {
+    let vocabulary: Vec<&'static str> = OutcomeClass::ALL
+        .iter()
+        .map(|outcome| outcome.as_str())
+        .collect();
+
+    assert_eq!(
+        vocabulary,
+        vec![
+            "found",
+            "not_found",
+            "ambiguous",
+            "invalid_request",
+            "empty_result",
+            "internal_failure",
+        ]
+    );
+
+    for outcome in OutcomeClass::ALL {
+        assert_eq!(
+            serde_json::to_value(ResultStatus::new(outcome)).unwrap(),
+            json!({
+                "contract_version": 1,
+                "outcome_class": outcome.as_str(),
+            })
+        );
+    }
+}
+
+#[test]
+fn result_status_metadata_shape_is_additive_and_namespaced() {
+    let human_text = "src/lib.rs\nfn present() {}";
+    let result = ResultStatus::new(OutcomeClass::Found).into_call_tool_result(human_text);
+    let serialized = serde_json::to_value(&result).unwrap();
+
+    assert_eq!(serialized["content"][0]["type"], json!("text"));
+    assert_eq!(serialized["content"][0]["text"], json!(human_text));
+    assert_eq!(serialized["isError"], json!(false));
+    assert!(serialized.get("structuredContent").is_none());
+    assert_eq!(
+        serialized["_meta"][RESULT_STATUS_META_KEY],
+        json!({
+            "contract_version": 1,
+            "outcome_class": "found",
+        })
+    );
+}
+
+#[test]
+fn invalid_request_status_marks_call_tool_result_as_error() {
+    let result =
+        ResultStatus::new(OutcomeClass::InvalidRequest).into_call_tool_result("Invalid request");
+    let serialized = serde_json::to_value(&result).unwrap();
+
+    assert_eq!(serialized["isError"], json!(true));
+    assert_eq!(
+        serialized["_meta"][RESULT_STATUS_META_KEY]["outcome_class"],
+        json!("invalid_request")
     );
 }
 

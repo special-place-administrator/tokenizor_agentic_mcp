@@ -8,6 +8,7 @@ pub mod format;
 pub mod investigation;
 pub mod prompts;
 pub mod resources;
+pub mod result_status;
 pub(crate) mod search_format;
 pub mod session;
 pub mod smart_query;

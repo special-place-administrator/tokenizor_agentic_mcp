@@ -14139,6 +14139,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_file_content_text_can_carry_result_status_without_changing_text() {
+        let content = b"line 1\nline 2\nline 3";
+        let (key, file) = make_file("src/lib.rs", content, vec![]);
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        let human_text = server
+            .get_file_content(Parameters(super::GetFileContentInput {
+                path: "src/lib.rs".to_string(),
+                mode: None,
+                start_line: None,
+                end_line: None,
+                chunk_index: None,
+                max_lines: None,
+                around_line: None,
+                around_match: None,
+                match_occurrence: None,
+                around_symbol: None,
+                symbol_line: None,
+                context_lines: None,
+                show_line_numbers: None,
+                header: None,
+                estimate: None,
+                offset: None,
+                limit: None,
+                max_tokens: None,
+            }))
+            .await;
+
+        let result = crate::protocol::result_status::ResultStatus::new(
+            crate::protocol::result_status::OutcomeClass::Found,
+        )
+        .into_call_tool_result(human_text.clone());
+        let serialized = serde_json::to_value(&result).unwrap();
+
+        assert_eq!(
+            serialized["content"][0]["text"],
+            serde_json::json!(human_text)
+        );
+        assert_eq!(
+            serialized["_meta"][crate::protocol::result_status::RESULT_STATUS_META_KEY]["outcome_class"],
+            serde_json::json!("found")
+        );
+    }
+
+    #[tokio::test]
     async fn test_get_file_content_honors_max_tokens_budget() {
         let content = b"line one is long\nline two is also long\nline three is also long";
         let (key, file) = make_file("src/lib.rs", content, vec![]);
