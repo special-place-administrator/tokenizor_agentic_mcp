@@ -30,11 +30,18 @@ pub const BASENAME_SCORE: f32 = 100.0;
 /// basename token (prefix match). Ranks below basename, above loose.
 pub const PREFIX_SCORE: f32 = 50.0;
 /// Weight applied to paths that contain every query token as a case-insensitive
-/// substring — the weakest path-relevance match the live ranker surfaces.
+/// substring - the weakest path-relevance match the live ranker surfaces.
 pub const LOOSE_PATH_SCORE: f32 = 10.0;
+/// Minimum file-level shared commits required before co-change evidence can
+/// affect ranking. A single shared commit is treated as weak calibration noise.
 pub const FILE_LEVEL_CO_CHANGE_FLOOR: u32 = 2;
+/// Co-change fusion only applies when the anchor itself reaches basename-tier
+/// path confidence. Prefix/loose anchors keep the baseline path ordering.
 pub const CO_CHANGE_ANCHOR_CONFIDENCE_FLOOR: f32 = BASENAME_SCORE;
 
+// Keep chore anchors hardcoded until SymForge has a broader workspace-config
+// trust policy for ranking inputs. These files change across unrelated tasks
+// often enough that they should never drive co-change promotion by default.
 const CHORE_ANCHOR_FILENAMES: &[&str] = &[
     "Cargo.lock",
     "package-lock.json",
