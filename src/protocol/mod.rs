@@ -14,9 +14,10 @@ pub mod session;
 pub mod smart_query;
 pub mod tools;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use parking_lot::{Mutex, RwLock};
 
@@ -32,6 +33,7 @@ use rmcp::service::RequestContext;
 use rmcp::{ServerHandler, prompt_handler, tool_handler};
 
 use crate::live_index::SharedIndex;
+use crate::protocol::result_status::OutcomeClass;
 use crate::sidecar::TokenStats;
 use crate::watcher::WatcherInfo;
 
@@ -76,6 +78,23 @@ pub struct SymForgeServer {
     /// transitional worktree observability knob was on. Surfaced by the
     /// `health` tool as a rolling "last hour" signal.
     pub(crate) worktree_misuse: Arc<crate::worktree::WorktreeMisuseCounter>,
+    /// Bounded analytics queue. Disabled by default until an explicit local
+    /// analytics configuration installs an enabled recorder.
+    pub(crate) analytics_recorder: Arc<RwLock<crate::analytics::AnalyticsRecorder>>,
+}
+
+fn default_analytics_db_path(repo_root: Option<&Path>) -> PathBuf {
+    repo_root
+        .map(|root| root.join(crate::paths::SYMFORGE_ANALYTICS_DB_PATH))
+        .unwrap_or_else(|| PathBuf::from(crate::paths::SYMFORGE_ANALYTICS_DB_PATH))
+}
+
+fn disabled_analytics_recorder(repo_root: Option<&Path>) -> crate::analytics::AnalyticsRecorder {
+    crate::analytics::AnalyticsRecorder::disabled(default_analytics_db_path(repo_root))
+}
+
+fn estimate_tokens(response_bytes: u64) -> u64 {
+    response_bytes.saturating_add(3) / 4
 }
 
 impl SymForgeServer {
@@ -91,6 +110,7 @@ impl SymForgeServer {
         token_stats: Option<Arc<TokenStats>>,
     ) -> Self {
         crate::worktree::register_if_feature_enabled();
+        let analytics_recorder = disabled_analytics_recorder(repo_root.as_deref());
         Self {
             index,
             tool_router: Self::tool_router(),
@@ -104,6 +124,7 @@ impl SymForgeServer {
             daemon_degraded: Arc::new(AtomicBool::new(false)),
             session_context: Arc::new(session::SessionContext::new()),
             worktree_misuse: Arc::new(crate::worktree::WorktreeMisuseCounter::new()),
+            analytics_recorder: Arc::new(RwLock::new(analytics_recorder)),
         }
     }
 
@@ -113,6 +134,7 @@ impl SymForgeServer {
         crate::worktree::register_if_feature_enabled();
         let project_name = daemon_client.project_name().to_string();
         let repo_root = daemon_client.project_root().map(|p| p.to_path_buf());
+        let analytics_recorder = disabled_analytics_recorder(repo_root.as_deref());
         Self {
             index: crate::live_index::LiveIndex::empty(),
             tool_router: Self::tool_router(),
@@ -126,6 +148,7 @@ impl SymForgeServer {
             daemon_degraded: Arc::new(AtomicBool::new(false)),
             session_context: Arc::new(session::SessionContext::new()),
             worktree_misuse: Arc::new(crate::worktree::WorktreeMisuseCounter::new()),
+            analytics_recorder: Arc::new(RwLock::new(analytics_recorder)),
         }
     }
 
@@ -165,7 +188,10 @@ impl SymForgeServer {
     }
 
     pub(crate) fn set_repo_root(&self, repo_root: Option<PathBuf>) {
-        *self.repo_root.write() = repo_root;
+        *self.repo_root.write() = repo_root.clone();
+        if self.analytics_recorder.read().status().disabled {
+            *self.analytics_recorder.write() = disabled_analytics_recorder(repo_root.as_deref());
+        }
     }
 
     /// Bump the worktree-awareness misuse counter when an edit handler
@@ -224,6 +250,43 @@ impl SymForgeServer {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             stats.record_tool_tokens(tool_name, output_tokens, saved);
         }
+    }
+
+    pub(crate) fn record_tool_completion(
+        &self,
+        tool_name: &'static str,
+        response_text: &str,
+        duration: Duration,
+        outcome_class: OutcomeClass,
+    ) {
+        let recorder = self.analytics_recorder.read().clone();
+        let response_bytes = response_text.len() as u64;
+        let observation = crate::analytics::AnalyticsObservation::new(
+            tool_name,
+            crate::analytics::AnalyticsSurface::Tool,
+            recorder.configured_scope(),
+            response_bytes,
+            Some(estimate_tokens(response_bytes)),
+            duration,
+            !outcome_class.is_error(),
+            outcome_class,
+        );
+        let _ = recorder.enqueue(observation);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_analytics_recorder_for_tests(
+        &self,
+        recorder: crate::analytics::AnalyticsRecorder,
+    ) {
+        *self.analytics_recorder.write() = recorder;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn analytics_queue_status_for_tests(
+        &self,
+    ) -> crate::analytics::AnalyticsQueueStatus {
+        self.analytics_recorder.read().status()
     }
 
     /// Forward a tool call to the daemon. Returns:

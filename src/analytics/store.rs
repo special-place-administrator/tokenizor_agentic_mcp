@@ -155,6 +155,33 @@ impl AnalyticsObservation {
         self.capability_state = capability_state;
         self
     }
+
+    pub fn bounded_for_queue(&self) -> Self {
+        let capability_state = self
+            .capability_state
+            .iter()
+            .take(MAX_CAPABILITY_ITEMS)
+            .cloned()
+            .map(|mut evidence| {
+                if let Some(detail) = evidence.detail.as_deref() {
+                    evidence.detail = Some(bounded_text(detail, MAX_CAPABILITY_DETAIL_BYTES));
+                }
+                evidence
+            })
+            .collect();
+
+        Self {
+            tool_name: bounded_text(&self.tool_name, MAX_TOOL_NAME_BYTES),
+            surface: bounded_surface(&self.surface),
+            configured_scope: bounded_scope(&self.configured_scope),
+            response_bytes: self.response_bytes,
+            estimated_tokens: self.estimated_tokens,
+            duration: self.duration,
+            success: self.success,
+            outcome_class: self.outcome_class,
+            capability_state,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -407,7 +434,7 @@ fn capability_state_json(capability_state: &[CapabilityEvidence]) -> String {
     }
 }
 
-fn bounded_text(raw: &str, max_bytes: usize) -> String {
+pub(crate) fn bounded_text(raw: &str, max_bytes: usize) -> String {
     if contains_sensitive_marker(raw) {
         return "[redacted]".to_string();
     }
@@ -418,6 +445,24 @@ fn bounded_text(raw: &str, max_bytes: usize) -> String {
         .collect::<String>();
 
     truncate_utf8(&normalized, max_bytes)
+}
+
+fn bounded_surface(surface: &AnalyticsSurface) -> AnalyticsSurface {
+    match surface {
+        AnalyticsSurface::Other(value) => {
+            AnalyticsSurface::Other(bounded_text(value, MAX_SURFACE_BYTES))
+        }
+        known => known.clone(),
+    }
+}
+
+fn bounded_scope(scope: &AnalyticsScope) -> AnalyticsScope {
+    match scope {
+        AnalyticsScope::Other(value) => {
+            AnalyticsScope::Other(bounded_text(value, MAX_CONFIGURED_SCOPE_BYTES))
+        }
+        known => known.clone(),
+    }
 }
 
 fn contains_sensitive_marker(raw: &str) -> bool {

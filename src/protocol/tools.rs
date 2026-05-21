@@ -18,7 +18,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use rmcp::handler::server::wrapper::Parameters;
@@ -4505,8 +4505,10 @@ impl SymForgeServer {
         &self,
         params: Parameters<GetSymbolInput>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let started = Instant::now();
         let output = self.get_symbol(params).await;
         let outcome_class = classify_get_symbol_output(&output);
+        self.record_tool_completion("get_symbol", &output, started.elapsed(), outcome_class);
         statused_tool_result(output, outcome_class)
     }
 
@@ -5398,8 +5400,10 @@ impl SymForgeServer {
         &self,
         params: Parameters<SearchSymbolsInput>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let started = Instant::now();
         let output = self.search_symbols(params).await;
         let outcome_class = classify_search_symbols_output(&output);
+        self.record_tool_completion("search_symbols", &output, started.elapsed(), outcome_class);
         statused_tool_result(output, outcome_class)
     }
 
@@ -5544,8 +5548,10 @@ impl SymForgeServer {
         &self,
         params: Parameters<SearchTextInput>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let started = Instant::now();
         let output = self.search_text(params).await;
         let outcome_class = classify_search_text_output(&output);
+        self.record_tool_completion("search_text", &output, started.elapsed(), outcome_class);
         statused_tool_result(output, outcome_class)
     }
 
@@ -5926,8 +5932,10 @@ impl SymForgeServer {
         &self,
         params: Parameters<SearchFilesInput>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let started = Instant::now();
         let output = self.search_files(params).await;
         let outcome_class = classify_search_files_output(&output);
+        self.record_tool_completion("search_files", &output, started.elapsed(), outcome_class);
         statused_tool_result(output, outcome_class)
     }
 
@@ -7161,8 +7169,15 @@ impl SymForgeServer {
         &self,
         params: Parameters<GetFileContentInput>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let started = Instant::now();
         let output = self.get_file_content(params).await;
         let outcome_class = classify_get_file_content_output(&output);
+        self.record_tool_completion(
+            "get_file_content",
+            &output,
+            started.elapsed(),
+            outcome_class,
+        );
         statused_tool_result(output, outcome_class)
     }
 
@@ -7374,8 +7389,10 @@ impl SymForgeServer {
         &self,
         params: Parameters<FindReferencesInput>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let started = Instant::now();
         let output = self.find_references(params).await;
         let outcome_class = classify_find_references_output(&output);
+        self.record_tool_completion("find_references", &output, started.elapsed(), outcome_class);
         statused_tool_result(output, outcome_class)
     }
 
@@ -9202,9 +9219,16 @@ impl SymForgeServer {
         &self,
         params: Parameters<edit::ReplaceSymbolBodyInput>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let started = Instant::now();
         let dry_run = params.0.dry_run.unwrap_or(false);
         let output = self.replace_symbol_body(params).await;
         let status = classify_edit_output(&output, dry_run);
+        self.record_tool_completion(
+            "replace_symbol_body",
+            &output,
+            started.elapsed(),
+            status.outcome_class(),
+        );
         statused_edit_tool_result(output, status, Vec::new())
     }
 
@@ -9946,6 +9970,7 @@ impl SymForgeServer {
         &self,
         params: Parameters<edit::BatchEditInput>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let started = Instant::now();
         let dry_run = params.0.dry_run.unwrap_or(false);
         let operation_count = params.0.edits.len();
         let output = self.batch_edit(params).await;
@@ -9956,6 +9981,12 @@ impl SymForgeServer {
             }
             _ => failed_batch_operation_statuses(&output, status),
         };
+        self.record_tool_completion(
+            "batch_edit",
+            &output,
+            started.elapsed(),
+            status.outcome_class(),
+        );
         statused_edit_tool_result(output, status, operation_statuses)
     }
 
@@ -10103,6 +10134,7 @@ impl SymForgeServer {
         &self,
         params: Parameters<edit::BatchInsertInput>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let started = Instant::now();
         let dry_run = params.0.dry_run.unwrap_or(false);
         let operation_count = params.0.targets.len();
         let output = self.batch_insert(params).await;
@@ -10113,6 +10145,12 @@ impl SymForgeServer {
             }
             _ => failed_batch_operation_statuses(&output, status),
         };
+        self.record_tool_completion(
+            "batch_insert",
+            &output,
+            started.elapsed(),
+            status.outcome_class(),
+        );
         statused_edit_tool_result(output, status, operation_statuses)
     }
 
@@ -15349,6 +15387,140 @@ mod tests {
             OutcomeClass::InternalFailure,
         );
         assert_eq!(internal_failure["isError"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn test_tool_call_completion_instrumentation_records_representative_tools() {
+        use crate::analytics::{
+            AnalyticsConfig, AnalyticsRecorder, AnalyticsScope, AnalyticsStore,
+            SqliteAnalyticsStore,
+        };
+        use crate::protocol::edit::ReplaceSymbolBodyInput;
+
+        let (_dir, server) = setup_loaded_edit_test(&[(
+            "src/lib.rs",
+            "fn present() {\n    println!(\"old\");\n}\n",
+        )]);
+        let db_path = _dir.path().join(".symforge").join("analytics.db");
+        let store = AnalyticsStore::open(AnalyticsConfig::enabled(&db_path)).unwrap();
+        server.set_analytics_recorder_for_tests(AnalyticsRecorder::start(
+            store,
+            AnalyticsScope::Session,
+            16,
+        ));
+
+        let read = serialized_tool_result(
+            server
+                .get_file_content_tool(Parameters(get_file_content_input("src/lib.rs")))
+                .await,
+        );
+        assert_tool_result_status(&read, OutcomeClass::Found);
+
+        let search = serialized_tool_result(
+            server
+                .search_symbols_tool(Parameters(search_symbols_input(Some("present"))))
+                .await,
+        );
+        assert_tool_result_status(&search, OutcomeClass::Found);
+
+        let dry_run_edit = serialized_tool_result(
+            server
+                .replace_symbol_body_tool(Parameters(ReplaceSymbolBodyInput {
+                    path: "src/lib.rs".to_string(),
+                    name: "present".to_string(),
+                    kind: None,
+                    symbol_line: None,
+                    new_body: "fn present() {\n    println!(\"new\");\n}".to_string(),
+                    dry_run: Some(true),
+                    working_directory: None,
+                }))
+                .await,
+        );
+        assert_tool_result_edit_status(&dry_run_edit, "dry_run_success", OutcomeClass::Found);
+
+        assert_eq!(server.analytics_queue_status_for_tests().enqueued, 3);
+        drop(server);
+
+        let records = SqliteAnalyticsStore::open(&db_path)
+            .unwrap()
+            .recent_records(10)
+            .unwrap();
+        let tool_names = records
+            .iter()
+            .map(|record| record.tool_name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(tool_names.contains(&"get_file_content"));
+        assert!(tool_names.contains(&"search_symbols"));
+        assert!(tool_names.contains(&"replace_symbol_body"));
+        assert!(records.iter().all(|record| record.surface == "tool"
+            && record.configured_scope == "session"
+            && record.response_bytes > 0
+            && record.estimated_tokens.is_some()
+            && record.outcome_class == "found"));
+    }
+
+    struct BlockingAnalyticsWriter {
+        started: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+        blocked_once: bool,
+    }
+
+    impl crate::analytics::AnalyticsWriter for BlockingAnalyticsWriter {
+        fn write(
+            &mut self,
+            _observation: &crate::analytics::AnalyticsObservation,
+        ) -> anyhow::Result<crate::analytics::AnalyticsWriteOutcome> {
+            if !self.blocked_once {
+                self.blocked_once = true;
+                self.started.send(()).unwrap();
+                self.release.recv().unwrap();
+            }
+            Ok(crate::analytics::AnalyticsWriteOutcome::Recorded { id: 1 })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_handler_enqueues_without_waiting_for_background_writer() {
+        use crate::analytics::{AnalyticsRecorder, AnalyticsScope};
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let content = b"fn present() {}\n";
+        let (key, file) = make_file(
+            "src/lib.rs",
+            content,
+            vec![make_symbol("present", SymbolKind::Function, 0, 0)],
+        );
+        let server = make_server(make_live_index_ready(vec![(key, file)]));
+        server.set_analytics_recorder_for_tests(AnalyticsRecorder::start_with_writer_for_tests(
+            AnalyticsScope::Session,
+            1,
+            BlockingAnalyticsWriter {
+                started: started_tx,
+                release: release_rx,
+                blocked_once: false,
+            },
+        ));
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            server.get_file_content_tool(Parameters(get_file_content_input("src/lib.rs"))),
+        )
+        .await
+        .expect("tool handler must not wait for the analytics writer");
+        let result = serialized_tool_result(result);
+        assert_tool_result_status(&result, OutcomeClass::Found);
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("background writer should receive the enqueued observation");
+
+        let status = server.analytics_queue_status_for_tests();
+        assert_eq!(status.enqueued, 1);
+        assert_eq!(status.recorded, 0);
+
+        release_tx.send(()).unwrap();
+        drop(server);
     }
 
     #[tokio::test]
