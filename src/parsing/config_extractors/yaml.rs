@@ -49,13 +49,21 @@ impl ConfigExtractor for YamlExtractor {
 
         match &value {
             serde_yml::Value::Mapping(map) => {
-                walker.walk_mapping(map, "", 0);
+                walker.walk_mapping(map, "", (0, content.len() as u32), 0);
             }
             serde_yml::Value::Sequence(seq) => {
                 walker.walk_sequence(seq, "", (0, content.len() as u32), 0);
             }
             _ => {}
         }
+
+        super::ci_yaml::append_ci_yaml_facts(
+            content,
+            &line_starts,
+            &value,
+            &mut symbols,
+            &mut sort_order,
+        );
 
         ExtractionResult {
             symbols,
@@ -84,33 +92,44 @@ fn value_as_key_str(v: &serde_yml::Value) -> Option<String> {
 
 /// Find the byte range in `content` for the YAML mapping key `key`.
 ///
-/// Searches for `key:` pattern starting from `search_from`, requiring the
-/// match to appear at the start of a line (preceded only by spaces/tabs).
+/// Searches for `key:` pattern inside `search_end` starting from `search_from`,
+/// requiring the match to appear at the start of a mapping line. Sequence-item
+/// inline keys such as `- uses:` are accepted.
 /// The range extends from the key start to just before the next sibling key
 /// at the same or lesser indentation, or to end of content.
-fn find_yaml_key_range(content: &[u8], key: &str, search_from: &mut usize) -> (usize, usize) {
+fn find_yaml_key_range(
+    content: &[u8],
+    key: &str,
+    search_from: &mut usize,
+    search_end: usize,
+) -> (usize, usize) {
     let needle = format!("{}:", key);
     let needle_bytes = needle.as_bytes();
 
     let mut pos = *search_from;
-    while pos + needle_bytes.len() <= content.len() {
-        if let Some(rel) = find_substring(&content[pos..], needle_bytes) {
+    let bounded_end = search_end.min(content.len());
+    while pos + needle_bytes.len() <= bounded_end {
+        if let Some(rel) = find_substring(&content[pos..bounded_end], needle_bytes) {
             let abs_start = pos + rel;
 
-            // Scan back to find the line start; only whitespace should precede the key.
             let line_start = content[..abs_start]
                 .iter()
                 .rposition(|&b| b == b'\n')
                 .map(|p| p + 1)
                 .unwrap_or(0);
+            let line_end = content[abs_start..bounded_end]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(bounded_end, |offset| abs_start + offset + 1);
 
             let prefix = &content[line_start..abs_start];
-            let is_line_start = prefix.iter().all(|&b| b == b' ' || b == b'\t');
-
-            if is_line_start {
-                let indent = prefix.len();
+            if let Some((indent, inline_sequence_key)) = yaml_key_prefix(prefix) {
                 let key_end = abs_start + needle_bytes.len();
-                let range_end = find_block_end(content, key_end, indent);
+                let range_end = if inline_sequence_key {
+                    line_end
+                } else {
+                    find_block_end(content, key_end, indent).min(bounded_end)
+                };
 
                 *search_from = key_end;
                 return (abs_start, range_end);
@@ -122,8 +141,22 @@ fn find_yaml_key_range(content: &[u8], key: &str, search_from: &mut usize) -> (u
         }
     }
 
-    // Fallback: return whole remaining content
-    (*search_from, content.len())
+    (*search_from, bounded_end)
+}
+
+fn yaml_key_prefix(prefix: &[u8]) -> Option<(usize, bool)> {
+    let indent = prefix
+        .iter()
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .count();
+    let rest = &prefix[indent..];
+    if rest.is_empty() {
+        return Some((indent, false));
+    }
+    if rest[0] == b'-' && rest[1..].iter().all(|&b| b == b' ' || b == b'\t') {
+        return Some((indent, true));
+    }
+    None
 }
 
 /// Given that a key was found ending at `after_key`, scan forward line-by-line
@@ -222,8 +255,15 @@ impl YamlWalker<'_> {
         *self.sort_order += 1;
     }
 
-    fn walk_mapping(&mut self, map: &serde_yml::Mapping, parent_path: &str, depth: u32) {
-        let mut search_from: usize = 0;
+    fn walk_mapping(
+        &mut self,
+        map: &serde_yml::Mapping,
+        parent_path: &str,
+        parent_byte_range: (u32, u32),
+        depth: u32,
+    ) {
+        let mut search_from = parent_byte_range.0 as usize;
+        let search_end = parent_byte_range.1 as usize;
 
         for (k, v) in map.iter() {
             let key_str = match value_as_key_str(k) {
@@ -233,14 +273,14 @@ impl YamlWalker<'_> {
 
             let key_path = join_key_path(parent_path, &key_str);
             let (byte_start, byte_end) =
-                find_yaml_key_range(self.content, &key_str, &mut search_from);
+                find_yaml_key_range(self.content, &key_str, &mut search_from, search_end);
             let byte_range = (byte_start as u32, byte_end as u32);
             self.push_key_symbol(key_path.clone(), depth, byte_range);
 
             if depth + 1 < MAX_DEPTH {
                 match v {
                     serde_yml::Value::Mapping(child_map) => {
-                        self.walk_mapping(child_map, &key_path, depth + 1);
+                        self.walk_mapping(child_map, &key_path, byte_range, depth + 1);
                     }
                     serde_yml::Value::Sequence(child_seq) => {
                         self.walk_sequence(child_seq, &key_path, byte_range, depth + 1);
@@ -271,7 +311,7 @@ impl YamlWalker<'_> {
             if depth + 1 < MAX_DEPTH {
                 match v {
                     serde_yml::Value::Mapping(child_map) => {
-                        self.walk_mapping(child_map, &elem_path, depth + 1);
+                        self.walk_mapping(child_map, &elem_path, byte_range, depth + 1);
                     }
                     serde_yml::Value::Sequence(child_seq) => {
                         self.walk_sequence(child_seq, &elem_path, byte_range, depth + 1);
