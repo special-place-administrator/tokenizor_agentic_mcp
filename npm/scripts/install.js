@@ -64,6 +64,39 @@ function createInstaller(overrides = {}) {
   const versionPath = pathMod.join(installDir, "symforge.version");
   const pendingVersionPath = pathMod.join(installDir, "symforge.pending.version");
 
+  function comparablePath(targetPath) {
+    const resolved = pathMod.resolve(targetPath);
+    return processMod.platform === "win32" ? resolved.toLowerCase() : resolved;
+  }
+
+  function isPathInsideOrSame(parentPath, childPath) {
+    if (!parentPath || !childPath) {
+      return false;
+    }
+
+    try {
+      if (comparablePath(parentPath) === comparablePath(childPath)) {
+        return true;
+      }
+
+      const relative = pathMod.relative(
+        pathMod.resolve(parentPath),
+        pathMod.resolve(childPath)
+      );
+      return Boolean(relative) && !relative.startsWith("..") && !pathMod.isAbsolute(relative);
+    } catch {
+      return false;
+    }
+  }
+
+  function symforgeHomeIsTemporary() {
+    const explicitHome = processMod.env.SYMFORGE_HOME;
+    if (!explicitHome || typeof osMod.tmpdir !== "function") {
+      return false;
+    }
+    return isPathInsideOrSame(osMod.tmpdir(), explicitHome);
+  }
+
   function getPlatformArtifact() {
     const platform = processMod.platform;
     const arch = processMod.arch;
@@ -286,8 +319,8 @@ function createInstaller(overrides = {}) {
   }
 
   /**
-   * Detect which home-scoped CLI agents are installed and can be safely
-   * initialized from a global npm postinstall context.
+   * Detect durable home/global harnesses that can be safely initialized from a
+   * global npm postinstall context.
    *
    * Workspace-local clients such as Kilo Code are intentionally excluded here:
    * global npm installs run from the package directory, not from a user
@@ -300,6 +333,12 @@ function createInstaller(overrides = {}) {
     const claudeDir = pathMod.join(osMod.homedir(), ".claude");
     if (fsMod.existsSync(claudeDir)) {
       clients.push("claude");
+    }
+
+    // Claude Desktop: check for the platform-specific config directory.
+    const claudeDesktopDir = resolveClaudeDesktopConfigDir();
+    if (fsMod.existsSync(claudeDesktopDir)) {
+      clients.push("claude-desktop");
     }
 
     // Codex: check for ~/.codex directory
@@ -317,11 +356,35 @@ function createInstaller(overrides = {}) {
     return clients;
   }
 
+  function resolveClaudeDesktopConfigDir() {
+    if (processMod.platform === "win32") {
+      const appData =
+        processMod.env.APPDATA || pathMod.join(osMod.homedir(), "AppData", "Roaming");
+      return pathMod.join(appData, "Claude");
+    }
+    if (processMod.platform === "darwin") {
+      return pathMod.join(osMod.homedir(), "Library", "Application Support", "Claude");
+    }
+    return pathMod.join(osMod.homedir(), ".config", "Claude");
+  }
+
   /**
-   * Run `symforge init` after successful install to configure
-   * hooks and MCP server registration for detected CLI agents.
+   * Run `symforge init` after successful install to configure hooks and MCP
+   * server registration for detected global harnesses.
    */
   function runAutoInit(binPath) {
+    if (symforgeHomeIsTemporary()) {
+      consoleMod.log(
+        "Auto-configuring skipped: SYMFORGE_HOME points to a temporary directory. " +
+          "The binary was installed, but client configs were not changed to avoid " +
+          "wiring harnesses to a disposable path."
+      );
+      consoleMod.log(
+        "Use `npm install -g symforge` or a durable SYMFORGE_HOME for global harness setup."
+      );
+      return;
+    }
+
     const clients = detectHomeScopedClients();
     const initCwd = osMod.homedir();
     if (clients.length === 0) {

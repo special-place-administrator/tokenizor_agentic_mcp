@@ -111,10 +111,11 @@ pub fn run_init_with_context(
     binary_path: &std::path::Path,
 ) -> anyhow::Result<()> {
     let paths = InitPaths::from_home_and_working_dir(home_dir, working_dir);
-    let binary_path_str = binary_path.display().to_string();
+    let registration_binary_path = binary_path_for_registration(binary_path, home_dir)?;
+    let binary_path_str = registration_binary_path.display().to_string();
 
     if matches!(client, InitClient::Claude | InitClient::All) {
-        merge_hooks_into_settings(&paths.claude_settings, binary_path)?;
+        merge_hooks_into_settings(&paths.claude_settings, &registration_binary_path)?;
         eprintln!(
             "Claude hooks installed in {}",
             paths.claude_settings.display()
@@ -536,6 +537,15 @@ pub fn register_claude_desktop_mcp_server(
     desktop_config_path: &std::path::Path,
     binary_path: &str,
 ) -> anyhow::Result<()> {
+    let home = dirs::home_dir().context("cannot determine home directory")?;
+    register_claude_desktop_mcp_server_with_home(desktop_config_path, binary_path, &home)
+}
+
+fn register_claude_desktop_mcp_server_with_home(
+    desktop_config_path: &std::path::Path,
+    binary_path: &str,
+    home_dir: &std::path::Path,
+) -> anyhow::Result<()> {
     if let Some(parent) = desktop_config_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
@@ -554,12 +564,15 @@ pub fn register_claude_desktop_mcp_server(
         config["mcpServers"] = json!({});
     }
 
+    let desktop_binary_path =
+        desktop_binary_for_registration(std::path::Path::new(binary_path), home_dir)?;
+    let desktop_binary_path_str = desktop_binary_path.display().to_string();
     let command_path = if cfg!(windows) {
         // Generate a wrapper script that sets CWD before launching symforge.
-        let wrapper_path = create_desktop_wrapper_windows(binary_path)?;
+        let wrapper_path = create_desktop_wrapper_windows(&desktop_binary_path_str)?;
         native_command_path(&wrapper_path)
     } else {
-        native_command_path(binary_path)
+        native_command_path(&desktop_binary_path_str)
     };
 
     config["mcpServers"]["symforge"] = json!({
@@ -575,6 +588,68 @@ pub fn register_claude_desktop_mcp_server(
     Ok(())
 }
 
+fn binary_path_for_registration(
+    binary_path: &std::path::Path,
+    home_dir: &std::path::Path,
+) -> anyhow::Result<PathBuf> {
+    if !path_is_inside(&std::env::temp_dir(), binary_path) {
+        return Ok(binary_path.to_path_buf());
+    }
+
+    let home_binary = home_dir
+        .join(".symforge")
+        .join("bin")
+        .join(if cfg!(windows) {
+            "symforge.exe"
+        } else {
+            "symforge"
+        });
+
+    if home_binary.exists() {
+        return Ok(home_binary);
+    }
+
+    anyhow::bail!(
+        "refusing to register MCP harnesses with temporary SymForge binary {}; \
+         run `npm install -g symforge` first so init can point clients at {}",
+        binary_path.display(),
+        home_binary.display()
+    )
+}
+
+fn desktop_binary_for_registration(
+    binary_path: &std::path::Path,
+    home_dir: &std::path::Path,
+) -> anyhow::Result<PathBuf> {
+    binary_path_for_registration(binary_path, home_dir)
+}
+
+fn path_is_inside(parent: &std::path::Path, child: &std::path::Path) -> bool {
+    let parent = comparable_path(parent);
+    let child = comparable_path(child);
+    let parent = parent.trim_end_matches(['\\', '/']);
+
+    child == parent || child.starts_with(&format!("{parent}\\"))
+}
+
+fn comparable_path(path: &std::path::Path) -> String {
+    let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(path)
+        }
+    });
+    let normalized = absolute.to_string_lossy().replace('/', "\\");
+    if cfg!(windows) {
+        normalized.to_ascii_lowercase()
+    } else {
+        normalized
+    }
+}
+
 /// Create a `.cmd` wrapper next to the symforge binary that sets CWD before launching it.
 ///
 /// Returns the absolute path to the wrapper script.
@@ -585,8 +660,12 @@ fn create_desktop_wrapper_windows(binary_path: &str) -> anyhow::Result<String> {
         .parent()
         .context("cannot determine parent directory of symforge binary")?;
     let wrapper_path = wrapper_dir.join("symforge-desktop.cmd");
+    let binary_name = bin_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("cannot determine symforge binary file name")?;
 
-    let script = "@echo off\r\ncd /d \"%USERPROFILE%\"\r\n\"%~dp0symforge.exe\" %*\r\n";
+    let script = format!("@echo off\r\ncd /d \"%USERPROFILE%\"\r\n\"%~dp0{binary_name}\" %*\r\n");
 
     std::fs::write(&wrapper_path, script)
         .with_context(|| format!("writing {}", wrapper_path.display()))?;
@@ -1688,6 +1767,134 @@ env = { EXISTING_FLAG = "keep" }
         assert!(
             block.contains(MECHANICAL_OVERRIDES_HEADING),
             "codex guidance should include the mechanical overrides block when requested: {block}"
+        );
+    }
+
+    #[test]
+    fn test_desktop_registration_uses_home_binary_when_current_binary_is_temporary() {
+        let home = tempfile::tempdir().unwrap();
+        let home_bin_dir = home.path().join(".symforge").join("bin");
+        std::fs::create_dir_all(&home_bin_dir).unwrap();
+        let home_binary = home_bin_dir.join(if cfg!(windows) {
+            "symforge.exe"
+        } else {
+            "symforge"
+        });
+        std::fs::write(&home_binary, "stable").unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let temp_binary = temp.path().join(if cfg!(windows) {
+            "symforge.exe"
+        } else {
+            "symforge"
+        });
+        std::fs::write(&temp_binary, "transient").unwrap();
+
+        let resolved = desktop_binary_for_registration(&temp_binary, home.path()).unwrap();
+        assert_eq!(
+            resolved, home_binary,
+            "desktop registration must not persist a temporary binary path"
+        );
+    }
+
+    #[test]
+    fn test_desktop_registration_rejects_temporary_binary_without_home_install() {
+        let home = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let temp_binary = temp.path().join(if cfg!(windows) {
+            "symforge.exe"
+        } else {
+            "symforge"
+        });
+        std::fs::write(&temp_binary, "transient").unwrap();
+
+        let error = desktop_binary_for_registration(&temp_binary, home.path()).unwrap_err();
+        assert!(
+            error.to_string().contains("temporary"),
+            "error should explain that desktop config cannot point at temp paths: {error}"
+        );
+    }
+
+    #[test]
+    fn test_codex_registration_uses_home_binary_when_current_binary_is_temporary() {
+        let home = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let home_bin_dir = home.path().join(".symforge").join("bin");
+        std::fs::create_dir_all(&home_bin_dir).unwrap();
+        let home_binary = home_bin_dir.join(if cfg!(windows) {
+            "symforge.exe"
+        } else {
+            "symforge"
+        });
+        std::fs::write(&home_binary, "stable").unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let temp_binary = temp.path().join(if cfg!(windows) {
+            "symforge.exe"
+        } else {
+            "symforge"
+        });
+        std::fs::write(&temp_binary, "transient").unwrap();
+
+        run_init_with_context(
+            InitClient::Codex,
+            home.path(),
+            working_dir.path(),
+            &temp_binary,
+        )
+        .unwrap();
+
+        let config_path = home.path().join(".codex").join("config.toml");
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            content.contains(&home_binary.display().to_string()),
+            "Codex config should point at durable global binary: {content}"
+        );
+        assert!(
+            !content.contains(&temp.path().display().to_string()),
+            "Codex config must not persist temporary binary path: {content}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_claude_desktop_registration_writes_durable_wrapper_for_temporary_binary() {
+        let home = tempfile::tempdir().unwrap();
+        let home_bin_dir = home.path().join(".symforge").join("bin");
+        std::fs::create_dir_all(&home_bin_dir).unwrap();
+        let home_binary = home_bin_dir.join("symforge.exe");
+        std::fs::write(&home_binary, "stable").unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let temp_binary = temp.path().join("symforge.exe");
+        std::fs::write(&temp_binary, "transient").unwrap();
+
+        let config_dir = tempfile::tempdir().unwrap();
+        let config_path = config_dir.path().join("claude_desktop_config.json");
+        register_claude_desktop_mcp_server_with_home(
+            &config_path,
+            &temp_binary.display().to_string(),
+            home.path(),
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let config: Value = serde_json::from_str(&content).unwrap();
+        let command = config["mcpServers"]["symforge"]["command"]
+            .as_str()
+            .unwrap();
+
+        assert!(
+            command.contains(".symforge"),
+            "Claude Desktop command should use durable home wrapper: {command}"
+        );
+        assert!(
+            !command.contains(&temp.path().display().to_string()),
+            "Claude Desktop command must not persist temporary wrapper path: {command}"
+        );
+        assert!(
+            home_bin_dir.join("symforge-desktop.cmd").exists(),
+            "durable wrapper should be created next to the home binary"
         );
     }
 

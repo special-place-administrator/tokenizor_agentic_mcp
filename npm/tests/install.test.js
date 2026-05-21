@@ -98,6 +98,7 @@ function createInstallerForTest({
   arch = "x64",
   pathMod = winPath,
   homedir = "C:\\Users\\tester",
+  tmpdir = "C:\\Users\\tester\\AppData\\Local\\Temp",
   exit,
 }) {
   const logs = [];
@@ -122,7 +123,7 @@ function createInstallerForTest({
   const installer = createInstaller({
     fs: fsOverrides,
     path: pathMod,
-    os: { homedir: () => homedir },
+    os: { homedir: () => homedir, tmpdir: () => tmpdir },
     process: processMock,
     console: consoleMock,
     packageJson: { version: packageVersion },
@@ -729,4 +730,138 @@ test("installer skips auto-init when no home-scoped clients are detected", async
   assert.equal(initCalls.length, 0);
   assert.match(logs.join("\n"), /Auto-configuring skipped: no home-scoped clients detected/);
   assert.match(logs.join("\n"), /Kilo Code is workspace-local/);
+});
+
+test("installer skips auto-init when SYMFORGE_HOME points at a temp directory", async () => {
+  const homedir = "C:\\Users\\tester";
+  const tmpdir = winPath.join(homedir, "AppData", "Local", "Temp");
+  const symforgeHome = winPath.join(tmpdir, "symforge-npx-home-123");
+  const installDir = winPath.join(symforgeHome, "bin");
+  const binPath = winPath.join(installDir, "symforge.exe");
+  const pendingPath = winPath.join(installDir, "symforge.pending.exe");
+  const versionPath = winPath.join(installDir, "symforge.version");
+  const pendingVersionPath = winPath.join(installDir, "symforge.pending.version");
+  const fsOverrides = createFs({
+    binPath,
+    pendingPath,
+    versionPath,
+    pendingVersionPath,
+    installDir,
+    hasBinary: false,
+    existingPaths: [
+      winPath.join(homedir, ".claude"),
+      winPath.join(homedir, ".codex"),
+      winPath.join(homedir, ".gemini"),
+    ],
+  });
+  const execCalls = [];
+  const { installer, logs } = createInstallerForTest({
+    fsOverrides,
+    installDir,
+    env: { SYMFORGE_HOME: symforgeHome },
+    homedir,
+    tmpdir,
+    execFileSync(command, args) {
+      execCalls.push({ command, args });
+      return "";
+    },
+  });
+
+  await installer.main();
+
+  const initCalls = execCalls.filter((call) => call.args && call.args.includes("init"));
+  assert.equal(initCalls.length, 0);
+  assert.equal(
+    fsOverrides.writes.some((entry) => entry.target === binPath && entry.data === "new-binary"),
+    true
+  );
+  assert.match(logs.join("\n"), /Auto-configuring skipped: SYMFORGE_HOME points to a temporary directory/);
+});
+
+test("installer auto-inits when SYMFORGE_HOME points at a durable directory", async () => {
+  const homedir = "C:\\Users\\tester";
+  const symforgeHome = "D:\\tools\\symforge";
+  const installDir = winPath.join(symforgeHome, "bin");
+  const binPath = winPath.join(installDir, "symforge.exe");
+  const pendingPath = winPath.join(installDir, "symforge.pending.exe");
+  const versionPath = winPath.join(installDir, "symforge.version");
+  const pendingVersionPath = winPath.join(installDir, "symforge.pending.version");
+  const fsOverrides = createFs({
+    binPath,
+    pendingPath,
+    versionPath,
+    pendingVersionPath,
+    installDir,
+    hasBinary: false,
+    existingPaths: [
+      winPath.join(homedir, ".claude"),
+      winPath.join(homedir, ".codex"),
+      winPath.join(homedir, ".gemini"),
+    ],
+  });
+  const execCalls = [];
+  const { installer } = createInstallerForTest({
+    fsOverrides,
+    installDir,
+    env: { SYMFORGE_HOME: symforgeHome },
+    homedir,
+    execFileSync(command, args, options) {
+      execCalls.push({ command, args, options });
+      return "";
+    },
+  });
+
+  await installer.main();
+
+  const initCalls = execCalls.filter((call) => call.args && call.args.includes("init"));
+  assert.equal(initCalls.length, 3);
+  assert.deepEqual(
+    initCalls.map((call) => call.args.slice(-1)[0]).sort(),
+    ["claude", "codex", "gemini"]
+  );
+  assert.equal(initCalls.every((call) => call.command === binPath), true);
+});
+
+test("installer auto-inits all detected durable global harnesses", async () => {
+  const homedir = "C:\\Users\\tester";
+  const appdata = winPath.join(homedir, "AppData", "Roaming");
+  const installDir = winPath.join(homedir, ".symforge", "bin");
+  const binPath = winPath.join(installDir, "symforge.exe");
+  const pendingPath = winPath.join(installDir, "symforge.pending.exe");
+  const versionPath = winPath.join(installDir, "symforge.version");
+  const pendingVersionPath = winPath.join(installDir, "symforge.pending.version");
+  const fsOverrides = createFs({
+    binPath,
+    pendingPath,
+    versionPath,
+    pendingVersionPath,
+    installDir,
+    hasBinary: false,
+    existingPaths: [
+      winPath.join(homedir, ".claude"),
+      winPath.join(homedir, ".codex"),
+      winPath.join(homedir, ".gemini"),
+      winPath.join(appdata, "Claude"),
+    ],
+  });
+  const execCalls = [];
+  const { installer } = createInstallerForTest({
+    fsOverrides,
+    installDir,
+    env: { APPDATA: appdata },
+    homedir,
+    execFileSync(command, args, options) {
+      execCalls.push({ command, args, options });
+      return "";
+    },
+  });
+
+  await installer.main();
+
+  const initCalls = execCalls.filter((call) => call.args && call.args.includes("init"));
+  assert.deepEqual(
+    initCalls.map((call) => call.args.slice(-1)[0]).sort(),
+    ["claude", "claude-desktop", "codex", "gemini"]
+  );
+  assert.equal(initCalls.every((call) => call.command === binPath), true);
 });
