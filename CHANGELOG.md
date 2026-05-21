@@ -1,5 +1,23 @@
 # Changelog
 
+## [7.13.0](https://github.com/special-place-administrator/symforge/compare/v7.12.0...v7.13.0) (2026-05-21)
+
+
+### Features
+
+* add CI YAML repository intelligence facts ([ee418eb](https://github.com/special-place-administrator/symforge/commit/ee418ebb0358555a32d7680d2779f6584859c80f))
+* add edit tool result statuses ([ba1455f](https://github.com/special-place-administrator/symforge/commit/ba1455f3f40170d7cf9b196b0dee55795ef49290))
+* **analytics:** add bounded tool call queue ([6bdde6a](https://github.com/special-place-administrator/symforge/commit/6bdde6a95b69528bfc1648c694ed7c8cebd1a99c))
+* **analytics:** add CLI status summary export reset ([f968214](https://github.com/special-place-administrator/symforge/commit/f968214e91abb6c1e8a6b0b4c8822a588a90b75f))
+* **analytics:** add local sqlite store foundation ([f8ffa36](https://github.com/special-place-administrator/symforge/commit/f8ffa362decad02a95340333953202ab7db6a1a2))
+* surface sidecar status in health ([03bf46f](https://github.com/special-place-administrator/symforge/commit/03bf46fa2515821a040e985dbba16583e923e5c1))
+
+
+### Bug Fixes
+
+* classify obsidian internals as personal tooling ([2a4577a](https://github.com/special-place-administrator/symforge/commit/2a4577a39a76c38e33889519d689dd458d3a837c))
+* preserve same-line docs in replace_symbol_body ([691e0a7](https://github.com/special-place-administrator/symforge/commit/691e0a713035309d910b78b3cdf2d540112a4d37))
+
 ## [7.12.0](https://github.com/special-place-administrator/symforge/compare/v7.11.1...v7.12.0) (2026-05-19)
 
 
