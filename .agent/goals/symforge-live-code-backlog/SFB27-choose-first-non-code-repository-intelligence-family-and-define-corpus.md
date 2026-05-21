@@ -3,15 +3,15 @@ goal_id: SFB27
 title: Choose first non-code repository intelligence family and define corpus
 chain_id: symforge-live-code-backlog
 phase: Phase 5 - non-code repository intelligence
-status: "Pending"
+status: "Completed"
 depends_on: []
 target_branch: "backlog-implementation"
 prohibited_branches: ["main", "master"]
 worktree_hint: ".worktrees/backlog-implementation"
 created_at: "2026-05-19"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-22T00:03:42.5326534+02:00"
+completed_at: "2026-05-22T00:12:07.6302490+02:00"
+completion_commit: "64389d8efc73d8a37e67f1c241d11663a7ff00a6"
 blocked_reason: ""
 gate: "decision-gated"
 risk_level: "medium"
@@ -196,4 +196,3 @@ Known gaps / blockers:
 - <none or explicit blocker with reason>
 Next goal:
 - SFB28 - Implement first non-code repository intelligence family through existing surfaces
-
