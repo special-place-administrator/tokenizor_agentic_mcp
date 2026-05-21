@@ -1,0 +1,126 @@
+name: Matrix Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to rebuild
+        required: false
+        type: string
+
+permissions:
+  actions: write
+  contents: write
+  id-token: write
+
+jobs:
+  matrix_release:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rust: "1.94.0"
+            target: x86_64-unknown-linux-gnu
+            artifact: symforge-linux-x64
+          - os: windows-latest
+            rust: "1.94.0"
+            target: x86_64-pc-windows-msvc
+            artifact: symforge-windows-x64.exe
+          - os: macos-latest
+            rust: "1.94.0"
+            target: aarch64-apple-darwin
+            artifact: symforge-macos-arm64
+          - os: macos-latest
+            rust: "1.94.0"
+            target: x86_64-apple-darwin
+            artifact: symforge-macos-x64
+          - os: ubuntu-latest
+            rust: stable
+            target: x86_64-unknown-linux-musl
+            artifact: symforge-linux-musl
+          - os: ubuntu-latest
+            rust: beta
+            target: x86_64-unknown-linux-gnu
+            artifact: symforge-linux-beta
+          - os: ubuntu-latest
+            rust: nightly
+            target: x86_64-unknown-linux-gnu
+            artifact: symforge-linux-nightly
+          - os: windows-latest
+            rust: stable
+            target: x86_64-pc-windows-msvc
+            artifact: symforge-windows-stable.exe
+          - os: macos-latest
+            rust: stable
+            target: aarch64-apple-darwin
+            artifact: symforge-macos-stable-arm64
+          - os: macos-latest
+            rust: stable
+            target: x86_64-apple-darwin
+            artifact: symforge-macos-stable-x64
+          - os: ubuntu-latest
+            rust: "1.94.0"
+            target: aarch64-unknown-linux-gnu
+            artifact: symforge-linux-arm64
+          - os: ubuntu-latest
+            rust: "1.94.0"
+            target: armv7-unknown-linux-gnueabihf
+            artifact: symforge-linux-armv7
+          - os: ubuntu-latest
+            rust: "1.94.0"
+            target: x86_64-unknown-freebsd
+            artifact: symforge-freebsd-x64
+          - os: ubuntu-latest
+            rust: "1.94.0"
+            target: riscv64gc-unknown-linux-gnu
+            artifact: symforge-linux-riscv64
+          - os: ubuntu-latest
+            rust: "1.94.0"
+            target: powerpc64le-unknown-linux-gnu
+            artifact: symforge-linux-ppc64le
+          - os: ubuntu-latest
+            rust: "1.94.0"
+            target: s390x-unknown-linux-gnu
+            artifact: symforge-linux-s390x
+          - os: windows-latest
+            rust: "1.94.0"
+            target: i686-pc-windows-msvc
+            artifact: symforge-windows-x86.exe
+          - os: macos-latest
+            rust: "1.94.0"
+            target: aarch64-apple-ios
+            artifact: symforge-ios-arm64
+          - os: macos-latest
+            rust: "1.94.0"
+            target: x86_64-apple-ios
+            artifact: symforge-ios-simulator-x64
+          - os: ubuntu-latest
+            rust: "1.94.0"
+            target: wasm32-wasip1
+            artifact: symforge-wasi
+          - os: ubuntu-latest
+            rust: "1.94.0"
+            target: wasm32-unknown-unknown
+            artifact: symforge-wasm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          targets: ${{ matrix.target }}
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Rename artifact
+        shell: bash
+        run: cp "target/${{ matrix.target }}/release/symforge" "${{ matrix.artifact }}"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error

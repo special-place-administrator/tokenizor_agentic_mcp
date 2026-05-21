@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - backlog-implementation
+  pull_request:
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_TERM_COLOR: always
+
+jobs:
+  conventional_commits:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate pushed commit subjects
+        if: github.event_name == 'push'
+        run: python execution/conventional_commits.py check-push-range "${{ github.event.before }}" "$GITHUB_SHA"
+
+  rust:
+    needs: conventional_commits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.0"
+      - name: Run cargo check
+        run: cargo check
+      - name: Run Rust tests
+        run: cargo test --all-targets -- --test-threads=1
+
+  npm:
+    needs: conventional_commits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Test npm package
+        working-directory: npm
+        run: npm test

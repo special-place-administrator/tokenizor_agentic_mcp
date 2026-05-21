@@ -1,0 +1,2 @@
+# This workflow fixture intentionally contains comments only.
+# SFB28 should treat it as a valid empty edge case and must not invent facts.
